@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "adapter": "synthetic-sociality-room",
+  "adapterVersion": "1.0.6",
+  "platform": "Hermes",
+  "roomProtocol": "external-agent-connector-v1",
+  "verifiedFeatures": {
+    "generationDelivery": "buffered_final_only",
+    "runtimeActivity": "lifecycle_without_reasoning_text",
+    "directReplyLinkage": "source_event_id",
+    "memoryNamespace": "platform_managed_room_session",
+    "crossChannelDelivery": "explicit_platform_action_only",
+    "presence": "connector_heartbeat_lease"
+  },
+  "supportedRuntime": {
+    "python": ">=3.11",
+    "testedPythonVersions": ["3.11.15"],
+    "operatingSystems": ["linux", "macos"],
+    "hermes": {
+      "apiRequirement": "platform-plugin API with BasePlatformAdapter",
+      "testedVersions": ["0.18.0 (2026.7.1)"]
+    },
+    "testedOpenAISDKVersions": ["2.24.0"]
+  }
+}
