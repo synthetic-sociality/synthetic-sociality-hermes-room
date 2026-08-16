@@ -6,12 +6,16 @@ import json
 import os
 import secrets
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator, TypeVar
+
+import fcntl
 
 
 STATE_VERSION = 1
+T = TypeVar("T")
 
 
 def state_root() -> Path:
@@ -35,15 +39,34 @@ class RoomBinding:
     identity_version: int = 0
     installation_id: str = ""
     connector_session_id: str = ""
+    # Message payload support is discovered with the public read-only status
+    # endpoint before this binding performs a connector write. It is scoped to
+    # the binding because one Hermes process may serve old and new servers.
+    message_payload_dialect: str = "v1"
+    message_payload_capabilities: list[str] = field(default_factory=list)
     cursor: int = 0
     acknowledged_cursor: int = 0
-    # Durable receive ledger. A sequence is acknowledged only after Hermes
-    # has completed processing (or the event was intentionally ignored).
+    # Durable receive ledger. A sequence is acknowledged only after explicit
+    # posted/skipped/cancelled/superseded/ignored terminal evidence.
     inbox: dict[str, str] = field(default_factory=dict)
     # Unix timestamps for pending receive-ledger entries.  This lets a
-    # crashed or permanently blocked model turn expire without pinning the
-    # canonical acknowledgement cursor forever.
+    # crashed or blocked model turn become retryable without pretending that
+    # it reached a terminal delivery boundary.
     pending_since: dict[str, float] = field(default_factory=dict)
+    # Bounded retry counters for pending receive-ledger entries. Exhaustion is
+    # represented by the non-terminal ``quarantined`` inbox state, which keeps
+    # the canonical acknowledgement cursor fail-closed for operator review.
+    pending_retries: dict[str, int] = field(default_factory=dict)
+    # Durable proof for every terminal inbox state. Keys are canonical source
+    # sequences; posted evidence also carries the confirmed canonical event
+    # ID. This is deliberately separate from Hermes' model/runtime outcome.
+    terminal_evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Audited recovery fence (operator-set). When > 0, canonical sequences in
+    # (acknowledged_cursor, recovery_fence_cutoff] are marked terminally
+    # `ignored` (reason `recovery_fence`) through the normal connector ack
+    # path on consumption — never via a direct cursor write. This is the
+    # authorized audited-skip mechanism for a stale backlog. 0 = no fence.
+    recovery_fence_cutoff: int = 0
     # Exact observedSeq used for an accepted idempotent turn request. Persist
     # before every attempt so crash replay reproduces the server request hash.
     turn_observed: dict[str, int] = field(default_factory=dict)
@@ -55,6 +78,20 @@ class RoomBinding:
     # server's accepted idempotency request rather than use a newer room head
     # or regenerated model output.
     delivery_intents: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Durable ownership of model work by the server-issued attempt identity.
+    # Different canonical source events may describe the same attempt; only
+    # the recorded source is allowed to dispatch it to Hermes.
+    cycle_attempt_owners: dict[str, str] = field(default_factory=dict)
+    # Secret-free forensic receipts for explicitly recovered delivery intents
+    # whose canonical source was already acknowledged and whose server-owned
+    # discussion cycle had terminally accepted a pass with zero bytes. The
+    # frozen response body is never copied here; only its SHA-256 is retained.
+    abandoned_delivery_intents: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Crash-safe credential-renewal journal. It is profile-private state and
+    # deliberately contains the exact grant, replacement, and previous
+    # credential material needed to resume an ambiguous redeem/swap/confirm
+    # boundary. The CLI mutates it only under the same 0600 atomic state lock.
+    credential_rotation: dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
     revoked: bool = False
     transport: str = "long_poll"
@@ -65,7 +102,10 @@ class RoomBinding:
         normalized = {key: value[key] for key in allowed if key in value}
         if "acknowledged_cursor" not in normalized:
             normalized["acknowledged_cursor"] = int(normalized.get("cursor") or 0)
-        return cls(**normalized)
+        binding = cls(**normalized)
+        if binding.message_payload_dialect not in {"v1", "v2"}:
+            raise ValueError("unsupported Room message payload dialect")
+        return binding
 
 
 @dataclass
@@ -110,6 +150,13 @@ def save(state: PluginState, path: Path | None = None) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, target)
         os.chmod(target, 0o600)
+        # fsyncing the temporary file protects its contents; fsyncing the
+        # directory makes the atomic rename durable across a host crash.
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except Exception:
         try:
             os.close(fd)
@@ -120,6 +167,37 @@ def save(state: PluginState, path: Path | None = None) -> None:
         except OSError:
             pass
         raise
+
+
+@contextmanager
+def _exclusive_state_lock(path: Path | None = None) -> Iterator[Path]:
+    """Serialize a complete load/mutate/save transaction across processes."""
+    target = path or state_path()
+    if target.is_symlink() or target.parent.is_symlink():
+        raise ValueError("refusing to lock Synthetic Sociality state through a symlink")
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(target.parent, 0o700)
+    lock_path = target.parent / ".state.lock"
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield target
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def update(mutator: Callable[[PluginState], T], path: Path | None = None) -> T:
+    """Apply one state mutation without a cross-process lost-update window."""
+    with _exclusive_state_lock(path) as target:
+        current = load(target)
+        result = mutator(current)
+        save(current, target)
+        return result
 
 
 def upsert(state: PluginState, binding: RoomBinding) -> None:

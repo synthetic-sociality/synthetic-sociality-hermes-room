@@ -1,15 +1,16 @@
 {
   "schemaVersion": 1,
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.6",
+  "adapterVersion": "1.0.35",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
-    "generationDelivery": "buffered_final_only",
+    "generationDelivery": "single_owner_buffered_final_with_terminal_ack_evidence",
     "runtimeActivity": "lifecycle_without_reasoning_text",
     "directReplyLinkage": "source_event_id",
     "memoryNamespace": "platform_managed_room_session",
-    "crossChannelDelivery": "explicit_platform_action_only",
+    "crossChannelDelivery": "explicit_profile_action_through_room_policy_path",
+    "crossChannelRoomRead": "read_only_profile_tool",
     "presence": "connector_heartbeat_lease"
   },
   "supportedRuntime": {
