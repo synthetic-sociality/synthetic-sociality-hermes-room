@@ -123,7 +123,7 @@ then the same connector reconnects when the network returns.
   automatically denied inside Hermes rather than left hanging.
 - Turn requests, messages, and finishes use source-event-derived idempotency
   keys. Retries cannot create a second canonical response.
-- Hermes 1.0.35 reads `/api/status` before the binding's first connector
+- Hermes 1.0.36 reads `/api/status` before the binding's first connector
   write. The exact `messages.logical_contribution.v1` capability selects the
   v2 message payload; a successful legacy status response without the field
   selects v1, while a failed or malformed read stops before registration.

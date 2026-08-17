@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import tempfile
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
@@ -16,6 +18,19 @@ import fcntl
 
 STATE_VERSION = 1
 T = TypeVar("T")
+
+
+def _valid_canonical_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+        value,
+    ):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def state_root() -> Path:
@@ -78,6 +93,11 @@ class RoomBinding:
     # server's accepted idempotency request rather than use a newer room head
     # or regenerated model output.
     delivery_intents: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Canonical delivery receipts and unfinished post-delivery lifecycle work.
+    # This journal is intentionally separate: terminal source acknowledgement
+    # may remove the frozen delivery intent while cycle/turn completion remains
+    # safely retryable without another post or model invocation.
+    delivery_lifecycle: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Durable ownership of model work by the server-issued attempt identity.
     # Different canonical source events may describe the same attempt; only
     # the recorded source is allowed to dispatch it to Hermes.
@@ -105,6 +125,101 @@ class RoomBinding:
         binding = cls(**normalized)
         if binding.message_payload_dialect not in {"v1", "v2"}:
             raise ValueError("unsupported Room message payload dialect")
+        if not isinstance(binding.delivery_lifecycle, dict):
+            raise ValueError("Room delivery lifecycle journal must be an object")
+        for source_id, record in binding.delivery_lifecycle.items():
+            if not isinstance(source_id, str) or not source_id or not isinstance(record, dict):
+                raise ValueError("Room delivery lifecycle journal entry is invalid")
+            receipt = record.get("receipt")
+            completion = record.get("completion")
+            lifecycle_state = record.get("lifecycle_state")
+            attempts = record.get("attempts")
+            expected_binding = {
+                "membership_id": binding.membership_id,
+                "installation_id": binding.installation_id,
+                "identity_version": binding.identity_version,
+            }
+            if (
+                record.get("delivery_state") != "posted"
+                or lifecycle_state not in {"pending", "blocked", "not_required"}
+                or not isinstance(receipt, dict)
+                or not isinstance(receipt.get("source_event_id"), str)
+                or receipt.get("source_event_id") != source_id
+                or type(receipt.get("source_seq")) is not int
+                or receipt["source_seq"] <= 0
+                or not isinstance(receipt.get("canonical_event_id"), str)
+                or not receipt["canonical_event_id"]
+                or type(receipt.get("canonical_seq")) is not int
+                or receipt["canonical_seq"] <= 0
+                or not _valid_canonical_timestamp(receipt.get("canonical_ts"))
+                or not isinstance(completion, dict)
+                or not isinstance(attempts, int)
+                or isinstance(attempts, bool)
+                or attempts < 0
+                or attempts > 3
+                or record.get("binding") != expected_binding
+            ):
+                raise ValueError("Room delivery lifecycle evidence is invalid")
+            expected_state = {
+                "pending": "lifecycle_pending",
+                "blocked": "lifecycle_blocked",
+                "not_required": "posted",
+            }[lifecycle_state]
+            expected_automatic_retry = lifecycle_state == "pending"
+            if record.get("state") != expected_state:
+                raise ValueError("Room lifecycle state label is inconsistent")
+            if record.get("automatic_retry") is not expected_automatic_retry:
+                raise ValueError("Room lifecycle automatic-retry state is inconsistent")
+            if lifecycle_state == "not_required":
+                if completion:
+                    raise ValueError("Room lifecycle marked not-required has a completion request")
+                continue
+            kind = completion.get("kind")
+            canonical_event_id = receipt["canonical_event_id"]
+            if kind == "cycle":
+                payload = completion.get("payload")
+                if (
+                    not isinstance(completion.get("cycle_id"), str)
+                    or not completion["cycle_id"]
+                    or not isinstance(completion.get("attempt_id"), str)
+                    or not completion["attempt_id"]
+                    or not isinstance(payload, dict)
+                    or type(payload.get("generation")) is not int
+                    or payload["generation"] < 0
+                    or payload.get("action") != "contribute"
+                    or not isinstance(payload.get("eventId"), str)
+                    or payload["eventId"] != canonical_event_id
+                ):
+                    raise ValueError("Room cycle lifecycle completion is invalid")
+            elif kind == "turn":
+                if (
+                    not isinstance(completion.get("turn_id"), str)
+                    or not completion["turn_id"]
+                    or type(completion.get("observed_seq")) is not int
+                    or completion["observed_seq"] <= 0
+                    or not isinstance(completion.get("source_event_id"), str)
+                    or completion["source_event_id"] != source_id
+                    or not isinstance(completion.get("idempotency_key"), str)
+                    or not completion["idempotency_key"]
+                ):
+                    raise ValueError("Room turn lifecycle completion is invalid")
+            else:
+                raise ValueError("Room lifecycle completion kind is invalid")
+        for source_id, intent in binding.delivery_intents.items():
+            if not isinstance(source_id, str) or not source_id or not isinstance(intent, dict):
+                raise ValueError("Room delivery intent is invalid")
+            if intent.get("delivery_state") != "posted":
+                continue
+            canonical = intent.get("canonical_event")
+            if (
+                not isinstance(canonical, dict)
+                or not isinstance(canonical.get("id"), str)
+                or not canonical["id"]
+                or type(canonical.get("seq")) is not int
+                or canonical["seq"] <= 0
+                or not _valid_canonical_timestamp(canonical.get("ts"))
+            ):
+                raise ValueError("posted Room delivery intent requires a complete canonical receipt")
         return binding
 
 

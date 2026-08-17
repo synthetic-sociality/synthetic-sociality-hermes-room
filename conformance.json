@@ -1,17 +1,40 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
+  "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.35",
+  "adapterVersion": "1.0.36",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
     "generationDelivery": "single_owner_buffered_final_with_terminal_ack_evidence",
-    "runtimeActivity": "lifecycle_without_reasoning_text",
+    "deliveryBoundary": "durable_authenticated_canonical_receipt",
+    "lifecycleRecovery": "separate_durable_journal_without_model_or_repost",
+    "runtimeActivity": "best_effort_noncanonical",
     "directReplyLinkage": "source_event_id",
     "memoryNamespace": "platform_managed_room_session",
     "crossChannelDelivery": "explicit_profile_action_through_room_policy_path",
     "crossChannelRoomRead": "read_only_profile_tool",
     "presence": "connector_heartbeat_lease"
+  },
+  "fixtures": {
+    "DLV1-01": "test_selection_persistence_failure_prevents_post",
+    "DLV1-02": "test_retryable_post_failure_before_receipt_remains_delivery_pending",
+    "DLV1-03": "test_canonical_receipt_is_delivery_success_before_cycle_completion",
+    "DLV1-04": "test_restart_repairs_only_persisted_lifecycle_and_durably_cleans_journal",
+    "DLV1-05": "test_legacy_complete_receipt_promotes_without_repost_and_runs_lifecycle_only",
+    "DLV1-06": "test_posted_receipt_gap_rejects_ack_beyond_locally_proven_frontier",
+    "DLV1-07": "test_nonretryable_post_failure_is_quarantined_and_cannot_repost",
+    "DLV1-08": "test_repair_blocks_exhausted_and_nonretryable_lifecycle_work"
+  },
+  "receiptBoundaryFixtures": {
+    "invalid_or_incomplete_receipt": "test_canonical_delivery_rejects_malformed_receipts_without_state_change",
+    "receipt_persistence_failure": "test_canonical_receipt_persist_failure_rolls_back_posted_state",
+    "receipt_persistence_exception": "test_canonical_receipt_persist_exception_rolls_back_posted_state",
+    "post_receipt_persistence_exception": "test_post_receipt_persistence_exception_cannot_escape_as_delivery_failure",
+    "lifecycle_result_persistence_failure": "test_lifecycle_result_persistence_failure_rolls_back_and_raises",
+    "posted_requires_complete_receipt_on_load": "test_posted_state_requires_complete_receipt_before_restart",
+    "full_receipt_ack_frontier": "test_posted_receipt_closes_gap_and_acknowledges_contiguous_tail"
   },
   "supportedRuntime": {
     "python": ">=3.11",

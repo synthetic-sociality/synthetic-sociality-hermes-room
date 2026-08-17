@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import json
 import logging
@@ -51,6 +52,19 @@ PENDING_EVENT_TTL_SECONDS = 180.0
 PENDING_EVENT_MAX_RETRIES = 2
 TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "cancelled", "superseded", "ignored"})
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
+
+
+def _valid_canonical_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+        value,
+    ):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def _with_idempotency_key(api: Any, key: str) -> Any:
@@ -597,6 +611,190 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             }
         return None
 
+    @classmethod
+    def _activate_legacy_canonical_receipt(
+        cls,
+        binding: RoomBinding,
+        source_id: str,
+        seq: int,
+    ) -> bool:
+        """Promote only a complete legacy receipt tied to the active binding.
+
+        The canonical event ID, positive sequence, and timestamp prove that
+        delivery is already complete. Promotion therefore enables lifecycle-only
+        recovery and can never reopen message submission. Incomplete, malformed,
+        foreign, or already migrated state remains untouched.
+        """
+        key = str(seq)
+        intent = binding.delivery_intents.get(source_id) or {}
+        selected = intent.get("selected")
+        post = intent.get("post")
+        canonical = intent.get("canonical_event")
+        expected_binding = cls._intent_binding(binding)
+        canonical_seq = canonical.get("seq") if isinstance(canonical, dict) else None
+        cycle = post.get("cycle") if isinstance(post, dict) else None
+        has_cycle = (
+            isinstance(cycle, dict)
+            and isinstance(cycle.get("cycle_id"), str) and bool(cycle["cycle_id"])
+            and isinstance(cycle.get("attempt_id"), str) and bool(cycle["attempt_id"])
+            and type(cycle.get("generation")) is int and cycle["generation"] >= 0
+        )
+        has_turn = (
+            isinstance(post, dict)
+            and isinstance(post.get("turn_id"), str)
+            and bool(post["turn_id"])
+        )
+        exact = (
+            type(seq) is int and seq > 0
+            and seq > binding.acknowledged_cursor
+            and isinstance(selected, dict)
+            and selected.get("action") == "post"
+            and selected.get("source_event_id") == source_id
+            and type(selected.get("source_seq")) is int
+            and selected["source_seq"] == seq
+            and isinstance(selected.get("body"), str)
+            and bool(selected["body"])
+            and selected.get("binding") == expected_binding
+            and isinstance(post, dict)
+            and post.get("body") == selected.get("body")
+            and post.get("binding") == expected_binding
+            and isinstance(canonical, dict)
+            and isinstance(canonical.get("id"), str)
+            and bool(canonical["id"])
+            and type(canonical_seq) is int
+            and canonical_seq > 0
+            and _valid_canonical_timestamp(canonical.get("ts"))
+            and "delivery_state" not in intent
+            and not intent.get("migration")
+            and not (has_cycle and has_turn)
+        )
+        if not exact:
+            return False
+        completion_pending = has_cycle or has_turn
+        completion: dict[str, Any] | None = None
+        if has_cycle:
+            completion = {
+                "kind": "cycle",
+                "cycle_id": str(cycle["cycle_id"]),
+                "attempt_id": str(cycle["attempt_id"]),
+                "payload": {
+                    "generation": int(cycle["generation"]),
+                    "action": "contribute",
+                    "eventId": str(canonical["id"]),
+                },
+            }
+        elif has_turn:
+            completion = {
+                "kind": "turn",
+                "turn_id": str(post["turn_id"]),
+                "observed_seq": canonical_seq,
+                "source_event_id": source_id,
+                "idempotency_key": str(
+                    selected.get("finish_idempotency_key")
+                    or stable_key("finish", source_id, room_id=binding.room_id, membership_id=binding.membership_id)
+                ),
+            }
+        intent["delivery_state"] = "posted"
+        intent["lifecycle_state"] = "pending" if completion_pending else "not_required"
+        intent["state"] = "lifecycle_pending" if completion_pending else "posted"
+        intent["migration"] = "legacy-complete-canonical-receipt"
+        binding.delivery_lifecycle[source_id] = {
+            "state": "lifecycle_pending" if completion_pending else "posted",
+            "delivery_state": "posted",
+            "lifecycle_state": "pending" if completion_pending else "not_required",
+            "receipt": {
+                "source_event_id": source_id,
+                "source_seq": seq,
+                "canonical_event_id": canonical["id"],
+                "canonical_seq": canonical_seq,
+                "canonical_ts": canonical["ts"],
+            },
+            "completion": copy.deepcopy(completion or {}),
+            "attempts": 0,
+            "automatic_retry": completion_pending,
+            "binding": expected_binding,
+        }
+        binding.inbox[key] = "pending"
+        binding.pending_since[key] = time.time()
+        binding.pending_retries[key] = 0
+        return True
+
+    @classmethod
+    def _activate_legacy_post_commit_recovery(
+        cls,
+        binding: RoomBinding,
+        source_id: str,
+        seq: int,
+    ) -> bool:
+        """Recognise only the proven 1.0.35 post-commit quarantine signature.
+
+        The legacy state lacks a canonical event receipt, so it cannot be
+        relabelled ``posted`` locally. It is instead reopened for one exact,
+        idempotent replay of the frozen post; the server response reconstructs
+        the receipt without a model run. Every other quarantine remains closed.
+        """
+        key = str(seq)
+        intent = binding.delivery_intents.get(source_id) or {}
+        selected = intent.get("selected")
+        post = intent.get("post")
+        selected_cycle = dict((selected or {}).get("cycle") or {}) if isinstance(selected, dict) else {}
+        post_cycle = dict((post or {}).get("cycle") or {}) if isinstance(post, dict) else {}
+        expected_binding = cls._intent_binding(binding)
+        expected_message_key = stable_key(
+            "message", source_id, room_id=binding.room_id, membership_id=binding.membership_id,
+        )
+        cycle_attempt = {
+            "cycle": {
+                "id": str(post_cycle.get("cycle_id") or ""),
+                "generation": int(post_cycle.get("generation") or 0),
+            },
+            "attempt": {"id": str(post_cycle.get("attempt_id") or "")},
+        }
+        expected_owner_key = _cycle_attempt_owner_key(cycle_attempt, binding.membership_id)
+        exact = (
+            seq > binding.acknowledged_cursor
+            and binding.inbox.get(key) == "quarantined"
+            and key not in binding.terminal_evidence
+            and isinstance(selected, dict)
+            and selected.get("action") == "post"
+            and selected.get("source_event_id") == source_id
+            and int(selected.get("source_seq") or 0) == seq
+            and int(selected.get("observed_seq") or 0) == seq
+            and str(selected.get("body") or "") != ""
+            and selected.get("binding") == expected_binding
+            and str(selected.get("message_idempotency_key") or "") == expected_message_key
+            and isinstance(post, dict)
+            and str(post.get("body") or "") == str(selected.get("body") or "")
+            and int(post.get("observed_seq") or 0) == int(selected.get("observed_seq") or 0)
+            and post.get("binding") == expected_binding
+            and str(post.get("idempotency_key") or "") == expected_message_key
+            and bool(str(post_cycle.get("cycle_id") or ""))
+            and bool(str(post_cycle.get("attempt_id") or ""))
+            and post_cycle.get("cycle_id") == selected_cycle.get("cycle_id")
+            and post_cycle.get("attempt_id") == selected_cycle.get("attempt_id")
+            and int(post_cycle.get("generation") or 0) == int(selected_cycle.get("generation") or 0)
+            and binding.cycle_attempt_owners.get(expected_owner_key) == source_id
+            and intent.get("state") == "quarantined"
+            and "delivery_state" not in intent
+            and intent.get("last_error_code") == "cycle_conflict"
+            and not (intent.get("canonical_event") or {}).get("id")
+        )
+        if not exact:
+            return False
+        intent["legacy_post_commit_error"] = {
+            "code": str(intent.get("last_error_code") or ""),
+            "error": str(intent.get("last_error") or "")[:1000],
+            "failed_at": intent.get("failed_at"),
+        }
+        intent["delivery_state"] = "delivery_pending"
+        intent["lifecycle_state"] = "not_started"
+        intent["state"] = "delivery_pending"
+        intent["migration"] = "hermes-1.0.35-post-commit-cycle-conflict"
+        binding.inbox[key] = "pending"
+        binding.pending_since[key] = time.time()
+        binding.pending_retries[key] = 0
+        return True
+
     @staticmethod
     def _persisted_payload_dialect(value: dict[str, Any]) -> str:
         """Recover old frozen intent shapes without changing their request.
@@ -693,6 +891,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             "selected_at": time.time(),
         }
         intent["selected"] = selected
+        intent["delivery_state"] = "selected"
+        intent["lifecycle_state"] = "not_started"
+        intent["state"] = "selected"
         if selected["source_seq"]:
             binding.turn_sequences[source_id] = int(selected["source_seq"])
         if not self._persist_binding(binding):
@@ -702,6 +903,200 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 retryable=False,
             )
         return selected
+
+    def _record_canonical_delivery(
+        self,
+        binding: RoomBinding,
+        source_id: str,
+        event: dict[str, Any],
+        *,
+        completion: dict[str, Any] | None,
+    ) -> None:
+        """Persist the canonical delivery boundary before lifecycle finalisation."""
+        raw_event_id = event.get("id")
+        raw_sequence = event.get("seq")
+        raw_timestamp = event.get("ts")
+        if (
+            not isinstance(raw_event_id, str) or not raw_event_id
+            or type(raw_sequence) is not int or raw_sequence <= 0
+            or not _valid_canonical_timestamp(raw_timestamp)
+        ):
+            raise ValueError("canonical Room delivery requires event ID, sequence, and timestamp")
+        canonical_event_id = raw_event_id
+        canonical_seq = raw_sequence
+        canonical_ts = raw_timestamp
+        canonical_event = {
+            "id": canonical_event_id,
+            "seq": canonical_seq,
+            "ts": canonical_ts,
+        }
+        previous_intent = copy.deepcopy(binding.delivery_intents.get(source_id))
+        previous_journal = copy.deepcopy(binding.delivery_lifecycle.get(source_id))
+        intent = binding.delivery_intents.setdefault(source_id, {})
+        intent["delivery_state"] = "posted"
+        intent["canonical_event"] = canonical_event
+        intent["lifecycle_state"] = "pending" if completion else "not_required"
+        intent["state"] = "lifecycle_pending" if completion else "posted"
+        binding.delivery_lifecycle[source_id] = {
+            "state": "lifecycle_pending" if completion else "posted",
+            "delivery_state": "posted",
+            "lifecycle_state": "pending" if completion else "not_required",
+            "receipt": {
+                "source_event_id": source_id,
+                "source_seq": int((intent.get("selected") or {}).get("source_seq") or 0),
+                "canonical_event_id": canonical_event_id,
+                "canonical_seq": canonical_event["seq"],
+                "canonical_ts": canonical_event["ts"],
+            },
+            "completion": dict(completion or {}),
+            "attempts": 0,
+            "automatic_retry": bool(completion),
+            "binding": self._intent_binding(binding),
+        }
+        for key in ("last_error", "last_error_code", "failed_at"):
+            intent.pop(key, None)
+        def rollback() -> None:
+            if previous_intent is None:
+                binding.delivery_intents.pop(source_id, None)
+            else:
+                binding.delivery_intents[source_id] = previous_intent
+            if previous_journal is None:
+                binding.delivery_lifecycle.pop(source_id, None)
+            else:
+                binding.delivery_lifecycle[source_id] = previous_journal
+
+        try:
+            persisted = self._persist_binding(binding)
+        except Exception:
+            rollback()
+            raise
+        if not persisted:
+            rollback()
+            raise ProtocolError(
+                "Canonical Room receipt could not be persisted",
+                code="receipt_persist_failed",
+                retryable=True,
+            )
+
+    def _record_lifecycle_attempt(self, binding: RoomBinding, source_id: str) -> None:
+        journal = binding.delivery_lifecycle.get(source_id) or {}
+        if journal.get("delivery_state") != "posted":
+            raise ValueError("lifecycle attempt requires canonical delivery evidence")
+        attempts = int(journal.get("attempts") or 0) + 1
+        if attempts > 3:
+            raise ValueError("automatic lifecycle attempt budget exhausted")
+        journal["attempts"] = attempts
+        journal["last_attempt_at"] = time.time()
+        binding.delivery_lifecycle[source_id] = journal
+        if not self._persist_binding(binding):
+            raise ProtocolError("Room membership changed before lifecycle attempt", code="binding_changed", retryable=False)
+
+    def _record_lifecycle_complete(self, binding: RoomBinding, source_id: str) -> None:
+        previous_intents = copy.deepcopy(binding.delivery_intents)
+        previous_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
+        previous_owners = copy.deepcopy(binding.cycle_attempt_owners)
+        try:
+            intent = binding.delivery_intents.get(source_id) or {}
+            if intent.get("delivery_state") == "posted":
+                intent["lifecycle_state"] = "complete"
+                intent["state"] = "posted"
+                intent.pop("lifecycle_error", None)
+                intent.pop("lifecycle_error_code", None)
+                intent.pop("lifecycle_failed_at", None)
+            binding.delivery_lifecycle.pop(source_id, None)
+            if not self._persist_binding(binding):
+                raise ProtocolError(
+                    "Room lifecycle completion could not be persisted",
+                    code="lifecycle_persist_failed", retryable=True,
+                )
+        except Exception:
+            binding.delivery_intents = previous_intents
+            binding.delivery_lifecycle = previous_lifecycle
+            binding.cycle_attempt_owners = previous_owners
+            raise
+
+    def _record_lifecycle_pending(
+        self,
+        binding: RoomBinding,
+        source_id: str,
+        error: Exception,
+        error_code: str = "",
+    ) -> None:
+        previous_intents = copy.deepcopy(binding.delivery_intents)
+        previous_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
+        previous_owners = copy.deepcopy(binding.cycle_attempt_owners)
+        try:
+            intent = binding.delivery_intents.get(source_id) or {}
+            journal = binding.delivery_lifecycle.get(source_id) or {}
+            receipt = journal.get("receipt") or {}
+            if journal.get("delivery_state") != "posted" or not receipt.get("canonical_event_id"):
+                raise ValueError("lifecycle failure requires canonical delivery evidence")
+            if intent and intent.get("delivery_state") != "posted":
+                raise ValueError("lifecycle failure cannot downgrade an unposted delivery")
+            attempts = int(journal.get("attempts") or 0)
+            retryable = bool(getattr(error, "retryable", False))
+            automatic_retry = retryable and attempts < 3
+            lifecycle_state = "pending" if automatic_retry else "blocked"
+            state = "lifecycle_pending" if automatic_retry else "lifecycle_blocked"
+            intent["lifecycle_state"] = lifecycle_state
+            intent["state"] = state
+            intent["lifecycle_automatic_retry"] = automatic_retry
+            intent["lifecycle_error"] = str(error)[:1000]
+            intent["lifecycle_error_code"] = str(error_code or "")[:100]
+            intent["lifecycle_failed_at"] = time.time()
+            journal["state"] = state
+            journal["delivery_state"] = "posted"
+            journal["lifecycle_state"] = lifecycle_state
+            journal["automatic_retry"] = automatic_retry
+            journal["last_error"] = str(error)[:1000]
+            journal["last_error_code"] = str(error_code or "")[:100]
+            journal["failed_at"] = time.time()
+            binding.delivery_lifecycle[source_id] = journal
+            _release_cycle_attempt_owner(binding, source_id)
+            if not self._persist_binding(binding):
+                raise ProtocolError(
+                    "Room lifecycle debt could not be persisted",
+                    code="lifecycle_persist_failed", retryable=True,
+                )
+        except Exception:
+            binding.delivery_intents = previous_intents
+            binding.delivery_lifecycle = previous_lifecycle
+            binding.cycle_attempt_owners = previous_owners
+            raise
+
+    def _record_lifecycle_failure_after_receipt(
+        self,
+        binding: RoomBinding,
+        source_id: str,
+        error: Exception,
+        *,
+        error_code: str,
+    ) -> None:
+        """Best-effort lifecycle debt recording after durable delivery.
+
+        Storage can fail after the canonical receipt has already committed. That
+        failure may lose lifecycle retry metadata, but it can never turn the
+        visible delivery into a failed send or trigger a fallback/repost.
+        """
+        try:
+            self._record_lifecycle_pending(binding, source_id, error, error_code=error_code)
+        except Exception:
+            intent = binding.delivery_intents.get(source_id)
+            if isinstance(intent, dict):
+                intent["delivery_state"] = "posted"
+                intent.setdefault("canonical_event", {})
+                intent["lifecycle_state"] = "blocked"
+                intent["state"] = "lifecycle_blocked"
+                intent["lifecycle_automatic_retry"] = False
+            journal = binding.delivery_lifecycle.get(source_id)
+            if isinstance(journal, dict) and journal.get("delivery_state") == "posted":
+                journal["lifecycle_state"] = "blocked"
+                journal["state"] = "lifecycle_blocked"
+                journal["automatic_retry"] = False
+            logger.exception(
+                "Room %s could not persist lifecycle debt for already-posted source %s; delivery remains posted",
+                binding.room_id, source_id,
+            )
 
     async def _send_final_owned(self, chat_id: str, source_ref: str, content: str) -> SendResult:
         source_id, dispatch_generation = _decode_dispatch_source(source_ref)
@@ -757,8 +1152,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 terminal_status="skipped", reason="model_skip",
             )
         event: dict[str, Any] | None = None
+        canonical_recorded = False
         try:
             intent = binding.delivery_intents.get(source_id) or {}
+            if intent.get("delivery_state") == "quarantined" or intent.get("state") == "quarantined":
+                return SendResult(
+                    success=False,
+                    error="Room delivery is quarantined for operator recovery",
+                    retryable=False,
+                )
             persisted_post = intent.get("post")
             persisted_mode = str((persisted_post or {}).get("coordination_mode") or "") if isinstance(persisted_post, dict) else ""
             if persisted_mode:
@@ -766,49 +1168,93 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 coordination_mode = str(_policy_view(current_policy).get("coordinationMode") or "coordinated")
                 getattr(self, "_source_coordination_modes", {})[source_id] = coordination_mode
             if persisted_mode:
-                # A durable post is the submission owner after a restart. It
-                # is replayed before any new turn/cycle acquisition and before
-                # regenerated model output can influence the request.
-                try:
-                    event, _ = await self._post_with_fresh_context(
-                        binding, chat_id, "", observed, source_id, body, observed_epoch,
-                        None, responds_to_id, open_recipients,
-                        coordination_mode=persisted_mode,
-                    )
-                except ProtocolError as replay_error:
-                    mode_changed = persisted_mode != coordination_mode
-                    if not mode_changed or replay_error.code not in {
-                        "turn_required", "turns_not_used", "invalid_contribution",
-                        "cycle_superseded", "cycle_no_attempt",
-                    }:
-                        raise
-                    old_turn = str(persisted_post.get("turn_id") or "")
-                    if old_turn:
-                        try:
-                            await self._finish_with_fresh_context(
-                                binding, chat_id, old_turn,
-                                int(persisted_post.get("observed_seq") or observed), source_id,
-                            )
-                        except ProtocolError as finish_error:
-                            if finish_error.code not in {"turn_not_active", "turn_expired", "turns_not_used"}:
-                                raise
-                    intent["delivery_superseded"] = True
-                    self._persist_binding(binding)
-                    await self._stop_attempt_renewal(source_id)
-                    getattr(self, "_cycle_attempts", {}).pop(source_id, None)
-                    await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
-                    return self._successful_terminal(
-                        source_ref, dispatch_generation, f"superseded:{source_id}",
-                        terminal_status="superseded", reason="coordination_mode_changed",
-                    )
+                # A canonical receipt is the immutable delivery boundary. After
+                # restart, retry only unfinished lifecycle work; never post or
+                # regenerate model output again. Without a receipt, replay the
+                # exact frozen request under its persisted idempotency key.
+                canonical = intent.get("canonical_event") if isinstance(intent.get("canonical_event"), dict) else {}
+                existing_receipt = intent.get("delivery_state") == "posted" and bool(str(canonical.get("id") or ""))
+                if existing_receipt:
+                    event = dict(canonical)
+                    canonical_recorded = True
+                else:
+                    try:
+                        event, _ = await self._post_with_fresh_context(
+                            binding, chat_id, "", observed, source_id, body, observed_epoch,
+                            None, responds_to_id, open_recipients,
+                            coordination_mode=persisted_mode,
+                        )
+                    except ProtocolError as replay_error:
+                        mode_changed = persisted_mode != coordination_mode
+                        if not mode_changed or replay_error.code not in {
+                            "turn_required", "turns_not_used", "invalid_contribution",
+                            "cycle_superseded", "cycle_no_attempt",
+                        }:
+                            raise
+                        old_turn = str(persisted_post.get("turn_id") or "")
+                        if old_turn:
+                            try:
+                                await self._finish_with_fresh_context(
+                                    binding, chat_id, old_turn,
+                                    int(persisted_post.get("observed_seq") or observed), source_id,
+                                )
+                            except ProtocolError as finish_error:
+                                if finish_error.code not in {"turn_not_active", "turn_expired", "turns_not_used"}:
+                                    raise
+                        intent["delivery_superseded"] = True
+                        self._persist_binding(binding)
+                        await self._stop_attempt_renewal(source_id)
+                        getattr(self, "_cycle_attempts", {}).pop(source_id, None)
+                        await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
+                        return self._successful_terminal(
+                            source_ref, dispatch_generation, f"superseded:{source_id}",
+                            terminal_status="superseded", reason="coordination_mode_changed",
+                        )
                 cycle_payload = dict(persisted_post.get("cycle") or {})
-                if cycle_payload.get("cycle_id") and cycle_payload.get("attempt_id"):
+                completion: dict[str, Any] | None = None
+                if existing_receipt:
+                    journal = binding.delivery_lifecycle.get(source_id) or {}
+                    persisted_completion = journal.get("completion")
+                    if journal.get("delivery_state") != "posted" or not isinstance(persisted_completion, dict):
+                        raise ValueError("canonical delivery is missing its persisted lifecycle request")
+                    completion = copy.deepcopy(persisted_completion) or None
+                elif cycle_payload.get("cycle_id") and cycle_payload.get("attempt_id"):
+                    completion = {
+                        "kind": "cycle",
+                        "cycle_id": str(cycle_payload["cycle_id"]),
+                        "attempt_id": str(cycle_payload["attempt_id"]),
+                        "payload": {
+                            "generation": int(cycle_payload.get("generation") or 0),
+                            "action": "contribute",
+                            "eventId": str(event.get("id") or ""),
+                        },
+                    }
+                elif str(persisted_post.get("turn_id") or ""):
+                    completion = {
+                        "kind": "turn",
+                        "turn_id": str(persisted_post["turn_id"]),
+                        "observed_seq": int(event.get("seq") or persisted_post.get("observed_seq") or observed),
+                        "source_event_id": source_id,
+                        "idempotency_key": str(
+                            ((intent.get("selected") or {}).get("finish_idempotency_key"))
+                            or stable_key("finish", source_id, room_id=binding.room_id, membership_id=binding.membership_id)
+                        ),
+                    }
+                if not existing_receipt:
+                    self._record_canonical_delivery(
+                        binding, source_id, event, completion=completion,
+                    )
+                    canonical_recorded = True
+                if completion:
+                    self._record_lifecycle_attempt(binding, source_id)
+                if completion and completion.get("kind") == "cycle":
+                    payload = dict(completion.get("payload") or {})
                     replay_attempt = {
                         "cycle": {
-                            "id": str(cycle_payload["cycle_id"]),
-                            "generation": int(cycle_payload.get("generation") or 0),
+                            "id": str(completion.get("cycle_id") or ""),
+                            "generation": int(payload.get("generation") or 0),
                         },
-                        "attempt": {"id": str(cycle_payload["attempt_id"])},
+                        "attempt": {"id": str(completion.get("attempt_id") or "")},
                     }
                     try:
                         await self._complete_cycle_attempt(
@@ -817,16 +1263,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     except ProtocolError as completion_error:
                         if completion_error.code != "cycle_superseded":
                             raise
-                elif str(persisted_post.get("turn_id") or ""):
+                elif completion and completion.get("kind") == "turn":
                     try:
                         await self._finish_with_fresh_context(
-                            binding, chat_id, str(persisted_post["turn_id"]),
-                            int(event.get("seq") or persisted_post.get("observed_seq") or observed),
-                            source_id,
+                            binding, chat_id, str(completion.get("turn_id") or ""),
+                            int(completion.get("observed_seq") or 0),
+                            str(completion.get("source_event_id") or source_id),
                         )
                     except ProtocolError as finish_error:
                         if finish_error.code not in {"turn_not_active", "turn_expired", "turns_not_used"}:
                             raise
+                self._record_lifecycle_complete(binding, source_id)
                 self._persist_binding(binding)
                 await self._publish(
                     binding, source_id, "terminal", status="posted",
@@ -847,6 +1294,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     binding, chat_id, "", observed, source_id, body, observed_epoch,
                     None, responds_to_id, open_recipients, coordination_mode="open",
                 )
+                self._record_canonical_delivery(
+                    binding, source_id, event, completion=None,
+                )
+                canonical_recorded = True
                 getattr(self, "_source_coordination_modes", {}).pop(source_id, None)
                 getattr(self, "_open_reply_recipients", {}).pop(source_id, None)
                 self._persist_binding(binding)
@@ -912,6 +1363,36 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding, chat_id, str((turn or {}).get("turnId") or ""), observed, source_id, body, observed_epoch,
                 cycle_attempt, responds_to_id, coordination_mode="coordinated",
             )
+            completion = None
+            if cycle_attempt:
+                cycle_view, attempt_view = cycle_attempt["cycle"], cycle_attempt["attempt"]
+                completion = {
+                    "kind": "cycle",
+                    "cycle_id": str(cycle_view["id"]),
+                    "attempt_id": str(attempt_view["id"]),
+                    "payload": {
+                        "generation": int(cycle_view["generation"]),
+                        "action": "contribute",
+                        "eventId": str(event.get("id") or ""),
+                    },
+                }
+            elif turn:
+                completion = {
+                    "kind": "turn",
+                    "turn_id": str(turn.get("turnId") or ""),
+                    "observed_seq": int(event.get("seq") or observed),
+                    "source_event_id": source_id,
+                    "idempotency_key": str(
+                        ((binding.delivery_intents.get(source_id) or {}).get("selected") or {}).get("finish_idempotency_key")
+                        or stable_key("finish", source_id, room_id=binding.room_id, membership_id=binding.membership_id)
+                    ),
+                }
+            self._record_canonical_delivery(
+                binding, source_id, event, completion=completion,
+            )
+            canonical_recorded = True
+            if completion:
+                self._record_lifecycle_attempt(binding, source_id)
             if cycle_attempt:
                 await self._complete_cycle_attempt(binding, cycle_attempt, "contribute", str(event.get("id") or ""))
                 await self._stop_attempt_renewal(source_id)
@@ -921,6 +1402,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 await self._finish_with_fresh_context(
                     binding, chat_id, str(turn.get("turnId") or ""), int(event.get("seq") or observed), source_id,
                 )
+            self._record_lifecycle_complete(binding, source_id)
             # Outbound event sequences never advance the inbound cursor. Room
             # events interleaved before our response must still be consumed.
             self._persist_binding(binding)
@@ -941,6 +1423,30 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 self._revoke(binding)
             elif error.expired:
                 self._expire(binding)
+            if canonical_recorded:
+                intent = binding.delivery_intents.get(source_id) or {}
+                if intent.get("lifecycle_state") != "complete":
+                    self._record_lifecycle_failure_after_receipt(
+                        binding, source_id, error, error_code=error.code,
+                    )
+                try:
+                    await self._stop_attempt_renewal(source_id)
+                except Exception:
+                    logger.exception("Room %s could not stop renewal after durable delivery", binding.room_id)
+                getattr(self, "_cycle_attempts", {}).pop(source_id, None)
+                getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+                await self._publish(
+                    binding,
+                    source_id,
+                    "terminal",
+                    status="posted",
+                    canonical_event_id=event.get("id", ""),
+                    suppress_errors=True,
+                )
+                return self._successful_terminal(
+                    source_ref, dispatch_generation, event.get("id"),
+                    terminal_status="posted", canonical_event_id=str(event.get("id") or ""),
+                )
             if error.code in {"turn_not_active", "turn_expired"}:
                 # A human interruption, expiry, or replay of the same terminal
                 # turn is an intentional no-more-posting boundary. Report a
@@ -984,6 +1490,27 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._publish(binding, source_id, "terminal", status="failed", suppress_errors=True)
             return SendResult(success=False, error=str(error), retryable=error.retryable)
         except Exception as error:
+            if canonical_recorded and event is not None:
+                lifecycle_error = ProtocolError(
+                    str(error), code="lifecycle_error", retryable=True,
+                )
+                self._record_lifecycle_failure_after_receipt(
+                    binding, source_id, lifecycle_error, error_code="lifecycle_error",
+                )
+                try:
+                    await self._stop_attempt_renewal(source_id)
+                except Exception:
+                    logger.exception("Room %s could not stop renewal after durable delivery", binding.room_id)
+                getattr(self, "_cycle_attempts", {}).pop(source_id, None)
+                getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+                await self._publish(
+                    binding, source_id, "terminal", status="posted",
+                    canonical_event_id=event.get("id", ""), suppress_errors=True,
+                )
+                return self._successful_terminal(
+                    source_ref, dispatch_generation, event.get("id"),
+                    terminal_status="posted", canonical_event_id=event["id"],
+                )
             self._record_delivery_failure(binding, source_id, str(error), True)
             await self._publish(binding, source_id, "terminal", status="failed", suppress_errors=True)
             return SendResult(success=False, error=str(error), retryable=True)
@@ -1248,6 +1775,75 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # keyed by the immutable source event and identical payload.
                 await asyncio.sleep(max(0.1 * (2**attempt), min(error.retry_after, 120.0)))
 
+    async def _repair_pending_lifecycles(self, binding: RoomBinding) -> None:
+        """Retry only validated, persisted lifecycle work within its durable budget."""
+        for source_id, journal in list(binding.delivery_lifecycle.items()):
+            if (
+                not isinstance(journal, dict)
+                or journal.get("delivery_state") != "posted"
+                or journal.get("lifecycle_state") != "pending"
+                or not str((journal.get("receipt") or {}).get("canonical_event_id") or "")
+            ):
+                continue
+            attempts = int(journal.get("attempts") or 0)
+            if journal.get("automatic_retry") is False or attempts >= 3:
+                journal["state"] = "lifecycle_blocked"
+                journal["lifecycle_state"] = "blocked"
+                journal["automatic_retry"] = False
+                binding.delivery_lifecycle[source_id] = journal
+                self._persist_binding(binding)
+                continue
+            completion = journal.get("completion") or {}
+            kind = str(completion.get("kind") or "")
+            if kind not in {"cycle", "turn"}:
+                self._record_lifecycle_pending(
+                    binding, source_id, ValueError("invalid persisted lifecycle completion kind"),
+                    error_code="invalid_lifecycle_state",
+                )
+                continue
+            try:
+                # Persist the increment before authenticated I/O so a crash or
+                # ambiguous response cannot reset the automatic retry budget.
+                self._record_lifecycle_attempt(binding, source_id)
+                if kind == "cycle":
+                    await self._call(
+                        binding,
+                        lambda api, request=completion: api.complete_discussion_attempt(
+                            binding.room_id,
+                            str(request["cycle_id"]),
+                            str(request["attempt_id"]),
+                            dict(request["payload"]),
+                        ),
+                    )
+                else:
+                    await self._call(
+                        binding,
+                        lambda api, request=completion: _with_idempotency_key(
+                            api, str(request["idempotency_key"]),
+                        ).finish_turn(
+                            binding.room_id,
+                            str(request["turn_id"]),
+                            int(request["observed_seq"]),
+                            str(request["source_event_id"]),
+                        ),
+                    )
+            except ProtocolError as error:
+                if error.code in {"cycle_superseded", "turn_not_active", "turn_expired", "turns_not_used"}:
+                    self._record_lifecycle_complete(binding, source_id)
+                    continue
+                self._record_lifecycle_pending(
+                    binding, source_id, error, error_code=error.code,
+                )
+                continue
+            except Exception as error:
+                # Persist malformed/in-process failures as blocked work instead
+                # of crashing the watch task into an unbounded restart loop.
+                self._record_lifecycle_pending(
+                    binding, source_id, error, error_code="lifecycle_repair_failed",
+                )
+                continue
+            self._record_lifecycle_complete(binding, source_id)
+
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         source_ref = str((metadata or {}).get("reply_to") or self._latest_source.get(chat_id) or "")
         source_id, _dispatch_generation = _decode_dispatch_source(source_ref)
@@ -1271,6 +1867,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             retryable=False,
                         )
                     connector = await self._ensure_connector(binding)
+                    await self._repair_pending_lifecycles(binding)
                     if binding.room_id not in self._heartbeat_tasks:
                         # The server owns the cadence.  Sending at half its
                         # advertised interval turns a reconnect into a rate
@@ -1323,6 +1920,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             source_id
             for source_id, intent in binding.delivery_intents.items()
             if isinstance(intent, dict)
+            and not (
+                isinstance(binding.delivery_lifecycle.get(source_id), dict)
+                and str(((binding.delivery_lifecycle.get(source_id) or {}).get("receipt") or {}).get("canonical_event_id") or "")
+            )
             and isinstance(intent.get("selected"), dict)
             and int((intent.get("selected") or {}).get("source_seq") or 0) > 0
             and int((intent.get("selected") or {}).get("source_seq") or 0)
@@ -1548,6 +2149,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding.inbox[key] = "quarantined"
             logger.error(
                 "Room %s quarantined legacy unclassified completion at sequence %s",
+                binding.room_id, seq,
+            )
+        if self._activate_legacy_canonical_receipt(binding, event_id, seq):
+            logger.warning(
+                "Room %s promoted a complete legacy canonical receipt for sequence %s; delivery will not be replayed",
+                binding.room_id, seq,
+            )
+        elif self._activate_legacy_post_commit_recovery(binding, event_id, seq):
+            logger.warning(
+                "Room %s activated exact idempotent post-commit recovery for sequence %s",
                 binding.room_id, seq,
             )
         if not self._persist_binding(binding):
@@ -2353,7 +2964,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if status not in TERMINAL_EVENT_STATES or evidence.get("status") != status:
             return False
         if status == "posted":
-            return bool(str(evidence.get("canonicalEventId") or ""))
+            return (
+                isinstance(evidence.get("canonicalEventId"), str)
+                and bool(evidence["canonicalEventId"])
+                and type(evidence.get("canonicalSeq")) is int
+                and evidence["canonicalSeq"] > 0
+                and _valid_canonical_timestamp(evidence.get("canonicalTs"))
+            )
         return bool(str(evidence.get("reason") or ""))
 
     async def _complete_event_locked(
@@ -2367,6 +2984,23 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         reason: str,
     ) -> None:
         key = str(seq)
+        canonical_seq = 0
+        canonical_ts = ""
+        if terminal_status == "posted":
+            journal_receipt = (binding.delivery_lifecycle.get(source_id) or {}).get("receipt") or {}
+            intent_receipt = (binding.delivery_intents.get(source_id) or {}).get("canonical_event") or {}
+            receipt_id = journal_receipt.get("canonical_event_id") or intent_receipt.get("id")
+            receipt_seq = journal_receipt.get("canonical_seq") if "canonical_seq" in journal_receipt else intent_receipt.get("seq")
+            receipt_ts = journal_receipt.get("canonical_ts") if "canonical_ts" in journal_receipt else intent_receipt.get("ts")
+            if (
+                not isinstance(receipt_id, str) or not receipt_id
+                or receipt_id != canonical_event_id
+                or type(receipt_seq) is not int or receipt_seq <= 0
+                or not _valid_canonical_timestamp(receipt_ts)
+            ):
+                raise ValueError(f"Room sequence {seq} has no complete canonical receipt")
+            canonical_seq = receipt_seq
+            canonical_ts = receipt_ts
         if seq <= binding.acknowledged_cursor:
             binding.inbox = {
                 key: status for key, status in binding.inbox.items()
@@ -2400,6 +3034,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     "status": terminal_status,
                     "sourceEventId": source_id,
                     "canonicalEventId": canonical_event_id,
+                    "canonicalSeq": canonical_seq,
+                    "canonicalTs": canonical_ts,
                     "reason": reason,
                 }
                 if not self._terminal_evidence_valid(terminal_status, evidence):
@@ -2411,6 +3047,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding.turn_sequences.pop(source_id, None)
                 binding.turn_observed.pop(source_id, None)
                 binding.delivery_intents.pop(source_id, None)
+                journal = binding.delivery_lifecycle.get(source_id) or {}
+                if journal.get("lifecycle_state") not in {"pending", "blocked"}:
+                    binding.delivery_lifecycle.pop(source_id, None)
                 _release_cycle_attempt_owner(binding, source_id)
             self._persist_binding(binding)
             return
@@ -2421,6 +3060,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "status": terminal_status,
                 "sourceEventId": source_id,
                 "canonicalEventId": canonical_event_id,
+                "canonicalSeq": canonical_seq,
+                "canonicalTs": canonical_ts,
                 "reason": reason,
             }
             _release_cycle_attempt_owner(binding, source_id)
@@ -2442,6 +3083,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # This removal is justified by the terminal evidence persisted in
             # the same state snapshot, never by cursor advancement alone.
             binding.delivery_intents.pop(source_id, None)
+            journal = binding.delivery_lifecycle.get(source_id) or {}
+            if journal.get("lifecycle_state") not in {"pending", "blocked"}:
+                binding.delivery_lifecycle.pop(source_id, None)
         # Persist completion evidence before the network acknowledgement. An
         # ambiguous timeout can then retry the idempotent ack without rerunning
         # Hermes or losing the durable completion marker.
@@ -2458,8 +3102,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if cursor == binding.acknowledged_cursor:
             return
         response = await self._call(binding, lambda api: api.acknowledge(binding.room_id, cursor))
-        authoritative = int((response or {}).get("acknowledgedSeq") or 0)
-        cursor = max(binding.acknowledged_cursor, cursor, authoritative)
+        authoritative = (response or {}).get("acknowledgedSeq")
+        if type(authoritative) is not int or authoritative != cursor:
+            raise ProtocolError(
+                "Room acknowledgement did not confirm the locally proven contiguous frontier",
+                code="ack_frontier_mismatch", retryable=True,
+            )
         binding.acknowledged_cursor = cursor
         binding.cursor = max(binding.cursor, cursor)
         binding.inbox = {
@@ -2543,6 +3191,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     ) -> None:
         """Persist a failed delivery boundary without advancing acknowledgement."""
         intent = binding.delivery_intents.setdefault(source_id, {})
+        if intent.get("delivery_state") == "posted" and (intent.get("canonical_event") or {}).get("id"):
+            raise ValueError("canonical delivery cannot be downgraded to delivery failure")
+        intent["delivery_state"] = "delivery_pending" if retryable else "quarantined"
+        intent["lifecycle_state"] = "not_started"
         intent["state"] = "failed-retryable" if retryable else "quarantined"
         intent["last_error"] = error[:1000]
         intent["last_error_code"] = str(error_code or "")[:100]
@@ -2662,6 +3314,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             existing.delivery_intents = {
                 source_id: dict(intent) for source_id, intent in binding.delivery_intents.items()
             }
+            existing.delivery_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
             existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
             existing.abandoned_delivery_intents = {
                 source_id: dict(receipt)
