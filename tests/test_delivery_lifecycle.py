@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import importlib.util
 import json
 import sys
@@ -9,6 +10,8 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+
+from gateway.session import build_session_key as hermes_build_session_key
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "synthetic_sociality_delivery_lifecycle_test"
@@ -21,7 +24,9 @@ def load_adapter():
     base = types.ModuleType("gateway.platforms.base")
 
     class Platform(str):
-        pass
+        @property
+        def value(self):
+            return str(self)
 
     class PlatformConfig:
         def __init__(self):
@@ -149,6 +154,275 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_epoch_thread_id_is_stable_within_epoch_and_rotates_between_epochs(self):
+        expected = "room-epoch-v1:" + hashlib.sha256(b"epoch-1").hexdigest()
+        self.assertEqual(adapter._epoch_thread_id("epoch-1"), expected)
+        self.assertEqual(adapter._epoch_thread_id("epoch-1"), adapter._epoch_thread_id("epoch-1"))
+        self.assertNotEqual(adapter._epoch_thread_id("epoch-1"), adapter._epoch_thread_id("epoch-2"))
+
+    def test_epoch_thread_id_hashes_exact_utf8_without_normalizing_hostile_values(self):
+        hostile = " epoch\n\x00\t"
+        very_long = "x" * 10000
+        self.assertEqual(
+            adapter._epoch_thread_id(hostile),
+            "room-epoch-v1:" + hashlib.sha256(hostile.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(len(adapter._epoch_thread_id(very_long)), len("room-epoch-v1:") + 64)
+        self.assertNotEqual(adapter._epoch_thread_id("epoch"), adapter._epoch_thread_id(" epoch"))
+        self.assertNotEqual(adapter._epoch_thread_id("epoch"), adapter._epoch_thread_id("epoch "))
+
+    def test_epoch_thread_id_rejects_missing_blank_and_non_string_epoch(self):
+        for value in ("", " \t\n", None, 7):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "active epoch"):
+                adapter._epoch_thread_id(value)
+
+    def test_existing_binding_keeps_baseline_epoch_but_rotates_later_epoch(self):
+        binding = lifecycle_binding()
+        binding.epoch_session_routing_initialized = True
+        binding.legacy_session_epoch_id = "epoch-1"
+        self.assertIsNone(adapter._session_thread_for_epoch(binding, "epoch-1"))
+        self.assertEqual(adapter._session_thread_for_epoch(binding, "epoch-2"), adapter._epoch_thread_id("epoch-2"))
+
+    def test_dispatch_source_integrates_with_real_hermes_session_key_routing(self):
+        async def dispatch(binding, epoch_id, actor, event_id):
+            captured = []
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance.platform = adapter.Platform(adapter.NAME)
+            instance._inflight_events = set()
+            instance._event_seq = {}
+            instance._event_epoch = {}
+            instance._latest_source = {}
+            instance._run_for_event = {}
+            instance._cycle_attempts = {}
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(
+                    room_state=lambda _room_id: {
+                        "headSeq": 9,
+                        "activeEpoch": {"id": epoch_id, "startsAtSeq": 1},
+                        "members": [{"id": actor, "displayName": actor}],
+                    },
+                    events=lambda *_args: {"events": []},
+                )),
+            )
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            instance.build_source = types.MethodType(
+                lambda self, **kwargs: types.SimpleNamespace(
+                    platform=self.platform, scope_id=None, user_id_alt=None,
+                    prospective_thread_id=None, **kwargs,
+                ),
+                instance,
+            )
+            instance.handle_message = lambda event: asyncio.sleep(0, result=captured.append(event))
+            event = {
+                "id": event_id, "seq": 9, "type": "message.created",
+                "actorMembershipId": actor, "payload": {"body": "hello"},
+            }
+            self.assertTrue(await instance._dispatch_room_event(binding, event, "generation"))
+            return captured[0].source
+
+        binding = lifecycle_binding()
+        binding.epoch_session_routing_initialized = True
+        binding.legacy_session_epoch_id = "baseline"
+        alice = asyncio.run(dispatch(binding, "epoch-2", "alice", "evt-a"))
+        bob = asyncio.run(dispatch(binding, "epoch-2", "bob", "evt-b"))
+        later = asyncio.run(dispatch(binding, "epoch-3", "alice", "evt-c"))
+        alice_key = hermes_build_session_key(alice, group_sessions_per_user=False, profile="real")
+        bob_key = hermes_build_session_key(bob, group_sessions_per_user=False, profile="real")
+        later_key = hermes_build_session_key(later, group_sessions_per_user=False, profile="real")
+        self.assertEqual(alice.chat_id, "room-1")
+        self.assertEqual(alice_key, bob_key)
+        self.assertNotEqual(alice_key, later_key)
+        self.assertTrue(alice_key.startswith("agent:real:synthetic_sociality:group:room-1:"))
+
+    def test_historical_selected_recovery_is_fenced_before_delivery_io(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents["evt-old"] = {
+                "selected": {
+                    "state": "selected", "action": "post", "source_event_id": "evt-old",
+                    "source_seq": 4, "body": "stale", "observed_epoch_id": "old",
+                    "binding": {"membership_id": "member-1", "installation_id": "installation-1", "identity_version": 0},
+                },
+            }
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._inflight_events = set()
+            instance._event_seq = {}
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
+                    "activeEpoch": {"id": "new", "startsAtSeq": 5},
+                })),
+            )
+            completed = []
+            instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
+            instance._send_final = lambda *_args, **_kwargs: self.fail("stale recovery performed delivery I/O")
+            result = await instance._dispatch_room_event(
+                binding, {"id": "evt-old", "seq": 4, "payload": {"body": "old"}}, "restart",
+            )
+            self.assertFalse(result)
+            self.assertEqual(completed[0]["reason"], "historical_epoch_before_dispatch")
+
+        asyncio.run(run())
+
+    def test_inflight_old_epoch_output_is_superseded_before_selection_or_post(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            instance = configured_instance(binding, None, [])
+            instance._event_seq = {"room-1": {"evt-5": 5}}
+            instance._event_epoch = {"evt-5": "old"}
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
+                    "headSeq": 8, "activeEpoch": {"id": "new", "startsAtSeq": 6},
+                })),
+            )
+            instance._select_delivery_intent = lambda *_args: self.fail("stale output was frozen")
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            result = await instance._send_final_owned(
+                "room-1", adapter._dispatch_source_ref("evt-5", "generation"), "stale output",
+            )
+            self.assertTrue(result.success)
+            self.assertEqual(instance._terminal_results[adapter._dispatch_source_ref("evt-5", "generation")]["reason"], "stale_epoch")
+            self.assertEqual(binding.delivery_intents, {})
+
+        asyncio.run(run())
+
+    def test_uninitialized_epoch_routing_fails_closed(self):
+        binding = lifecycle_binding()
+        with self.assertRaisesRegex(ValueError, "not initialized"):
+            adapter._session_thread_for_epoch(binding, "epoch-1")
+
+    def test_epoch_routing_initialization_preserves_existing_context_unless_rotation_is_authorized(self):
+        async def initialize(binding):
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(
+                    room_state=lambda _room_id: {"activeEpoch": {"id": "epoch-current"}},
+                )),
+            )
+            instance._persist_binding = lambda _binding: True
+            await instance._ensure_epoch_session_routing(binding)
+
+        existing = lifecycle_binding()
+        existing.cursor = 5
+        asyncio.run(initialize(existing))
+        self.assertTrue(existing.epoch_session_routing_initialized)
+        self.assertEqual(existing.legacy_session_epoch_id, "epoch-current")
+
+        empty_existing = lifecycle_binding()
+        empty_existing.cursor = 0
+        asyncio.run(initialize(empty_existing))
+        self.assertEqual(empty_existing.legacy_session_epoch_id, "epoch-current")
+
+        rotated = lifecycle_binding()
+        rotated.cursor = 5
+        rotated.rotate_current_epoch_session = True
+        asyncio.run(initialize(rotated))
+        self.assertTrue(rotated.epoch_session_routing_initialized)
+        self.assertEqual(rotated.legacy_session_epoch_id, "")
+        self.assertFalse(rotated.rotate_current_epoch_session)
+
+    def test_epoch_routing_markers_roundtrip_real_state_persistence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            binding = lifecycle_binding()
+            binding.epoch_session_routing_initialized = True
+            binding.legacy_session_epoch_id = "epoch-current"
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            reloaded = state_store.load(path).binding("room-1")
+            self.assertTrue(reloaded.epoch_session_routing_initialized)
+            self.assertEqual(reloaded.legacy_session_epoch_id, "epoch-current")
+
+    def test_epoch_routing_initialization_uses_real_merge_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            binding = lifecycle_binding()
+            binding.epoch_session_routing_initialized = False
+            binding.legacy_session_epoch_id = ""
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            instance, original_update = persisted_instance(path)
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
+                    "activeEpoch": {"id": " epoch-current "},
+                })),
+            )
+            try:
+                asyncio.run(instance._ensure_epoch_session_routing(binding))
+            finally:
+                adapter.update = original_update
+            restarted = state_store.load(path).binding("room-1")
+            self.assertTrue(restarted.epoch_session_routing_initialized)
+            self.assertEqual(restarted.legacy_session_epoch_id, " epoch-current ")
+            self.assertIsNone(adapter._session_thread_for_epoch(restarted, " epoch-current "))
+            self.assertEqual(
+                adapter._session_thread_for_epoch(restarted, "next"),
+                adapter._epoch_thread_id("next"),
+            )
+
+    def test_epoch_routing_initialization_rolls_back_memory_when_persistence_fails(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.rotate_current_epoch_session = True
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
+                    "activeEpoch": {"id": "current"},
+                })),
+            )
+            instance._persist_binding = lambda _binding: False
+            with self.assertRaisesRegex(adapter.ProtocolError, "before epoch session routing was saved"):
+                await instance._ensure_epoch_session_routing(binding)
+            self.assertFalse(binding.epoch_session_routing_initialized)
+            self.assertEqual(binding.legacy_session_epoch_id, "")
+            self.assertTrue(binding.rotate_current_epoch_session)
+
+        asyncio.run(run())
+
+    def test_operator_authorized_current_epoch_rotation_is_durable_and_one_shot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            binding = lifecycle_binding()
+            binding.epoch_session_routing_initialized = True
+            binding.legacy_session_epoch_id = "current"
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            stale_runtime_binding = copy.deepcopy(binding)
+            room_cli = adapter.cli
+            original_load, original_update = room_cli.load, room_cli.update
+            room_cli.load = lambda: state_store.load(path)
+            room_cli.update = lambda mutator: state_store.update(mutator, path)
+            try:
+                self.assertEqual(room_cli._rotate_current_epoch_session("room-1", confirmed=True), 0)
+            finally:
+                room_cli.load, room_cli.update = original_load, original_update
+            authorized = state_store.load(path).binding("room-1")
+            self.assertFalse(authorized.epoch_session_routing_initialized)
+            self.assertEqual(authorized.legacy_session_epoch_id, "")
+            self.assertTrue(authorized.rotate_current_epoch_session)
+
+            stale_instance, original_adapter_update = persisted_instance(path)
+            try:
+                self.assertTrue(stale_instance._persist_binding(stale_runtime_binding))
+            finally:
+                adapter.update = original_adapter_update
+            still_authorized = state_store.load(path).binding("room-1")
+            self.assertFalse(still_authorized.epoch_session_routing_initialized)
+            self.assertEqual(still_authorized.legacy_session_epoch_id, "")
+            self.assertTrue(still_authorized.rotate_current_epoch_session)
+
+            restarted_instance, original_adapter_update = persisted_instance(path)
+            restarted_instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
+                    "activeEpoch": {"id": "current"},
+                })),
+            )
+            try:
+                asyncio.run(restarted_instance._ensure_epoch_session_routing(still_authorized))
+            finally:
+                adapter.update = original_adapter_update
+            consumed = state_store.load(path).binding("room-1")
+            self.assertTrue(consumed.epoch_session_routing_initialized)
+            self.assertEqual(consumed.legacy_session_epoch_id, "")
+            self.assertFalse(consumed.rotate_current_epoch_session)
+
     def test_real_persist_merge_roundtrips_nested_lifecycle_journal(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -460,6 +734,9 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             posts = 0
 
             class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
                 def post_message(self, *_args, **_kwargs):
                     nonlocal posts
                     posts += 1

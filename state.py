@@ -112,6 +112,13 @@ class RoomBinding:
     # credential material needed to resume an ambiguous redeem/swap/confirm
     # boundary. The CLI mutates it only under the same 0600 atomic state lock.
     credential_rotation: dict[str, Any] = field(default_factory=dict)
+    # Upgrade boundary for epoch-scoped Hermes transcripts. Existing bindings
+    # keep their current epoch on the legacy route; later epochs rotate. An
+    # operator-authorized current reset sets rotate_current_epoch_session before
+    # restart, causing initialization to omit the legacy baseline.
+    epoch_session_routing_initialized: bool = False
+    legacy_session_epoch_id: str = ""
+    rotate_current_epoch_session: bool = False
     enabled: bool = True
     revoked: bool = False
     transport: str = "long_poll"
@@ -123,6 +130,12 @@ class RoomBinding:
         if "acknowledged_cursor" not in normalized:
             normalized["acknowledged_cursor"] = int(normalized.get("cursor") or 0)
         binding = cls(**normalized)
+        if type(binding.epoch_session_routing_initialized) is not bool:
+            raise ValueError("Room epoch session routing marker must be boolean")
+        if not isinstance(binding.legacy_session_epoch_id, str):
+            raise ValueError("Room legacy session epoch must be a string")
+        if type(binding.rotate_current_epoch_session) is not bool:
+            raise ValueError("Room current epoch rotation marker must be boolean")
         if binding.message_payload_dialect not in {"v1", "v2"}:
             raise ValueError("unsupported Room message payload dialect")
         if not isinstance(binding.delivery_lifecycle, dict):

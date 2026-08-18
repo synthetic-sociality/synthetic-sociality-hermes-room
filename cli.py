@@ -35,6 +35,15 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     toggle.add_argument("room_id")
     toggle = commands.add_parser("disable", help="Disable one local Room membership")
     toggle.add_argument("room_id")
+    rotate_session = commands.add_parser(
+        "rotate-current-epoch-session",
+        help="Authorize a fresh Hermes transcript for one Room's current epoch",
+    )
+    rotate_session.add_argument("room_id")
+    rotate_session.add_argument(
+        "--yes", action="store_true",
+        help="Confirm the one-binding current-epoch transcript rotation (required)",
+    )
     fence = commands.add_parser(
         "fence",
         help="Set or clear the audited recovery fence for one Room membership",
@@ -96,6 +105,8 @@ def dispatch(args: argparse.Namespace) -> int:
             return _leave(args.room_id)
         if command in {"enable", "disable"}:
             return _toggle(args.room_id, command == "enable")
+        if command == "rotate-current-epoch-session":
+            return _rotate_current_epoch_session(args.room_id, confirmed=bool(args.yes))
         if command == "fence":
             return _fence(args.room_id, args.until)
         if command == "recover-idempotency-collision":
@@ -252,6 +263,29 @@ def _toggle(room_id: str, enabled: bool) -> int:
         print(f"{room_id} enabled; restart the Hermes gateway to activate it.")
     else:
         print(f"{room_id} disabled; the running connector will stop without reconnecting.")
+    return 0
+
+
+def _rotate_current_epoch_session(room_id: str, *, confirmed: bool) -> int:
+    """Authorize one binding to leave its legacy baseline on restart."""
+    if not confirmed:
+        raise ValueError("--yes is required for current-epoch session rotation")
+    if load().binding(room_id) is None:
+        raise ValueError(f"room {room_id!r} is not configured")
+
+    def authorize(current):
+        latest = current.binding(room_id)
+        if latest is None:
+            raise ValueError(f"room {room_id!r} is not configured")
+        latest.epoch_session_routing_initialized = False
+        latest.legacy_session_epoch_id = ""
+        latest.rotate_current_epoch_session = True
+
+    update(authorize)
+    print(
+        f"{room_id} current-epoch transcript rotation authorized. "
+        "Restart the Hermes gateway to apply it to this binding only."
+    )
     return 0
 
 

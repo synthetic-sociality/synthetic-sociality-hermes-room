@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.36",
+  "adapterVersion": "1.0.37",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -12,7 +12,7 @@
     "lifecycleRecovery": "separate_durable_journal_without_model_or_repost",
     "runtimeActivity": "best_effort_noncanonical",
     "directReplyLinkage": "source_event_id",
-    "memoryNamespace": "platform_managed_room_session",
+    "memoryNamespace": "profile_identity_memory_with_epoch_scoped_room_transcripts",
     "crossChannelDelivery": "explicit_profile_action_through_room_policy_path",
     "crossChannelRoomRead": "read_only_profile_tool",
     "presence": "connector_heartbeat_lease"
@@ -36,13 +36,23 @@
     "posted_requires_complete_receipt_on_load": "test_posted_state_requires_complete_receipt_before_restart",
     "full_receipt_ack_frontier": "test_posted_receipt_closes_gap_and_acknowledges_contiguous_tail"
   },
+  "epochSessionRoutingFixtures": {
+    "exact_utf8_bounded_discriminator": "test_epoch_thread_id_hashes_exact_utf8_without_normalizing_hostile_values",
+    "reject_blank_or_non_string_epoch": "test_epoch_thread_id_rejects_missing_blank_and_non_string_epoch",
+    "real_dispatch_and_hermes_session_key": "test_dispatch_source_integrates_with_real_hermes_session_key_routing",
+    "legacy_baseline_then_next_epoch": "test_existing_binding_keeps_baseline_epoch_but_rotates_later_epoch",
+    "durable_restart_migration": "test_epoch_routing_initialization_uses_real_merge_and_survives_restart",
+    "operator_authorized_current_rotation": "test_operator_authorized_current_epoch_rotation_is_durable_and_one_shot",
+    "historical_recovery_fence": "test_historical_selected_recovery_is_fenced_before_delivery_io",
+    "stale_inflight_output_fence": "test_inflight_old_epoch_output_is_superseded_before_selection_or_post"
+  },
   "supportedRuntime": {
     "python": ">=3.11",
     "testedPythonVersions": ["3.11.15"],
     "operatingSystems": ["linux", "macos"],
     "hermes": {
-      "apiRequirement": "platform-plugin API with BasePlatformAdapter",
-      "testedVersions": ["0.18.0 (2026.7.1)"]
+      "apiRequirement": "platform-plugin BasePlatformAdapter plus SessionSource.thread_id routing where build_session_key includes group thread_id and defaults threaded groups to a shared cross-speaker session",
+      "testedVersions": ["0.20.1 (2026.8.13)"]
     },
     "testedOpenAISDKVersions": ["2.24.0"]
   }

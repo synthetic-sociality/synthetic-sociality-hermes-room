@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import html
 import json
 import logging
@@ -31,6 +32,24 @@ from .protocol import (
 )
 from .room_tools import ROOM_CONTEXT_SCHEMA, ROOM_POST_SCHEMA, room_context, room_post
 from .state import PluginState, RoomBinding, load, update
+
+
+def _epoch_thread_id(epoch_id: str) -> str:
+    """Return the Hermes thread boundary for one authenticated Room epoch."""
+    if not isinstance(epoch_id, str) or not epoch_id.strip():
+        raise ValueError("Room dispatch has no active epoch")
+    digest = hashlib.sha256(epoch_id.encode("utf-8")).hexdigest()
+    return f"room-epoch-v1:{digest}"
+
+
+def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None:
+    if not binding.epoch_session_routing_initialized:
+        raise ValueError("Room epoch session routing is not initialized")
+    if not isinstance(epoch_id, str) or not epoch_id.strip():
+        raise ValueError("Room dispatch has no active epoch")
+    if epoch_id == binding.legacy_session_epoch_id:
+        return None
+    return _epoch_thread_id(epoch_id)
 
 
 NAME = "synthetic_sociality"
@@ -1110,6 +1129,39 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         open_recipients = getattr(self, "_open_reply_recipients", {}).get(source_id, [])
         observed = getattr(self, "_event_seq", {}).get(chat_id, {}).get(source_id, binding.cursor)
         observed_epoch = getattr(self, "_event_epoch", {}).get(source_id, "")
+        existing_intent = binding.delivery_intents.get(source_id) or {}
+        recovered = self._recoverable_selection(existing_intent)
+        if recovered is not None:
+            observed = int(recovered.get("source_seq") or observed)
+            observed_epoch = str(recovered.get("observed_epoch_id") or observed_epoch)
+        canonical = existing_intent.get("canonical_event")
+        durably_posted = (
+            existing_intent.get("delivery_state") == "posted"
+            and isinstance(canonical, dict)
+            and bool(str(canonical.get("id") or ""))
+        )
+        if not durably_posted:
+            try:
+                current_state = await self._call(binding, lambda api: api.room_state(chat_id))
+            except ProtocolError as error:
+                return SendResult(success=False, error=str(error), retryable=error.retryable)
+            active_epoch = current_state.get("activeEpoch") or {}
+            active_epoch_id = active_epoch.get("id")
+            starts_at = int(active_epoch.get("startsAtSeq") or 0)
+            if (
+                not isinstance(active_epoch_id, str)
+                or not active_epoch_id.strip()
+                or not observed_epoch
+                or observed_epoch != active_epoch_id
+                or (starts_at and observed < starts_at)
+            ):
+                await self._publish(
+                    binding, source_id, "terminal", status="superseded", suppress_errors=True,
+                )
+                return self._successful_terminal(
+                    source_ref, dispatch_generation, f"superseded:{source_id}",
+                    terminal_status="superseded", reason="stale_epoch",
+                )
         try:
             selected = self._select_delivery_intent(
                 binding, source_id, body, responds_to_id, open_recipients,
@@ -1867,6 +1919,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             retryable=False,
                         )
                     connector = await self._ensure_connector(binding)
+                    await self._ensure_epoch_session_routing(binding)
                     await self._repair_pending_lifecycles(binding)
                     if binding.room_id not in self._heartbeat_tasks:
                         # The server owns the cadence.  Sending at half its
@@ -1983,6 +2036,51 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._note_connected(binding, session)
         self._persist_binding(binding)
         return session
+
+    async def _ensure_epoch_session_routing(self, binding: RoomBinding) -> None:
+        if binding.epoch_session_routing_initialized:
+            return
+        state = await self._call(binding, lambda api: api.room_state(binding.room_id))
+        active_epoch_id = (state.get("activeEpoch") or {}).get("id")
+        if not isinstance(active_epoch_id, str) or not active_epoch_id.strip():
+            raise ProtocolError(
+                "Room state has no active epoch for session routing",
+                code="active_epoch_unavailable",
+                retryable=True,
+            )
+        previous = (
+            binding.epoch_session_routing_initialized,
+            binding.legacy_session_epoch_id,
+            binding.rotate_current_epoch_session,
+        )
+        binding.legacy_session_epoch_id = (
+            "" if binding.rotate_current_epoch_session else active_epoch_id
+        )
+        binding.epoch_session_routing_initialized = True
+        binding.rotate_current_epoch_session = False
+        binding._consuming_epoch_session_rotation = previous[2]
+        try:
+            persisted = self._persist_binding(binding)
+        except Exception:
+            (
+                binding.epoch_session_routing_initialized,
+                binding.legacy_session_epoch_id,
+                binding.rotate_current_epoch_session,
+            ) = previous
+            raise
+        finally:
+            del binding._consuming_epoch_session_rotation
+        if not persisted:
+            (
+                binding.epoch_session_routing_initialized,
+                binding.legacy_session_epoch_id,
+                binding.rotate_current_epoch_session,
+            ) = previous
+            raise ProtocolError(
+                "Room membership changed before epoch session routing was saved",
+                code="binding_changed",
+                retryable=False,
+            )
 
     async def _ensure_message_payload_contract(self, binding: RoomBinding) -> None:
         """Negotiate this binding's write dialect through one read-only GET."""
@@ -2632,6 +2730,28 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         event_id = str(event.get("id") or "")
         self._inflight_events.add(event_id)
         self._event_seq.setdefault(binding.room_id, {})[event_id] = seq
+        # The authenticated current-epoch fence precedes recovery as well as
+        # new model dispatch. A frozen historical result must never regain an
+        # outbound I/O path merely because the process restarted.
+        state = await self._call(binding, lambda api: api.room_state(binding.room_id))
+        active_epoch = state.get("activeEpoch") or {}
+        starts_at = int(active_epoch.get("startsAtSeq") or 0)
+        if starts_at and seq < starts_at:
+            self._inflight_events.discard(event_id)
+            await self._complete_event(
+                binding, seq, terminal_status="ignored", source_id=event_id,
+                reason="historical_epoch_before_dispatch",
+            )
+            return False
+        active_epoch_id = active_epoch.get("id")
+        if not isinstance(active_epoch_id, str) or not active_epoch_id.strip():
+            self._inflight_events.discard(event_id)
+            raise ProtocolError(
+                "Room state has no active epoch for dispatch",
+                code="active_epoch_unavailable",
+                retryable=True,
+            )
+        self._event_epoch[event_id] = active_epoch_id
         selected = self._recoverable_selection(binding.delivery_intents.get(event_id) or {})
         if selected is not None:
             # Recovery owns the durable model result. Never invoke Hermes a
@@ -2660,17 +2780,6 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
             self._inflight_events.discard(event_id)
             return False
-        state = await self._call(binding, lambda api: api.room_state(binding.room_id))
-        active_epoch = state.get("activeEpoch") or {}
-        starts_at = int(active_epoch.get("startsAtSeq") or 0)
-        if starts_at and seq < starts_at:
-            self._inflight_events.discard(event_id)
-            await self._complete_event(
-                binding, seq, terminal_status="ignored", source_id=event_id,
-                reason="historical_epoch_before_dispatch",
-            )
-            return False
-        self._event_epoch[event_id] = str(active_epoch.get("id") or "")
         self._latest_source[binding.room_id] = event_id
         run_id = self._run_for_event.get(event_id) or ("hermes:" + uuid.uuid4().hex)
         self._run_for_event[event_id] = run_id
@@ -2727,8 +2836,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             chat_id=binding.room_id,
             chat_name="Synthetic Sociality Room",
             chat_type="group",
-            # Stable room-scoped identity preserves one shared Hermes context
-            # even if a host ignores group_sessions_per_user.
+            # Preserve one shared context inside an epoch while ensuring a new
+            # discussion cannot inherit prior task authority or unfinished turns.
+            thread_id=_session_thread_for_epoch(
+                binding, active_epoch_id,
+            ),
             user_id=binding.room_id,
             user_name=str(actor),
             message_id=dispatch_source,
@@ -3320,6 +3432,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 source_id: dict(receipt)
                 for source_id, receipt in binding.abandoned_delivery_intents.items()
             }
+            if (
+                not existing.rotate_current_epoch_session
+                or getattr(binding, "_consuming_epoch_session_rotation", False)
+            ):
+                existing.epoch_session_routing_initialized = binding.epoch_session_routing_initialized
+                existing.legacy_session_epoch_id = binding.legacy_session_epoch_id
+                existing.rotate_current_epoch_session = binding.rotate_current_epoch_session
             existing.transport = binding.transport
             return True
 
