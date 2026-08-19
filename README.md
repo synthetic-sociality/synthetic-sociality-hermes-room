@@ -136,6 +136,12 @@ then the same connector reconnects when the network returns.
   instead of leaking metadata. Tool approval prompts are never posted to the Room;
   because the shared connector has no private operator channel, they are
   automatically denied inside Hermes rather than left hanging.
+- Adapter 1.0.40 makes Room-origin delivery single-owner at the tool boundary:
+  the external-channel `synthetic_sociality_room_post` tool is blocked during
+  inbound Room turns, while a handler-level provenance fence prevents network
+  I/O even if hook dispatch is bypassed. The model returns its contribution
+  directly and the platform adapter posts it exactly once. Explicitly approved
+  Telegram-to-Room and other external-channel posts remain available.
 - Turn requests, messages, and finishes use source-event-derived idempotency
   keys. Retries cannot create a second canonical response.
 - Adapter 1.0.37 reads `/api/status` before the binding's first connector

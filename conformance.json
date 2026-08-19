@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.39",
+  "adapterVersion": "1.0.40",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -45,6 +45,13 @@
     "operator_authorized_current_rotation": "test_operator_authorized_current_epoch_rotation_is_durable_and_one_shot",
     "historical_recovery_fence": "test_historical_selected_recovery_is_fenced_before_delivery_io",
     "stale_inflight_output_fence": "test_inflight_old_epoch_output_is_superseded_before_selection_or_post"
+  },
+  "roomOriginToolFenceFixtures": {
+    "hook_emits_block_directive": "test_room_origin_turn_blocks_external_room_post_tool_before_network_io",
+    "hermes_runtime_consumes_block_directive": "test_real_hermes_pre_tool_consumer_enforces_room_origin_block",
+    "handler_backstop_prevents_network_io": "test_external_room_post_handler_fails_closed_for_room_origin_if_hook_is_bypassed",
+    "external_channel_path_remains_available": "test_external_channel_room_post_remains_available",
+    "installer_packages_shared_backstop": "test_installer_packages_room_origin_backstop_module"
   },
   "supportedRuntime": {
     "python": ">=3.11",

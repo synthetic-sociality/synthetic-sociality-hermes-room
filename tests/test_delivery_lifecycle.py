@@ -80,6 +80,7 @@ def load_adapter():
 
 adapter = load_adapter()
 state_store = sys.modules[f"{PACKAGE}.state"]
+room_tools = sys.modules[f"{PACKAGE}.room_tools"]
 
 
 def persisted_instance(path):
@@ -154,6 +155,96 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_room_origin_turn_blocks_external_room_post_tool_before_network_io(self):
+        session_id = "room-session-1"
+        turn_id = "room-turn-1"
+        adapter._on_pre_llm_call(
+            platform="synthetic_sociality",
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+
+        result = adapter._on_pre_tool_call(
+            tool_name="synthetic_sociality_room_post",
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+
+        self.assertEqual(result["action"], "block")
+        self.assertIn("return the contribution directly", result["message"].lower())
+
+    def test_real_hermes_pre_tool_consumer_enforces_room_origin_block(self):
+        from hermes_cli import lifecycle, plugins
+
+        session_id = "room-session-real-consumer"
+        turn_id = "room-turn-real-consumer"
+        adapter._on_pre_llm_call(
+            platform="synthetic_sociality", session_id=session_id, turn_id=turn_id,
+        )
+        original_invoke_hook = lifecycle.invoke_hook
+
+        def invoke_candidate_hook(name, **kwargs):
+            payload = dict(kwargs)
+            tool_name = payload.pop("tool_name", "")
+            return [adapter._on_pre_tool_call(tool_name=tool_name, **payload)]
+
+        lifecycle.invoke_hook = invoke_candidate_hook
+        try:
+            message = plugins.resolve_pre_tool_block(
+                "synthetic_sociality_room_post", {}, session_id=session_id, turn_id=turn_id,
+            )
+        finally:
+            lifecycle.invoke_hook = original_invoke_hook
+
+        self.assertIsInstance(message, str)
+        self.assertIn("single canonical delivery path", message)
+
+    def test_external_room_post_handler_fails_closed_for_room_origin_if_hook_is_bypassed(self):
+        session_id = "room-session-handler-backstop"
+        adapter._on_pre_llm_call(
+            platform="synthetic_sociality",
+            session_id=session_id,
+            turn_id="room-turn-handler-backstop",
+        )
+        original_select_room = room_tools._select_room
+        room_tools._select_room = lambda _requested: self.fail("Room-origin tool call reached network setup")
+        try:
+            result = json.loads(room_tools.room_post(
+                {"room": "DBAR2026", "body": "substantive answer"},
+                session_id=session_id,
+            ))
+        finally:
+            room_tools._select_room = original_select_room
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "room_origin_delivery_owned_by_adapter")
+        self.assertFalse(result["retryable"])
+
+    def test_external_channel_room_post_remains_available(self):
+        self.assertIsNone(adapter._on_pre_tool_call(
+            tool_name="synthetic_sociality_room_post",
+            session_id="telegram-session-1",
+            turn_id="telegram-turn-1",
+        ))
+        original_select_room = room_tools._select_room
+        room_tools._select_room = lambda _requested: (None, None, [])
+        try:
+            result = json.loads(room_tools.room_post(
+                {"room": "DBAR2026", "body": "approved external contribution"},
+                session_id="telegram-session-1",
+                turn_id="telegram-turn-1",
+                user_task="[Room participant] [Synthetic Sociality Room event quoted by operator]",
+            ))
+        finally:
+            room_tools._select_room = original_select_room
+        self.assertNotEqual(result.get("code"), "room_origin_delivery_owned_by_adapter")
+        self.assertIn("not configured", result["error"])
+
+    def test_installer_packages_room_origin_backstop_module(self):
+        installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+        copy_line = next(line for line in installer.splitlines() if line.startswith("for file in "))
+        self.assertIn("origin_context.py", copy_line.split())
+
     def test_extract_visible_body_recovers_escaped_layout_outside_json_strings(self):
         response = (
             r'{\n  "action": "contribute",\n  "body": '
