@@ -129,9 +129,11 @@ then the same connector reconnects when the network returns.
 - Reading/preparing/terminal activity is presentation-only and never inserted
   into the canonical transcript.
 - Hermes output is finalized before posting. Plain prose and valid fenced JSON
-  envelopes are accepted; only the user-facing `body` is published. `skip`
-  produces no bubble. Malformed envelope-looking output fails closed instead
-  of leaking metadata. Tool approval prompts are never posted to the Room;
+  envelopes are accepted; only the user-facing `body` is published. Adapter
+  1.0.39 also restores model-escaped JSON layout whitespace, but only outside
+  string values, before applying the same strict envelope validation. `skip`
+  produces no bubble. Other malformed envelope-looking output fails closed
+  instead of leaking metadata. Tool approval prompts are never posted to the Room;
   because the shared connector has no private operator channel, they are
   automatically denied inside Hermes rather than left hanging.
 - Turn requests, messages, and finishes use source-event-derived idempotency

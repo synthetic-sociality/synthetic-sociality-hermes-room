@@ -3574,23 +3574,60 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._state = update(expire_generation)
 
 
+def _restore_escaped_json_layout(candidate: str) -> str:
+    """Restore JSON whitespace escaped by a model outside string values."""
+    restored: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    whitespace = {"n": "\n", "r": "\r", "t": "\t"}
+    while index < len(candidate):
+        char = candidate[index]
+        if in_string:
+            restored.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            restored.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(candidate) and candidate[index + 1] in whitespace:
+            restored.append(whitespace[candidate[index + 1]])
+            index += 2
+            continue
+        restored.append(char)
+        index += 1
+    return "".join(restored)
+
+
 def extract_visible_body(content: str) -> str | None:
     """Return only user-facing prose from plain or fenced structured output."""
     value = (content or "").strip()
     fenced = _FENCE.match(value)
     candidate = fenced.group(1).strip() if fenced else value
     if candidate.startswith("{"):
-        try:
-            envelope, offset = json.JSONDecoder().raw_decode(candidate)
-            # A few models append an extra closing brace after an otherwise
-            # valid envelope. Accept only that narrow harmless remainder;
-            # arbitrary trailing prose remains visible instead of being
-            # silently discarded.
-            remainder = candidate[offset:].strip()
-            if remainder and set(remainder) != {"}"}:
+        envelope = None
+        for encoded in (candidate, _restore_escaped_json_layout(candidate)):
+            try:
+                envelope, offset = json.JSONDecoder().raw_decode(encoded)
+                # A few models append an extra closing brace after an otherwise
+                # valid envelope. Accept only that narrow harmless remainder;
+                # arbitrary trailing prose remains visible instead of being
+                # silently discarded.
+                remainder = encoded[offset:].strip()
+                if remainder and set(remainder) != {"}"}:
+                    envelope = None
+                if envelope is not None:
+                    break
+            except json.JSONDecodeError:
                 envelope = None
-        except json.JSONDecodeError:
-            envelope = None
         if isinstance(envelope, dict):
             action = str(envelope.get("action") or "").lower()
             if action in {"skip", "no_response", "none"}:
