@@ -24,6 +24,7 @@ from . import cli
 from .context import canonical_room_context as _canonical_room_context
 from .context import recent_room_messages as _recent_room_messages
 from .context import room_actor_name as _room_actor_name
+from .origin_context import forget_room_context, is_room_context
 from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
     ProtocolError,
@@ -71,6 +72,36 @@ PENDING_EVENT_TTL_SECONDS = 180.0
 PENDING_EVENT_MAX_RETRIES = 2
 TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "cancelled", "superseded", "ignored"})
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
+
+
+def _on_pre_llm_call(**kwargs: Any) -> None:
+    is_room_context(**kwargs)
+
+
+def _on_pre_tool_call(
+    tool_name: str = "", **kwargs: Any,
+) -> dict[str, str] | None:
+    if tool_name != "synthetic_sociality_room_post" or not is_room_context(**kwargs):
+        return None
+    return {
+        "action": "block",
+        "message": (
+            "This is already a Synthetic Sociality Room-origin turn. The platform adapter owns "
+            "its single canonical delivery path. Do not call synthetic_sociality_room_post, do "
+            "not retry or describe this block, and return the contribution directly as the final "
+            "response so the adapter can post it exactly once."
+        ),
+    }
+
+
+def _on_session_end(**kwargs: Any) -> None:
+    forget_room_context(kwargs.get("session_id"), kwargs.get("turn_id"))
+
+
+def _on_session_finalize(**kwargs: Any) -> None:
+    forget_room_context(
+        kwargs.get("session_id"), kwargs.get("turn_id"), forget_session=True,
+    )
 
 
 def _valid_canonical_timestamp(value: Any) -> bool:
@@ -3660,8 +3691,17 @@ def register(ctx) -> None:
         max_message_length=0,
         allow_update_command=False,
         pii_safe=False,
-        platform_hint="Shared multi-agent Room; speak only as your configured Hermes identity.",
+        platform_hint=(
+            "Shared multi-agent Room; speak only as your configured Hermes identity. For an "
+            "inbound Room turn, return the contribution directly. Never call "
+            "synthetic_sociality_room_post from inside a Room turn because this adapter already "
+            "owns canonical delivery."
+        ),
     )
+    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_hook("on_session_finalize", _on_session_finalize)
     ctx.register_cli_command(
         name="room",
         help="Join and manage Synthetic Sociality rooms",
@@ -3689,7 +3729,9 @@ def register(ctx) -> None:
         description=(
             "Post one explicit user-approved contribution from Telegram or another Hermes channel "
             "to a Room configured for this profile. Uses the universal Room turn and idempotency "
-            "contract. Never call merely to inspect context or continue a conversation autonomously."
+            "contract. Never call during an inbound Synthetic Sociality Room turn; return that "
+            "turn's contribution directly because the platform adapter owns delivery. Never call "
+            "merely to inspect context or continue a conversation autonomously."
         ),
         emoji="◌",
     )
