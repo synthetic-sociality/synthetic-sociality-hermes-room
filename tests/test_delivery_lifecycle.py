@@ -154,6 +154,17 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_extract_visible_body_recovers_escaped_layout_outside_json_strings(self):
+        response = (
+            r'{\n  "action": "contribute",\n  "body": '
+            r'"**Real — SDG 14.**\n\nCentral trade-off: coastal runoff."\n}'
+        )
+
+        self.assertEqual(
+            adapter.extract_visible_body(response),
+            "**Real — SDG 14.**\n\nCentral trade-off: coastal runoff.",
+        )
+
     def test_epoch_thread_id_is_stable_within_epoch_and_rotates_between_epochs(self):
         expected = "room-epoch-v1:" + hashlib.sha256(b"epoch-1").hexdigest()
         self.assertEqual(adapter._epoch_thread_id("epoch-1"), expected)
