@@ -1,0 +1,200 @@
+{
+  "binding": {
+    "acknowledged_cursor": 119,
+    "base_url": "https://redacted.invalid/api",
+    "credential": "[REDACTED]",
+    "cursor": 119,
+    "cycle_attempt_owners": {
+      "cycle-redacted|1|attempt-redacted|member-redacted": "event-120-redacted"
+    },
+    "delivery_intents": {
+      "event-120-redacted": {
+        "failed_at": "[REDACTED_TIMESTAMP]",
+        "last_error_code": "cycle_conflict",
+        "post": {
+          "binding": {
+            "identity_version": 1,
+            "installation_id": "installation-redacted",
+            "membership_id": "member-redacted"
+          },
+          "body": "[REDACTED_BODY]",
+          "cycle": {
+            "attempt_id": "attempt-redacted",
+            "cycle_id": "cycle-redacted",
+            "generation": 1
+          },
+          "idempotency_key": "hermes-v2-message-4c0ab1ea0815538587f75b0f209b0048",
+          "observed_seq": 121
+        },
+        "selected": {
+          "action": "post",
+          "binding": {
+            "identity_version": 1,
+            "installation_id": "installation-redacted",
+            "membership_id": "member-redacted"
+          },
+          "body": "[REDACTED_BODY]",
+          "cycle": {
+            "attempt_id": "attempt-redacted",
+            "cycle_id": "cycle-redacted",
+            "generation": 1
+          },
+          "message_idempotency_key": "hermes-v2-message-4c0ab1ea0815538587f75b0f209b0048",
+          "observed_seq": 120,
+          "source_event_id": "event-120-redacted",
+          "source_seq": 120
+        },
+        "state": "quarantined"
+      }
+    },
+    "identity_version": 1,
+    "inbox": {
+      "120": "quarantined",
+      "121": "ignored",
+      "122": "ignored",
+      "123": "ignored",
+      "124": "ignored",
+      "125": "ignored",
+      "126": "ignored",
+      "127": "ignored",
+      "128": "ignored",
+      "129": "ignored",
+      "130": "ignored",
+      "131": "posted",
+      "132": "ignored",
+      "133": "ignored",
+      "134": "ignored",
+      "135": "ignored",
+      "136": "ignored",
+      "137": "ignored",
+      "138": "ignored",
+      "139": "ignored",
+      "140": "ignored",
+      "141": "ignored"
+    },
+    "installation_id": "installation-redacted",
+    "membership_id": "member-redacted",
+    "pending_retries": {
+      "120": 2
+    },
+    "room_id": "room-redacted",
+    "terminal_evidence": {
+      "121": {
+        "sourceEventId": "event-121-redacted",
+        "status": "ignored"
+      },
+      "122": {
+        "sourceEventId": "event-122-redacted",
+        "status": "ignored"
+      },
+      "123": {
+        "sourceEventId": "event-123-redacted",
+        "status": "ignored"
+      },
+      "124": {
+        "sourceEventId": "event-124-redacted",
+        "status": "ignored"
+      },
+      "125": {
+        "sourceEventId": "event-125-redacted",
+        "status": "ignored"
+      },
+      "126": {
+        "sourceEventId": "event-126-redacted",
+        "status": "ignored"
+      },
+      "127": {
+        "sourceEventId": "event-127-redacted",
+        "status": "ignored"
+      },
+      "128": {
+        "sourceEventId": "event-128-redacted",
+        "status": "ignored"
+      },
+      "129": {
+        "sourceEventId": "event-129-redacted",
+        "status": "ignored"
+      },
+      "130": {
+        "sourceEventId": "event-130-redacted",
+        "status": "ignored"
+      },
+      "131": {
+        "sourceEventId": "event-131-redacted",
+        "status": "posted"
+      },
+      "132": {
+        "sourceEventId": "event-132-redacted",
+        "status": "ignored"
+      },
+      "133": {
+        "sourceEventId": "event-133-redacted",
+        "status": "ignored"
+      },
+      "134": {
+        "sourceEventId": "event-134-redacted",
+        "status": "ignored"
+      },
+      "135": {
+        "sourceEventId": "event-135-redacted",
+        "status": "ignored"
+      },
+      "136": {
+        "sourceEventId": "event-136-redacted",
+        "status": "ignored"
+      },
+      "137": {
+        "sourceEventId": "event-137-redacted",
+        "status": "ignored"
+      },
+      "138": {
+        "sourceEventId": "event-138-redacted",
+        "status": "ignored"
+      },
+      "139": {
+        "sourceEventId": "event-139-redacted",
+        "status": "ignored"
+      },
+      "140": {
+        "sourceEventId": "event-140-redacted",
+        "status": "ignored"
+      },
+      "141": {
+        "sourceEventId": "event-141-redacted",
+        "status": "ignored"
+      }
+    }
+  },
+  "proof": {
+    "attempt_id_matches": true,
+    "attempt_id_nonempty": true,
+    "candidate_count": 1,
+    "cycle_conflict": true,
+    "cycle_id_matches": true,
+    "cycle_id_nonempty": true,
+    "generation_matches": true,
+    "inbox_quarantined": true,
+    "intent_quarantined": true,
+    "no_delivery_state": true,
+    "no_local_receipt": true,
+    "no_terminal_evidence_120": true,
+    "not_already_migrated": true,
+    "owner_exact": true,
+    "post_binding_exact": true,
+    "post_body_matches": true,
+    "post_key_exact": true,
+    "post_object": true,
+    "post_observed_matches": false,
+    "selected_action_post": true,
+    "selected_binding_exact": true,
+    "selected_body_nonempty": true,
+    "selected_key_exact": true,
+    "selected_object": true,
+    "selected_observed_seq_120": true,
+    "selected_source_matches": true,
+    "selected_source_seq_120": true,
+    "seq_ahead_of_ack": true
+  },
+  "schema": "berlin-seq120-redacted-offline-v1",
+  "source": "read-only redaction of production state; no credential or original identifier retained"
+}
