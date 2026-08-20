@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import hashlib
 import importlib.util
 import json
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -155,6 +157,172 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_sse_stream_does_not_depend_on_shared_default_executor_capacity(self):
+        async def run():
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._stream_executors = {}
+            binding = lifecycle_binding()
+
+            shared_gate = threading.Event()
+            shared_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(shared_pool)
+            blocker = loop.run_in_executor(None, shared_gate.wait)
+            await asyncio.sleep(0.01)
+            try:
+                result = await asyncio.wait_for(
+                    instance._stream_call(binding, lambda _api: "isolated"),
+                    timeout=1.0,
+                )
+            finally:
+                shared_gate.set()
+                await blocker
+                for executor in instance._stream_executors.values():
+                    executor.shutdown(wait=True, cancel_futures=True)
+                shared_pool.shutdown(wait=True, cancel_futures=True)
+
+            self.assertEqual(result, "isolated")
+
+        asyncio.run(run())
+
+    def test_stream_once_routes_blocking_reader_through_stream_executor(self):
+        async def run():
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._stop = asyncio.Event()
+            consumed = []
+
+            class FakeProtocol:
+                def stream_events(self, _room_id, _cursor, on_event):
+                    on_event({"id": "evt-5", "seq": 5})
+                    return {"headSeq": 5}
+
+            async def stream_call(_binding, operation):
+                result = operation(FakeProtocol())
+                await asyncio.sleep(0)
+                return result
+
+            async def default_call(*_args, **_kwargs):
+                self.fail("SSE reader used the shared default executor path")
+
+            async def consume(_binding, event):
+                consumed.append(event)
+
+            instance._stream_call = stream_call
+            instance._call = default_call
+            instance._consume = consume
+            await instance._stream_once(lifecycle_binding())
+            self.assertEqual(consumed, [{"id": "evt-5", "seq": 5}])
+
+        asyncio.run(run())
+
+    def test_repeated_disconnect_reconnect_keeps_one_busy_stream_worker(self):
+        async def run():
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._stop = asyncio.Event()
+            instance._tasks = {}
+            instance._heartbeat_tasks = {}
+            instance._attempt_renewal_tasks = {}
+            instance._submission_tasks = {}
+            instance._state = types.SimpleNamespace(bindings=[])
+            instance._lease_deadline = {}
+            instance._inflight_events = set()
+            instance._queued_events = {}
+            instance._active_dispatch_rooms = {}
+            instance._event_dispatch_generation = {}
+            instance._receive_locks = {}
+            instance._terminal_sources = {}
+            instance._terminal_results = {}
+            instance._cycle_attempts = {}
+            instance._cycle_response_sources = {}
+            instance._source_coordination_modes = {}
+            instance._open_reply_recipients = {}
+            instance._superseded_sources = set()
+            instance._stream_executors = {}
+            instance._mark_disconnected = lambda: None
+            binding = lifecycle_binding()
+            started = threading.Event()
+            gate = threading.Event()
+
+            def first(_api):
+                started.set()
+                gate.wait(timeout=2)
+                return "first"
+
+            first_task = asyncio.create_task(instance._stream_call(binding, first))
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            original_executor = instance._stream_executors[binding.room_id]
+            queued = []
+            try:
+                for index in range(10):
+                    await instance.disconnect()
+                    instance._stop.clear()
+                    expected = f"queued-{index}"
+                    task = asyncio.create_task(
+                        instance._stream_call(binding, lambda _api, value=expected: value)
+                    )
+                    queued.append((task, expected))
+                    await asyncio.sleep(0.01)
+                    self.assertIs(
+                        instance._stream_executors[binding.room_id],
+                        original_executor,
+                        "reconnect created another executor while the first reader was blocked",
+                    )
+                    self.assertFalse(task.done())
+
+                workers = [
+                    thread for thread in threading.enumerate()
+                    if thread.name.startswith(f"room-sse-{binding.room_id[:8]}")
+                ]
+                self.assertEqual(
+                    len(workers), 1,
+                    f"reconnect cycles accumulated SSE workers: {[thread.name for thread in workers]}",
+                )
+            finally:
+                gate.set()
+                self.assertEqual(await first_task, "first")
+                for task, expected in queued:
+                    self.assertEqual(await task, expected)
+                original_executor.shutdown(wait=True, cancel_futures=True)
+
+        asyncio.run(run())
+
+    def test_cancelled_stream_rejects_stale_callbacks_after_reconnect(self):
+        async def run():
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._stop = asyncio.Event()
+            instance._stream_generations = {}
+            captured = {}
+            started = asyncio.Event()
+            blocker = asyncio.Event()
+
+            class FakeProtocol:
+                def stream_events(self, _room_id, _cursor, on_event):
+                    captured["callback"] = on_event
+                    started.set()
+                    return {"headSeq": 5}
+
+            async def stream_call(_binding, operation):
+                operation(FakeProtocol())
+                await blocker.wait()
+
+            instance._stream_call = stream_call
+            instance._consume = lambda *_args: asyncio.sleep(0)
+            task = asyncio.create_task(instance._stream_once(lifecycle_binding()))
+            await started.wait()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            instance._stop.clear()
+            self.assertFalse(
+                captured["callback"]({"id": "stale", "seq": 6}),
+                "a callback owned by the cancelled stream generation was accepted",
+            )
+
+        asyncio.run(run())
+
     def test_room_origin_turn_blocks_external_room_post_tool_before_network_io(self):
         session_id = "room-session-1"
         turn_id = "room-turn-1"
@@ -362,6 +530,158 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             )
             self.assertFalse(result)
             self.assertEqual(completed[0]["reason"], "historical_epoch_before_dispatch")
+
+        asyncio.run(run())
+
+    def test_lost_cycle_lease_in_open_mode_cannot_escape_as_standalone_post(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            instance = configured_instance(binding, None, [])
+            instance._cycle_attempts.clear()
+            instance._superseded_sources.add("evt-5")
+            published = []
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
+                    "headSeq": 15, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1},
+                })),
+            )
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(
+                0, result=published.append(kwargs),
+            )
+            instance._stop_attempt_renewal = lambda _source_id: asyncio.sleep(0)
+            instance._post_with_fresh_context = lambda *_args, **_kwargs: self.fail(
+                "superseded cycle output escaped through the standalone open-room post path"
+            )
+
+            result = await instance._send_final_owned(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-1"),
+                '{"action":"contribute","body":"late answer"}',
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(instance._terminal_results[
+                adapter._dispatch_source_ref("evt-5", "generation-1")
+            ]["status"], "superseded")
+            self.assertEqual(published[-1]["status"], "superseded")
+            self.assertNotIn("evt-5", instance._superseded_sources)
+            self.assertNotIn("evt-5", binding.delivery_intents)
+
+        asyncio.run(run())
+
+    def test_successful_processing_waits_for_final_receipt_instead_of_passing_cycle(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            source_ref = adapter._dispatch_source_ref("evt-5", "generation-1")
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._state = types.SimpleNamespace(binding=lambda _room_id: binding)
+            instance._terminal_sources = {}
+            instance._terminal_results = {}
+            instance._submission_tasks = {}
+            instance._buffered_source = {}
+            instance._buffered_output = {}
+            instance._cycle_attempts = {"evt-5": cycle_attempt}
+            instance._cycle_response_sources = {"evt-5": "evt-human"}
+            instance._context_activity_pending = {}
+            instance._active_dispatch_rooms = {binding.room_id: "generation-1"}
+            instance._event_dispatch_generation = {"evt-5": "generation-1"}
+            instance._inflight_events = {"evt-5"}
+            instance._queued_events = {}
+            instance._complete_cycle_attempt = lambda *_args, **_kwargs: self.fail(
+                "successful processing passed its cycle before final delivery resolved"
+            )
+            instance._publish = lambda *_args, **_kwargs: self.fail(
+                "successful processing was terminalized without a final receipt"
+            )
+            instance._complete_event = lambda *_args, **_kwargs: self.fail(
+                "source was acknowledged before final delivery resolved"
+            )
+            instance._dispatch_next_queued = lambda *_args, **_kwargs: self.fail(
+                "queued work advanced before final delivery resolved"
+            )
+            event = adapter.MessageEvent(
+                message_id=source_ref,
+                source=types.SimpleNamespace(chat_id=binding.room_id),
+                raw_message={
+                    "id": "evt-5", "seq": 5, "_dispatchGeneration": "generation-1",
+                },
+            )
+
+            await instance.on_processing_complete(event, types.SimpleNamespace(name="success"))
+
+            self.assertIs(instance._cycle_attempts["evt-5"], cycle_attempt)
+            self.assertEqual(binding.acknowledged_cursor, 4)
+            self.assertNotIn("5", binding.inbox)
+
+        asyncio.run(run())
+
+    def test_durable_receipt_overrides_process_local_superseded_marker(self):
+        async def run():
+            binding = lifecycle_binding()
+            snapshots = []
+            instance = configured_instance(binding, None, snapshots)
+            expected_binding = instance._intent_binding(binding)
+            cycle = {
+                "cycle_id": "cycle-1", "attempt_id": "attempt-1", "generation": 3,
+            }
+            binding.delivery_intents["evt-5"].update({
+                "selected": {
+                    "action": "post", "source_event_id": "evt-5", "source_seq": 5,
+                    "body": "Frozen answer", "responds_to": "evt-human",
+                    "recipient_membership_ids": [], "coordination_mode": "coordinated",
+                    "observed_seq": 5, "observed_epoch_id": "epoch-1",
+                    "message_payload_dialect": "v1", "cycle": cycle,
+                    "binding": expected_binding,
+                },
+                "post": {
+                    "body": "Frozen answer", "responds_to": "evt-human",
+                    "recipient_membership_ids": [], "coordination_mode": "coordinated",
+                    "observed_seq": 5, "observed_epoch_id": "epoch-1",
+                    "cycle": cycle, "binding": expected_binding,
+                },
+            })
+            instance._superseded_sources.add("evt-5")
+            calls = {"complete": 0, "post": 0}
+            published = []
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 6, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    raise AssertionError("durably posted delivery was posted again")
+
+                def complete_discussion_attempt(self, *_args):
+                    calls["complete"] += 1
+                    return {"status": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(
+                0, result=published.append(kwargs),
+            )
+            instance._stop_attempt_renewal = lambda _source_id: asyncio.sleep(0)
+
+            result = await instance._send_final_owned(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-1"),
+                "replacement output must be ignored",
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.message_id, "posted-6")
+            self.assertEqual(calls, {"complete": 1, "post": 0})
+            self.assertEqual(published[-1]["status"], "posted")
+            self.assertNotIn("evt-5", instance._superseded_sources)
+            self.assertEqual(binding.delivery_intents["evt-5"]["delivery_state"], "posted")
+            self.assertEqual(binding.delivery_intents["evt-5"]["lifecycle_state"], "complete")
 
         asyncio.run(run())
 

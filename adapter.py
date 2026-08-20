@@ -14,6 +14,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -375,6 +376,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._state: PluginState = load()
         self._tasks: dict[str, asyncio.Task] = {}
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}
+        # urllib's SSE reader blocks for the full stream lifetime.  Giving each
+        # Room binding its own worker prevents long-lived stream reads from
+        # exhausting asyncio's shared default executor, which is also used by
+        # Hermes session persistence and conversation dispatch.
+        self._stream_executors: dict[str, ThreadPoolExecutor] = {}
+        # Each blocking reader owns an opaque generation. Cancelling its
+        # asyncio Future cannot interrupt urllib, so stale callbacks must be
+        # rejected independently of the reusable process-wide stop event.
+        self._stream_generations: dict[str, str] = {}
         self._stop = asyncio.Event()
         self._event_seq: dict[str, dict[str, int]] = {}
         self._event_epoch: dict[str, str] = {}
@@ -462,6 +472,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         getattr(self, "_source_coordination_modes", {}).clear()
         getattr(self, "_open_reply_recipients", {}).clear()
         getattr(self, "_superseded_sources", set()).clear()
+        # Invalidate callbacks before a reconnect can clear _stop. A running
+        # urllib stream cannot be interrupted by Future.cancel() or by
+        # shutdown(wait=False), so retain the one-worker executor per binding.
+        # Reconnect work queues behind that same reader instead of creating an
+        # unbounded series of orphaned SSE threads. Process exit performs the
+        # final executor shutdown.
+        getattr(self, "_stream_generations", {}).clear()
         self._mark_disconnected()
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -1193,6 +1210,26 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     source_ref, dispatch_generation, f"superseded:{source_id}",
                     terminal_status="superseded", reason="stale_epoch",
                 )
+        superseded_sources = getattr(self, "_superseded_sources", set())
+        if durably_posted and source_id in superseded_sources:
+            # A persisted canonical receipt is monotonic delivery evidence and
+            # outranks a process-local lease-loss marker. Only lifecycle debt
+            # remains; never downgrade the receipt to superseded.
+            await self._stop_attempt_renewal(source_id)
+            superseded_sources.discard(source_id)
+        if source_id in superseded_sources:
+            # Lease loss is a terminal ownership boundary. In particular, an
+            # open-room source must never become eligible for the standalone
+            # path merely because renewal removed its expired cycle attempt.
+            await self._stop_attempt_renewal(source_id)
+            getattr(self, "_superseded_sources", set()).discard(source_id)
+            await self._publish(
+                binding, source_id, "terminal", status="superseded", suppress_errors=True,
+            )
+            return self._successful_terminal(
+                source_ref, dispatch_generation, f"superseded:{source_id}",
+                terminal_status="superseded", reason="attempt_lease_lost",
+            )
         try:
             selected = self._select_delivery_intent(
                 binding, source_id, body, responds_to_id, open_recipients,
@@ -1395,14 +1432,6 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 return self._successful_terminal(
                     source_ref, dispatch_generation, event.get("id"),
                     terminal_status="posted", canonical_event_id=str(event.get("id") or ""),
-                )
-            if source_id in getattr(self, "_superseded_sources", set()):
-                await self._stop_attempt_renewal(source_id)
-                getattr(self, "_superseded_sources", set()).discard(source_id)
-                await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
-                return self._successful_terminal(
-                    source_ref, dispatch_generation, f"superseded:{source_id}",
-                    terminal_status="superseded", reason="attempt_lease_lost",
                 )
             if cycle_attempt:
                 cycle_id = str((cycle_attempt.get("cycle") or {}).get("id") or "")
@@ -2187,15 +2216,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _stream_once(self, binding: RoomBinding) -> None:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        generations = getattr(self, "_stream_generations", None)
+        if generations is None:
+            generations = {}
+            self._stream_generations = generations
+        generation = uuid.uuid4().hex
+        generations[binding.room_id] = generation
 
         def on_event(event: dict[str, Any]) -> bool:
-            if self._stop.is_set():
+            if (
+                self._stop.is_set()
+                or generations.get(binding.room_id) != generation
+            ):
                 return False
             if event:
                 loop.call_soon_threadsafe(queue.put_nowait, event)
             return True
 
-        future = asyncio.create_task(self._call(
+        future = asyncio.create_task(self._stream_call(
             binding,
             lambda api: api.stream_events(binding.room_id, binding.cursor, on_event),
         ))
@@ -2212,6 +2250,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # The transport cursor is not the durable acknowledgement cursor.
             # on_processing_complete advances the latter after Hermes finishes.
         finally:
+            if generations.get(binding.room_id) == generation:
+                generations.pop(binding.room_id, None)
             if not future.done():
                 future.cancel()
 
@@ -2954,7 +2994,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     canonical_event_id=str(terminal_result.get("canonical_event_id") or ""),
                     reason=str(terminal_result.get("reason") or ""),
                 )
-            elif cycle_attempt := getattr(self, "_cycle_attempts", {}).get(event_id):
+            elif (
+                outcome_name != "success"
+                and (cycle_attempt := getattr(self, "_cycle_attempts", {}).get(event_id))
+            ):
                 try:
                     await self._complete_cycle_attempt(binding, cycle_attempt, "pass")
                 except ProtocolError as error:
@@ -3563,6 +3606,27 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     async def _call(self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any]) -> Any:
         return await asyncio.to_thread(operation, RoomProtocol(binding.base_url, binding.credential))
+
+    async def _stream_call(
+        self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any],
+    ) -> Any:
+        executors = getattr(self, "_stream_executors", None)
+        if executors is None:
+            executors = {}
+            self._stream_executors = executors
+        executor = executors.get(binding.room_id)
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"room-sse-{binding.room_id[:8]}",
+            )
+            executors[binding.room_id] = executor
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            executor,
+            operation,
+            RoomProtocol(binding.base_url, binding.credential),
+        )
 
     def _binding(self, room_id: str) -> RoomBinding:
         binding = self._state.binding(room_id)

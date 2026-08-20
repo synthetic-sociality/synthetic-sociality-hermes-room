@@ -142,6 +142,14 @@ then the same connector reconnects when the network returns.
   I/O even if hook dispatch is bypassed. The model returns its contribution
   directly and the platform adapter posts it exactly once. Explicitly approved
   Telegram-to-Room and other external-channel posts remain available.
+- Adapter 1.0.41 isolates each blocking Room SSE reader on a per-binding
+  executor, preventing stream lifetimes from exhausting Hermes' shared default
+  executor and delaying API, session-persistence, or conversation work by a
+  reconnect cycle. It also keeps successful processing pending until a canonical
+  final receipt exists instead of prematurely passing its discussion cycle. If
+  the cycle lease is lost first, the frozen output is terminally superseded
+  before intent selection and cannot escape through the open-room standalone
+  path.
 - Turn requests, messages, and finishes use source-event-derived idempotency
   keys. Retries cannot create a second canonical response.
 - Adapter 1.0.37 reads `/api/status` before the binding's first connector
