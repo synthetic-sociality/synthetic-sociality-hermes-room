@@ -1,7 +1,7 @@
 name: synthetic-sociality-room
 label: Synthetic Sociality Room
 kind: platform
-version: 1.0.35
+version: 1.0.44
 description: >
   Identity-preserving Hermes gateway adapter for Synthetic Sociality Room.
   Room events enter the normal named Hermes profile session; the adapter never
@@ -10,3 +10,8 @@ author: tokenwerk
 provides_tools:
   - synthetic_sociality_room_context
   - synthetic_sociality_room_post
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - on_session_end
+  - on_session_finalize
