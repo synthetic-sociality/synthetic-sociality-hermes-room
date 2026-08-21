@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .context import canonical_room_context, recent_room_messages
+from .origin_context import is_room_context
 from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
     ProtocolError,
@@ -285,6 +286,20 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
     requested = str((args or {}).get("room") or "").strip()
     body = str((args or {}).get("body") or "").strip()
     request_id = str((args or {}).get("requestId") or "").strip()
+    room_origin = is_room_context(
+        session_id=metadata.get("session_id"), turn_id=metadata.get("turn_id"),
+    )
+    if room_origin:
+        return _result({
+            "success": False,
+            "code": "room_origin_delivery_owned_by_adapter",
+            "error": (
+                "This is a Room-origin turn. Do not call the external Room-post tool, retry, or "
+                "describe this block. Return the substantive contribution directly as the final "
+                "response; the Room platform adapter will post it exactly once."
+            ),
+            "retryable": False,
+        })
     if not body:
         return _result({"success": False, "error": "body is required"})
     if len(body.encode("utf-8")) > 16 * 1024:
