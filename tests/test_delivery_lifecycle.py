@@ -484,15 +484,184 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_room_origin_provider_retry_fallback_passes_cycle_without_post(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            calls = {"room_state": 0, "complete": 0, "post": 0}
+            completions = []
+
+            class API:
+                def room_state(self, _room_id):
+                    calls["room_state"] += 1
+                    return {
+                        "headSeq": 5,
+                        "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1},
+                    }
+
+                def complete_discussion_attempt(self, room_id, cycle_id, attempt_id, payload):
+                    calls["complete"] += 1
+                    completions.append((room_id, cycle_id, attempt_id, copy.deepcopy(payload)))
+                    return {"state": "completed"}
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    raise AssertionError("provider retry fallback reached canonical Room post")
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+
+            result = await instance._send_final(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-error"),
+                "⚠️ The model provider failed after retries. I kept raw provider details "
+                "out of chat; check gateway logs for diagnostics.",
+            )
+
+            replay = await instance._send_final(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-error"),
+                "⚠️ The model provider failed after retries. I kept raw provider details "
+                "out of chat; check gateway logs for diagnostics.",
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.message_id, "skipped:evt-5")
+            self.assertTrue(replay.success)
+            self.assertEqual(replay.message_id, "skipped:evt-5")
+            self.assertEqual(calls, {"room_state": 1, "complete": 1, "post": 0})
+            self.assertEqual(
+                completions,
+                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "pass"})],
+            )
+            self.assertNotIn("evt-5", instance._cycle_attempts)
+
+        asyncio.run(run())
+
+    def test_provider_retry_fallback_whitespace_and_punctuation_near_matches_are_posted(self):
+        fallback = (
+            "⚠️ The model provider failed after retries. I kept raw provider details "
+            "out of chat; check gateway logs for diagnostics."
+        )
+        near_matches = [f" {fallback}", f"{fallback} ", f"{fallback}!"]
+
+        async def exercise(content):
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            posted_bodies = []
+            completions = []
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    return cycle_attempt
+
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *args, **_kwargs):
+                    posted_bodies.append(args[4])
+                    return {"id": "posted-6", "seq": 6, "ts": "2026-08-17T00:00:00Z"}
+
+                def complete_discussion_attempt(self, _room_id, _cycle_id, _attempt_id, payload):
+                    completions.append(copy.deepcopy(payload))
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            result = await instance._send_final(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-error"),
+                content,
+            )
+            return result, posted_bodies, completions
+
+        for content in near_matches:
+            with self.subTest(content=content):
+                result, posted_bodies, completions = asyncio.run(exercise(content))
+                self.assertTrue(result.success, getattr(result, "error", None))
+                self.assertEqual(result.message_id, "posted-6")
+                self.assertEqual(posted_bodies, [content.strip()])
+                self.assertEqual(
+                    completions,
+                    [{"generation": 3, "action": "contribute", "eventId": "posted-6"}],
+                )
+
+    def test_provider_retry_fallback_in_contribute_envelope_reaches_canonical_post(self):
+        async def run():
+            fallback = (
+                "⚠️ The model provider failed after retries. I kept raw provider details "
+                "out of chat; check gateway logs for diagnostics."
+            )
+            content = json.dumps({"action": "contribute", "body": fallback})
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            posted_bodies = []
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    return cycle_attempt
+
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *args, **_kwargs):
+                    posted_bodies.append(args[4])
+                    return {"id": "posted-6", "seq": 6, "ts": "2026-08-17T00:00:00Z"}
+
+                def complete_discussion_attempt(self, *_args):
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            result = await instance._send_final(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-error"),
+                content,
+            )
+
+            self.assertTrue(result.success, getattr(result, "error", None))
+            self.assertEqual(result.message_id, "posted-6")
+            self.assertEqual(posted_bodies, [fallback])
+
+        asyncio.run(run())
+
     def test_gateway_error_words_in_contribute_envelope_remain_visible(self):
-        body = (
-            "Sorry, I encountered an unexpected error.\n"
-            "Try again or use /reset to start a fresh session."
-        )
-        self.assertEqual(
-            adapter.extract_visible_body(json.dumps({"action": "contribute", "body": body})),
-            body,
-        )
+        bodies = [
+            (
+                "Sorry, I encountered an unexpected error.\n"
+                "Try again or use /reset to start a fresh session."
+            ),
+            (
+                "⚠️ The model provider failed after retries. I kept raw provider details "
+                "out of chat; check gateway logs for diagnostics."
+            ),
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertEqual(
+                    adapter.extract_visible_body(json.dumps({"action": "contribute", "body": body})),
+                    body,
+                )
 
     def test_epoch_thread_id_is_stable_within_epoch_and_rotates_between_epochs(self):
         expected = "room-epoch-v1:" + hashlib.sha256(b"epoch-1").hexdigest()
