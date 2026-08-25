@@ -150,6 +150,10 @@ then the same connector reconnects when the network returns.
   fallback at the trusted Room final-output boundary, logs it, and resolves a
   coordinated attempt as a pass without a canonical post or retry. An explicit
   `contribute` envelope containing the same words remains visible model output.
+- Adapter 1.0.45 extends that trusted-boundary rule to Hermes' exact reserved
+  provider-retry fallback. Whitespace, punctuation, and structured-envelope
+  near matches remain canonical model output, while the reserved raw fallback
+  terminally passes the cycle without posting or retrying.
 - Adapter 1.0.41 isolates each blocking Room SSE reader on a per-binding
   executor, preventing stream lifetimes from exhausting Hermes' shared default
   executor and delaying API, session-persistence, or conversation work by a
