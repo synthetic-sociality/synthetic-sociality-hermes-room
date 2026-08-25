@@ -67,10 +67,16 @@ _PRIVATE_APPROVAL = re.compile(
     r"(?:approval\s+(?:is\s+)?required|reply\s+[`\"']?/?approve|/approve\b|dangerous\s+command)",
     re.IGNORECASE,
 )
-_GATEWAY_GENERIC_OPERATIONAL_ERROR = (
-    "Sorry, I encountered an unexpected error.\n"
-    "Try again or use /reset to start a fresh session."
-)
+_GATEWAY_OPERATIONAL_ERRORS = frozenset({
+    (
+        "Sorry, I encountered an unexpected error.\n"
+        "Try again or use /reset to start a fresh session."
+    ),
+    (
+        "⚠️ The model provider failed after retries. I kept raw provider details "
+        "out of chat; check gateway logs for diagnostics."
+    ),
+})
 # A room message that has not completed within this period is retried. Time is
 # never terminal evidence and therefore can never advance acknowledgement.
 PENDING_EVENT_TTL_SECONDS = 180.0
@@ -1179,7 +1185,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # final text without error metadata. Match only its exact raw body at
         # this trusted Room-origin boundary; an explicit contribute envelope
         # containing the same words remains ordinary model-authored output.
-        gateway_operational_error = (content or "").strip() == _GATEWAY_GENERIC_OPERATIONAL_ERROR
+        gateway_operational_error = (
+            isinstance(content, str) and content in _GATEWAY_OPERATIONAL_ERRORS
+        )
         if gateway_operational_error:
             logger.error(
                 "Suppressed Hermes gateway operational fallback for Room %s source %s",
