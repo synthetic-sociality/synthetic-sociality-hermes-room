@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.44",
+  "adapterVersion": "1.0.45",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -16,7 +16,8 @@
     "crossChannelDelivery": "explicit_profile_action_through_room_policy_path",
     "crossChannelRoomRead": "read_only_profile_tool",
     "presence": "connector_heartbeat_lease",
-    "presentationAcknowledgement": "ephemeral_after_authenticated_epoch_fence_before_context_or_model"
+    "presentationAcknowledgement": "ephemeral_after_authenticated_epoch_fence_before_context_or_model",
+    "operationalFallback": "exact_reserved_hermes_generic_or_provider_failure_text_terminalizes_as_skip_without_post"
   },
   "fixtures": {
     "DLV1-01": "test_selection_persistence_failure_prevents_post",
@@ -56,7 +57,9 @@
   },
   "roomOriginOperationalErrorFixtures": {
     "generic_gateway_error_passes_without_post_or_retry": "test_room_origin_gateway_generic_error_passes_cycle_without_post_or_retry",
-    "explicit_contribute_envelope_remains_visible": "test_gateway_error_words_in_contribute_envelope_remain_visible"
+    "provider_retry_error_passes_without_post_or_retry": "test_room_origin_provider_retry_fallback_passes_cycle_without_post",
+    "near_match_plaintext_remains_visible": "test_provider_retry_fallback_whitespace_and_punctuation_near_matches_are_posted",
+    "explicit_contribute_envelope_remains_visible": "test_provider_retry_fallback_in_contribute_envelope_reaches_canonical_post"
   },
   "presentationAcknowledgementFixtures": {
     "before_policy_coordination_queue_context_and_model": "test_receive_boundary_ack_precedes_policy_coordination_queue_context_and_model",
