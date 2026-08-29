@@ -85,6 +85,59 @@ TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "cancelled", "superseded
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 
 
+def host_operational_outcome(metadata: Any) -> dict[str, Any] | None:
+    """Consume Hermes core's trusted operational outcome metadata.
+
+    ``operational_outcome`` is canonical. ``error_surface`` remains an
+    input-only compatibility alias for older Hermes producers.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    canonical_present = "operational_outcome" in metadata
+    value = (
+        metadata.get("operational_outcome")
+        if canonical_present else metadata.get("error_surface")
+    )
+    if not isinstance(value, dict):
+        if not canonical_present:
+            return None
+        return {
+            "layer": "host",
+            "code": "invalid_operational_outcome",
+            "retryable": False,
+            "provider": "",
+            "model": "",
+            "attempt_action": "fail",
+        }
+    layer = value.get("layer")
+    code = value.get("code")
+    retryable = value.get("retryable")
+    if (
+        not isinstance(layer, str) or not layer
+        or not isinstance(code, str) or not code
+        or type(retryable) is not bool
+    ):
+        if not canonical_present:
+            return None
+        return {
+            "layer": "host",
+            "code": "invalid_operational_outcome",
+            "retryable": False,
+            "provider": "",
+            "model": "",
+            "attempt_action": "fail",
+        }
+    action = "pass" if layer in {"provider", "endpoint", "streaming"} and retryable else "fail"
+    return {
+        "layer": layer,
+        "code": code,
+        "retryable": retryable,
+        "provider": value.get("provider", "") if isinstance(value.get("provider", ""), str) else "",
+        "model": value.get("model", "") if isinstance(value.get("model", ""), str) else "",
+        "attempt_action": action,
+    }
+
+
 def _on_pre_llm_call(**kwargs: Any) -> None:
     is_room_context(**kwargs)
 
@@ -328,6 +381,168 @@ def _cycle_attempt_owner_key(
     ))
 
 
+def _attempt_authority_key(
+    binding: RoomBinding, source_id: str, cycle_attempt: dict[str, Any],
+) -> str:
+    cycle = cycle_attempt.get("cycle") or {}
+    attempt = cycle_attempt.get("attempt") or {}
+    return json.dumps([
+        binding.room_id, source_id, binding.membership_id,
+        str(cycle.get("id") or ""), str(attempt.get("id") or ""),
+        int(cycle.get("generation") or 0),
+    ], separators=(",", ":"), ensure_ascii=False)
+
+
+def _attempt_authority_record(
+    binding: RoomBinding, source_id: str, cycle_attempt: dict[str, Any],
+) -> dict[str, Any]:
+    cycle = cycle_attempt.get("cycle") or {}
+    attempt = cycle_attempt.get("attempt") or {}
+    return {
+        "room_id": binding.room_id,
+        "source_event_id": source_id,
+        "membership_id": binding.membership_id,
+        "cycle_id": str(cycle.get("id") or ""),
+        "attempt_id": str(attempt.get("id") or ""),
+        "generation": int(cycle.get("generation") or 0),
+        "lease_expires_at": str(attempt.get("leaseExpiresAt") or ""),
+        "state": "active",
+    }
+
+
+def _attempt_authority_matches(
+    record: dict[str, Any],
+    binding: RoomBinding,
+    source_id: str,
+    cycle_attempt: dict[str, Any],
+) -> bool:
+    cycle = cycle_attempt.get("cycle") or {}
+    attempt = cycle_attempt.get("attempt") or {}
+    generation = cycle.get("generation")
+    return (
+        record.get("room_id") == binding.room_id
+        and record.get("source_event_id") == source_id
+        and record.get("membership_id") == binding.membership_id
+        and record.get("cycle_id") == str(cycle.get("id") or "")
+        and record.get("attempt_id") == str(attempt.get("id") or "")
+        and type(record.get("generation")) is int
+        and type(generation) is int
+        and record["generation"] == generation
+    )
+
+
+def _cycle_payload_identity(payload: dict[str, Any]) -> tuple[str, str, int] | None:
+    """Return a complete cycle identity, rejecting partial identity metadata."""
+    identity_keys = ("cycle_id", "attempt_id", "generation")
+    if not any(key in payload for key in identity_keys):
+        return None
+    cycle_id = payload.get("cycle_id")
+    attempt_id = payload.get("attempt_id")
+    generation = payload.get("generation")
+    if (
+        not isinstance(cycle_id, str) or not cycle_id
+        or not isinstance(attempt_id, str) or not attempt_id
+        or type(generation) is not int or generation < 0
+    ):
+        raise ProtocolError(
+            "Cycle-bound message metadata requires a complete cycle identity",
+            code="cycle_identity_incomplete", retryable=False,
+        )
+    return cycle_id, attempt_id, generation
+
+
+def _post_cycle_authority_attempt(
+    cycle_payload: dict[str, Any],
+    selected_cycle: dict[str, Any],
+    cycle_attempt: dict[str, Any] | None,
+    membership_id: str,
+) -> dict[str, Any] | None:
+    """Bind every cycle-bearing post representation to one exact identity."""
+    payload_identity = _cycle_payload_identity(cycle_payload)
+    selected_identity = _cycle_payload_identity(selected_cycle)
+    expected_identity: tuple[str, str, int] | None = None
+    if cycle_attempt is not None:
+        cycle = cycle_attempt.get("cycle") if isinstance(cycle_attempt, dict) else None
+        attempt = cycle_attempt.get("attempt") if isinstance(cycle_attempt, dict) else None
+        if not isinstance(cycle, dict) or not isinstance(attempt, dict):
+            raise ProtocolError(
+                "Cycle-bound message metadata requires a complete cycle identity",
+                code="cycle_identity_incomplete", retryable=False,
+            )
+        generation = cycle.get("generation")
+        if (
+            not isinstance(cycle.get("id"), str) or not cycle["id"]
+            or not isinstance(attempt.get("id"), str) or not attempt["id"]
+            or attempt.get("membershipId") != membership_id
+            or type(generation) is not int or generation < 0
+        ):
+            raise ProtocolError(
+                "Cycle-bound message metadata requires a complete cycle identity",
+                code="cycle_identity_incomplete", retryable=False,
+            )
+        expected_identity = (cycle["id"], attempt["id"], generation)
+    identities = [
+        identity for identity in (payload_identity, selected_identity, expected_identity)
+        if identity is not None
+    ]
+    if not identities:
+        return None
+    if payload_identity is None or any(identity != identities[0] for identity in identities[1:]):
+        raise ProtocolError(
+            "Cycle-bound message identities do not match",
+            code="attempt_authority_mismatch", retryable=False,
+        )
+    if cycle_attempt is not None:
+        return cycle_attempt
+    cycle_id, attempt_id, generation = payload_identity
+    return {
+        "cycle": {"id": cycle_id, "generation": generation},
+        "attempt": {"id": attempt_id, "membershipId": membership_id},
+    }
+
+
+def _refreshed_claim_matches_expected(
+    refreshed: dict[str, Any] | None,
+    expected: dict[str, Any],
+    membership_id: str,
+) -> bool:
+    """Validate every server-owned dimension of a refreshed cycle claim."""
+    if not isinstance(refreshed, dict):
+        return False
+    refreshed_cycle = refreshed.get("cycle")
+    refreshed_attempt = refreshed.get("attempt")
+    expected_cycle = expected.get("cycle")
+    expected_attempt = expected.get("attempt")
+    if not all(isinstance(value, dict) for value in (
+        refreshed_cycle, refreshed_attempt, expected_cycle, expected_attempt,
+    )):
+        return False
+    raw_expiry = refreshed_attempt.get("leaseExpiresAt")
+    if not _valid_canonical_timestamp(raw_expiry):
+        return False
+    try:
+        expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return False
+    refreshed_generation = refreshed_cycle.get("generation")
+    expected_generation = expected_cycle.get("generation")
+    return (
+        isinstance(expected_cycle.get("id"), str)
+        and bool(expected_cycle["id"])
+        and refreshed_cycle.get("id") == expected_cycle["id"]
+        and isinstance(expected_attempt.get("id"), str)
+        and bool(expected_attempt["id"])
+        and refreshed_attempt.get("id") == expected_attempt["id"]
+        and expected_attempt.get("membershipId") == membership_id
+        and refreshed_attempt.get("membershipId") == membership_id
+        and type(expected_generation) is int
+        and type(refreshed_generation) is int
+        and refreshed_generation == expected_generation
+        and expiry.tzinfo is not None
+        and expiry > datetime.now(timezone.utc)
+    )
+
+
 def _release_cycle_attempt_owner(binding: RoomBinding, source_id: str) -> None:
     if not source_id:
         return
@@ -526,7 +741,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._buffered_source[preview_id] = source_ref
             self._buffered_output[preview_id] = content
             return SendResult(success=True, message_id=preview_id)
-        return await self._send_final(chat_id, source_ref, content)
+        return await self._send_final(
+            chat_id, source_ref, content,
+            operational_outcome=host_operational_outcome(metadata),
+        )
 
     async def _send_with_retry(
         self,
@@ -576,7 +794,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         final_content = self._buffered_output.get(message_id, content)
         return await self._send_final(chat_id, source_id, final_content)
 
-    async def _send_final(self, chat_id: str, source_ref: str, content: str) -> SendResult:
+    async def _send_final(
+        self,
+        chat_id: str,
+        source_ref: str,
+        content: str,
+        *,
+        operational_outcome: dict[str, Any] | None = None,
+    ) -> SendResult:
         """Converge final send/edit/completion callbacks on one submission."""
         source_id, dispatch_generation = _decode_dispatch_source(source_ref)
         cached = getattr(self, "_terminal_results", {}).get(source_ref)
@@ -590,7 +815,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         task = tasks.get(source_ref)
         if task is None:
             task = asyncio.create_task(
-                self._send_final_owned(chat_id, source_ref, content),
+                self._send_final_owned(
+                    chat_id, source_ref, content,
+                    operational_outcome=operational_outcome,
+                ),
                 name=f"synthetic-sociality:submit:{chat_id}:{source_id}",
             )
             tasks[source_ref] = task
@@ -1176,7 +1404,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding.room_id, source_id,
             )
 
-    async def _send_final_owned(self, chat_id: str, source_ref: str, content: str) -> SendResult:
+    async def _send_final_owned(
+        self,
+        chat_id: str,
+        source_ref: str,
+        content: str,
+        *,
+        operational_outcome: dict[str, Any] | None = None,
+    ) -> SendResult:
         source_id, dispatch_generation = _decode_dispatch_source(source_ref)
         binding = self._binding(chat_id)
         if not self._binding_generation_active(binding):
@@ -1188,7 +1423,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         gateway_operational_error = (
             isinstance(content, str) and content in _GATEWAY_OPERATIONAL_ERRORS
         )
-        if gateway_operational_error:
+        typed_operational_outcome = operational_outcome is not None
+        if typed_operational_outcome:
+            logger.error(
+                "Consumed Hermes operational outcome %s for Room %s source %s",
+                f"{operational_outcome['layer']}:{operational_outcome['code']}", chat_id, source_id,
+            )
+            body = None
+        elif gateway_operational_error:
             logger.error(
                 "Suppressed Hermes gateway operational fallback for Room %s source %s",
                 chat_id, source_id,
@@ -1279,7 +1521,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             }
         if body is None:
             if cycle_attempt:
-                await self._complete_cycle_attempt(binding, cycle_attempt, "pass")
+                attempt_action = (
+                    operational_outcome["attempt_action"]
+                    if typed_operational_outcome else "pass"
+                )
+                await self._complete_cycle_attempt(binding, cycle_attempt, attempt_action)
                 await self._stop_attempt_renewal(source_id)
                 self._cycle_attempts.pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
@@ -1295,7 +1541,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return self._successful_terminal(
                 source_ref, dispatch_generation, f"skipped:{source_id}",
                 terminal_status="skipped",
-                reason=("gateway_operational_error" if gateway_operational_error else "model_skip"),
+                reason=(
+                    f"host_operational_outcome:{operational_outcome['layer']}:{operational_outcome['code']}"
+                    if typed_operational_outcome
+                    else ("legacy_gateway_operational_error" if gateway_operational_error else "model_skip")
+                ),
             )
         event: dict[str, Any] | None = None
         canonical_recorded = False
@@ -1653,6 +1903,82 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._publish(binding, source_id, "terminal", status="failed", suppress_errors=True)
             return SendResult(success=False, error=str(error), retryable=True)
 
+    async def _refresh_attempt_authority(
+        self,
+        binding: RoomBinding,
+        source_id: str,
+        cycle_attempt: dict[str, Any],
+    ) -> None:
+        """Re-authenticate and durably fence one exact attempt generation."""
+        key = _attempt_authority_key(binding, source_id, cycle_attempt)
+        record = binding.delivery_authority.get(key)
+        if not isinstance(record, dict):
+            raise ProtocolError(
+                "Discussion attempt has no durable delivery authority",
+                code="attempt_authority_missing", retryable=False,
+            )
+        if not _attempt_authority_matches(record, binding, source_id, cycle_attempt):
+            raise ProtocolError(
+                "Discussion attempt durable authority identity does not match",
+                code="attempt_authority_mismatch", retryable=False,
+            )
+        if record.get("state") == "superseded":
+            raise ProtocolError(
+                "Discussion attempt authority was durably superseded",
+                code="attempt_authority_superseded", retryable=False,
+            )
+        cycle = cycle_attempt.get("cycle") or {}
+        refreshed = await self._claim_discussion_attempt(binding, str(cycle.get("id") or ""))
+        active = _refreshed_claim_matches_expected(
+            refreshed, cycle_attempt, binding.membership_id,
+        )
+        if not active:
+            record["state"] = "superseded"
+            binding.delivery_authority[key] = record
+            if not self._persist_binding(binding):
+                raise ProtocolError(
+                    "Room authority loss could not be persisted",
+                    code="binding_changed", retryable=False,
+                )
+            raise ProtocolError(
+                "Discussion attempt authority expired or was superseded",
+                code="cycle_superseded", retryable=False,
+            )
+        current = binding.delivery_authority.get(key)
+        if not isinstance(current, dict) or not _attempt_authority_matches(
+            current, binding, source_id, cycle_attempt,
+        ):
+            raise ProtocolError(
+                "Discussion attempt durable authority identity does not match",
+                code="attempt_authority_mismatch", retryable=False,
+            )
+        if current.get("state") == "superseded":
+            raise ProtocolError(
+                "Discussion attempt authority was durably superseded",
+                code="attempt_authority_superseded", retryable=False,
+            )
+        binding.delivery_authority[key] = _attempt_authority_record(
+            binding, source_id, refreshed,
+        )
+        if not self._persist_binding(binding):
+            raise ProtocolError(
+                "Room authority refresh could not be persisted",
+                code="binding_changed", retryable=False,
+            )
+        persisted_record = binding.delivery_authority.get(key)
+        if not isinstance(persisted_record, dict) or not _attempt_authority_matches(
+            persisted_record, binding, source_id, cycle_attempt,
+        ):
+            raise ProtocolError(
+                "Discussion attempt durable authority identity does not match",
+                code="attempt_authority_mismatch", retryable=False,
+            )
+        if persisted_record.get("state") == "superseded":
+            raise ProtocolError(
+                "Discussion attempt authority was durably superseded",
+                code="attempt_authority_superseded", retryable=False,
+            )
+
     async def _post_with_fresh_context(
         self,
         binding: RoomBinding,
@@ -1673,12 +1999,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         selected_value = intent.get("selected")
         selected = selected_value if isinstance(selected_value, dict) else {}
         persisted = intent.get("post")
+        authority_attempt: dict[str, Any] | None
         if isinstance(persisted, dict):
             turn_id = str(persisted["turn_id"])
             observed = int(persisted["observed_seq"])
             observed_epoch = str(persisted["observed_epoch_id"])
             body = str(persisted["body"])
             cycle_payload = dict(persisted.get("cycle") or {})
+            authority_attempt = _post_cycle_authority_attempt(
+                cycle_payload, dict(selected.get("cycle") or {}), cycle_attempt,
+                binding.membership_id,
+            )
             payload_dialect = self._persisted_payload_dialect(persisted)
             if "message_payload_dialect" not in persisted:
                 persisted["message_payload_dialect"] = payload_dialect
@@ -1706,6 +2037,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 cycle_payload = dict(selected.get("cycle") or {})
             else:
                 cycle_payload = _cycle_delivery_payload(cycle_attempt, binding.membership_id)
+            authority_attempt = _post_cycle_authority_attempt(
+                cycle_payload, dict(selected.get("cycle") or {}), cycle_attempt,
+                binding.membership_id,
+            )
             payload_dialect = str(selected.get("message_payload_dialect") or binding.message_payload_dialect)
             if payload_dialect not in {"v1", "v2"}:
                 raise ProtocolError(
@@ -1759,6 +2094,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         payload_dialect = self._persisted_payload_dialect(intent["post"])
         for attempt in range(3):
             try:
+                if authority_attempt is not None:
+                    await self._refresh_attempt_authority(binding, source_id, authority_attempt)
+                    checkpoint = getattr(self, "_post_admission_checkpoint", None)
+                    if checkpoint is not None and attempt == 0:
+                        await checkpoint(binding, source_id, authority_attempt)
+                    # Re-authenticate after any suspension and immediately
+                    # before the canonical submission boundary.
+                    await self._refresh_attempt_authority(binding, source_id, authority_attempt)
                 def post(api: RoomProtocol) -> dict[str, Any]:
                     if cycle_payload:
                         return _with_message_payload_dialect(
@@ -2270,7 +2613,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 except asyncio.TimeoutError:
                     continue
                 await self._consume(binding, event)
-            result = await future
+            await future
             while not queue.empty():
                 await self._consume(binding, queue.get_nowait())
             # The transport cursor is not the durable acknowledgement cursor.
@@ -2638,6 +2981,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
                 return
             binding.cycle_attempt_owners[attempt_key] = event_id
+            if str((cycle_attempt.get("attempt") or {}).get("leaseExpiresAt") or ""):
+                authority_key = _attempt_authority_key(binding, event_id, cycle_attempt)
+                binding.delivery_authority[authority_key] = _attempt_authority_record(
+                    binding, event_id, cycle_attempt,
+                )
             if not self._persist_binding(binding):
                 return
             cycle_attempts = getattr(self, "_cycle_attempts", None)
@@ -2813,8 +3161,76 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             pass
                     await asyncio.sleep(delay)
                     refreshed = await self._claim_discussion_attempt(binding, cycle_id)
-                    refreshed_attempt = str(((refreshed or {}).get("attempt") or {}).get("id") or "")
-                    if not refreshed or refreshed_attempt != attempt_id:
+                    authority_key = _attempt_authority_key(
+                        binding, source_event_id, cycle_attempt,
+                    )
+                    refreshed_is_valid = _refreshed_claim_matches_expected(
+                        refreshed, cycle_attempt, binding.membership_id,
+                    )
+                    if refreshed_is_valid:
+                        refreshed_is_valid = (
+                            _attempt_authority_key(
+                                binding, source_event_id, refreshed,
+                            ) == authority_key
+                        )
+                    if not refreshed_is_valid:
+                        cycle_attempts.pop(source_event_id, None)
+                        authority = binding.delivery_authority.get(authority_key)
+                        if isinstance(authority, dict):
+                            authority["state"] = "superseded"
+                            binding.delivery_authority[authority_key] = authority
+                            if not self._persist_binding(binding):
+                                raise ProtocolError(
+                                    "Room authority loss could not be persisted",
+                                    code="binding_changed", retryable=False,
+                                )
+                        superseded = getattr(self, "_superseded_sources", None)
+                        if superseded is None:
+                            superseded = set()
+                            self._superseded_sources = superseded
+                        superseded.add(source_event_id)
+                        return
+                    current_authority = binding.delivery_authority.get(authority_key)
+                    if (
+                        not isinstance(current_authority, dict)
+                        or not _attempt_authority_matches(
+                            current_authority, binding, source_event_id, cycle_attempt,
+                        )
+                        or current_authority.get("state") == "superseded"
+                    ):
+                        cycle_attempts.pop(source_event_id, None)
+                        superseded = getattr(self, "_superseded_sources", None)
+                        if superseded is None:
+                            superseded = set()
+                            self._superseded_sources = superseded
+                        superseded.add(source_event_id)
+                        return
+                    binding.delivery_authority[authority_key] = _attempt_authority_record(
+                        binding, source_event_id, refreshed,
+                    )
+                    if not self._persist_binding(binding):
+                        cycle_attempts.pop(source_event_id, None)
+                        binding.delivery_authority[authority_key]["state"] = "superseded"
+                        superseded = getattr(self, "_superseded_sources", None)
+                        if superseded is None:
+                            superseded = set()
+                            self._superseded_sources = superseded
+                        superseded.add(source_event_id)
+                        raise ProtocolError(
+                            "Room authority refresh could not be persisted",
+                            code="binding_changed", retryable=False,
+                        )
+                    persisted_authority = binding.delivery_authority.get(authority_key)
+                    if (
+                        not isinstance(persisted_authority, dict)
+                        or not _attempt_authority_matches(
+                            persisted_authority,
+                            binding,
+                            source_event_id,
+                            cycle_attempt,
+                        )
+                        or persisted_authority.get("state") == "superseded"
+                    ):
                         cycle_attempts.pop(source_event_id, None)
                         superseded = getattr(self, "_superseded_sources", None)
                         if superseded is None:
@@ -2833,6 +3249,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     exc_info=True,
                 )
                 cycle_attempts.pop(source_event_id, None)
+                authority_key = _attempt_authority_key(binding, source_event_id, cycle_attempt)
+                authority = binding.delivery_authority.get(authority_key)
+                if isinstance(authority, dict):
+                    authority["state"] = "superseded"
+                    binding.delivery_authority[authority_key] = authority
+                    self._persist_binding(binding)
                 superseded = getattr(self, "_superseded_sources", None)
                 if superseded is None:
                     superseded = set()
@@ -3560,6 +3982,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             }
             existing.delivery_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
             existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
+            merged_authority = copy.deepcopy(binding.delivery_authority)
+            for key, durable_record in existing.delivery_authority.items():
+                if (
+                    isinstance(durable_record, dict)
+                    and durable_record.get("state") == "superseded"
+                ):
+                    merged_authority[key] = copy.deepcopy(durable_record)
+            existing.delivery_authority = merged_authority
+            binding.delivery_authority = copy.deepcopy(merged_authority)
             existing.abandoned_delivery_intents = {
                 source_id: dict(receipt)
                 for source_id, receipt in binding.abandoned_delivery_intents.items()
@@ -3788,7 +4219,12 @@ def extract_visible_body(content: str) -> str | None:
             body = envelope.get("body")
             if isinstance(body, str) and body.strip():
                 return body.strip()
-        # Envelope-looking output is metadata, never transcript prose.
+            if not action:
+                # JSON prose is not a trusted host metadata channel. Preserve
+                # model-authored metadata-shaped text unless the local send
+                # metadata independently carries a typed error surface.
+                return value or None
+        # Recognized but incomplete action envelopes are metadata, not prose.
         return None
     tagged = _ATTRIBUTE_BODY.match(candidate)
     if tagged:

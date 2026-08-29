@@ -102,6 +102,8 @@ class RoomBinding:
     # Different canonical source events may describe the same attempt; only
     # the recorded source is allowed to dispatch it to Hermes.
     cycle_attempt_owners: dict[str, str] = field(default_factory=dict)
+    # Durable stale-delivery fence keyed by exact authority dimensions.
+    delivery_authority: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Secret-free forensic receipts for explicitly recovered delivery intents
     # whose canonical source was already acknowledged and whose server-owned
     # discussion cycle had terminally accepted a pass with zero bytes. The
@@ -140,6 +142,55 @@ class RoomBinding:
             raise ValueError("unsupported Room message payload dialect")
         if not isinstance(binding.delivery_lifecycle, dict):
             raise ValueError("Room delivery lifecycle journal must be an object")
+        if not isinstance(binding.delivery_authority, dict):
+            raise ValueError("Room delivery authority fence must be an object")
+        normalized_authority: dict[str, dict[str, Any]] = {}
+        for key, record in binding.delivery_authority.items():
+            if not isinstance(key, str) or not isinstance(record, dict):
+                raise ValueError("Room delivery authority entry is invalid")
+            canonical_key = json.dumps([
+                record.get("room_id"), record.get("source_event_id"),
+                record.get("membership_id"), record.get("cycle_id"),
+                record.get("attempt_id"), record.get("generation"),
+            ], separators=(",", ":"), ensure_ascii=False)
+            legacy_key = json.dumps([
+                record.get("room_id"), record.get("source_event_id"),
+                record.get("membership_id"), record.get("attempt_id"),
+                record.get("generation"),
+            ], separators=(",", ":"), ensure_ascii=False)
+            if key == legacy_key and key != canonical_key:
+                # A legacy active key did not bind cycle_id and therefore cannot
+                # safely authorize work after upgrade. Preserve only its
+                # denial-only superseded state under the cycle-bound key.
+                if record.get("state") != "superseded":
+                    continue
+                key = canonical_key
+            previous = normalized_authority.get(key)
+            if not isinstance(previous, dict) or previous.get("state") != "superseded":
+                normalized_authority[key] = record
+        binding.delivery_authority = normalized_authority
+        for key, record in binding.delivery_authority.items():
+            expected_key = json.dumps([
+                record.get("room_id"), record.get("source_event_id"),
+                record.get("membership_id"), record.get("cycle_id"),
+                record.get("attempt_id"), record.get("generation"),
+            ], separators=(",", ":"), ensure_ascii=False)
+            if (
+                key != expected_key
+                or record.get("room_id") != binding.room_id
+                or record.get("membership_id") != binding.membership_id
+                or not isinstance(record.get("source_event_id"), str)
+                or not record["source_event_id"]
+                or not isinstance(record.get("cycle_id"), str)
+                or not record["cycle_id"]
+                or not isinstance(record.get("attempt_id"), str)
+                or not record["attempt_id"]
+                or type(record.get("generation")) is not int
+                or record["generation"] < 0
+                or not _valid_canonical_timestamp(record.get("lease_expires_at"))
+                or record.get("state") not in {"active", "superseded"}
+            ):
+                raise ValueError("Room delivery authority evidence is invalid")
         for source_id, record in binding.delivery_lifecycle.items():
             if not isinstance(source_id, str) or not source_id or not isinstance(record, dict):
                 raise ValueError("Room delivery lifecycle journal entry is invalid")

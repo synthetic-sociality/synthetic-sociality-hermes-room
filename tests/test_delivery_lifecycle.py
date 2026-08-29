@@ -136,6 +136,14 @@ def turn_lifecycle_binding():
 
 
 def configured_instance(binding, cycle_attempt, snapshots):
+    if cycle_attempt is not None:
+        attempt = cycle_attempt.setdefault("attempt", {})
+        attempt.setdefault("leaseExpiresAt", "2099-08-29T00:00:00Z")
+        authority_key = adapter._attempt_authority_key(binding, "evt-5", cycle_attempt)
+        binding.delivery_authority.setdefault(
+            authority_key,
+            adapter._attempt_authority_record(binding, "evt-5", cycle_attempt),
+        )
     instance = object.__new__(adapter.SyntheticSocialityAdapter)
     instance._binding = lambda _room_id: binding
     instance._binding_generation_active = lambda _binding: True
@@ -157,6 +165,887 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_hermes_operational_outcome_retryable_provider_passes_attempt_without_posting(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            calls = {"post": 0, "complete": []}
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    raise AssertionError("typed provider failure reached canonical post")
+
+                def complete_discussion_attempt(self, _room_id, _cycle_id, _attempt_id, payload):
+                    calls["complete"].append(copy.deepcopy(payload))
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            wording = "Provider unavailable; this exact sentence could also be model-authored."
+
+            result = await instance.send(
+                binding.room_id,
+                wording,
+                reply_to=adapter._dispatch_source_ref("evt-5", "generation-typed"),
+                metadata={
+                    "notify": True,
+                    "operational_outcome": {
+                        "layer": "provider",
+                        "code": "server_error",
+                        "retryable": True,
+                        "provider": "openrouter",
+                        "model": "example/model",
+                    },
+                },
+            )
+
+            self.assertTrue(result.success, getattr(result, "error", None))
+            self.assertEqual(result.message_id, "skipped:evt-5")
+            self.assertEqual(calls["post"], 0)
+            self.assertEqual(calls["complete"], [{"generation": 3, "action": "pass"}])
+
+        asyncio.run(run())
+
+    def test_hermes_operational_outcome_authentication_fails_attempt_without_posting(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            completions = []
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *_args, **_kwargs):
+                    raise AssertionError("typed authentication failure reached canonical post")
+
+                def complete_discussion_attempt(self, _room_id, _cycle_id, _attempt_id, payload):
+                    completions.append(copy.deepcopy(payload))
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            result = await instance.send(
+                binding.room_id,
+                "Authentication failed while opening the model provider.",
+                reply_to=adapter._dispatch_source_ref("evt-5", "generation-auth"),
+                metadata={
+                    "notify": True,
+                    "operational_outcome": {
+                        "layer": "auth",
+                        "code": "auth_permanent",
+                        "retryable": False,
+                    },
+                },
+            )
+
+            self.assertTrue(result.success, getattr(result, "error", None))
+            self.assertEqual(result.message_id, "skipped:evt-5")
+            self.assertEqual(completions, [{"generation": 3, "action": "fail"}])
+
+        asyncio.run(run())
+
+    def test_unknown_typed_operational_outcome_fails_closed_without_speech(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            completions = []
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *_args, **_kwargs):
+                    raise AssertionError("unknown typed operational outcome became Room speech")
+
+                def complete_discussion_attempt(self, _room_id, _cycle_id, _attempt_id, payload):
+                    completions.append(copy.deepcopy(payload))
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            result = await instance.send(
+                binding.room_id,
+                "Future host diagnostic",
+                reply_to=adapter._dispatch_source_ref("evt-5", "generation-unknown"),
+                metadata={
+                    "notify": True,
+                    "operational_outcome": {
+                        "layer": "future_layer", "code": "new_subtype", "retryable": True,
+                    },
+                },
+            )
+
+            self.assertTrue(result.success, getattr(result, "error", None))
+            self.assertEqual(result.message_id, "skipped:evt-5")
+            self.assertEqual(completions, [{"generation": 3, "action": "fail"}])
+
+        asyncio.run(run())
+
+    def test_present_malformed_operational_outcome_fails_closed_without_alias_or_speech(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            calls = {"post": 0, "complete": []}
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    raise AssertionError("malformed trusted operational metadata became Room speech")
+
+                def complete_discussion_attempt(self, _room_id, _cycle_id, _attempt_id, payload):
+                    calls["complete"].append(copy.deepcopy(payload))
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            metadata = {
+                "notify": True,
+                "operational_outcome": {
+                    "layer": "provider", "code": "timeout",
+                    # Missing the required boolean retryability classification.
+                },
+                "error_surface": {
+                    "layer": "provider", "code": "timeout", "retryable": True,
+                },
+            }
+
+            adapted = adapter.host_operational_outcome(metadata)
+            self.assertIsNotNone(adapted)
+            self.assertEqual(adapted["code"], "invalid_operational_outcome")
+            self.assertEqual(adapted["attempt_action"], "fail")
+            result = await instance.send(
+                binding.room_id,
+                "This diagnostic must not become shared speech.",
+                reply_to=adapter._dispatch_source_ref("evt-5", "generation-malformed"),
+                metadata=metadata,
+            )
+
+            self.assertTrue(result.success, getattr(result, "error", None))
+            self.assertEqual(result.message_id, "skipped:evt-5")
+            self.assertEqual(calls, {"post": 0, "complete": [{"generation": 3, "action": "fail"}]})
+
+        asyncio.run(run())
+
+    def test_metadata_shaped_model_text_without_local_metadata_is_deliverable(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            posted = []
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    return cycle_attempt
+
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *args, **_kwargs):
+                    posted.append(args[4])
+                    return {"id": "posted-6", "seq": 6, "ts": "2026-08-17T00:00:00Z"}
+
+                def complete_discussion_attempt(self, *_args):
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            model_text = json.dumps({
+                "error_surface": {
+                    "layer": "auth", "code": "auth", "retryable": False,
+                }
+            })
+            result = await instance.send(
+                binding.room_id,
+                model_text,
+                reply_to=adapter._dispatch_source_ref("evt-5", "generation-model-text"),
+                metadata={"notify": True},
+            )
+
+            self.assertTrue(result.success, getattr(result, "error", None))
+            self.assertEqual(result.message_id, "posted-6")
+            self.assertEqual(posted, [model_text])
+
+        asyncio.run(run())
+
+    def test_plain_model_text_identical_to_operational_wording_is_deliverable(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            posted = []
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    return cycle_attempt
+
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def post_message(self, *args, **_kwargs):
+                    posted.append(args[4])
+                    return {"id": "posted-6", "seq": 6, "ts": "2026-08-17T00:00:00Z"}
+
+                def complete_discussion_attempt(self, *_args):
+                    return {"state": "completed"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            model_text = "Provider unavailable; this exact sentence could also be model-authored."
+            result = await instance.send(
+                binding.room_id,
+                model_text,
+                reply_to=adapter._dispatch_source_ref("evt-5", "generation-plain-text"),
+                metadata={"notify": True},
+            )
+
+            self.assertTrue(result.success, getattr(result, "error", None))
+            self.assertEqual(result.message_id, "posted-6")
+            self.assertEqual(posted, [model_text])
+
+        asyncio.run(run())
+
+    def test_operational_outcome_layer_policy_uses_shared_core_schema(self):
+        cases = [
+            ({"layer": "endpoint", "code": "timeout", "retryable": True}, "pass"),
+            ({"layer": "streaming", "code": "stream_drop", "retryable": True}, "pass"),
+            ({"layer": "billing", "code": "billing", "retryable": False}, "fail"),
+            ({"layer": "provider", "code": "format_error", "retryable": False}, "fail"),
+        ]
+        for outcome, expected in cases:
+            with self.subTest(outcome=outcome):
+                adapted = adapter.host_operational_outcome({"operational_outcome": outcome})
+                self.assertEqual(adapted["attempt_action"], expected)
+                self.assertEqual(adapted["layer"], outcome["layer"])
+                self.assertEqual(adapted["code"], outcome["code"])
+                self.assertIs(adapted["retryable"], outcome["retryable"])
+
+    def test_error_surface_remains_an_input_only_compatibility_alias(self):
+        legacy = {"layer": "provider", "code": "timeout", "retryable": True}
+
+        adapted = adapter.host_operational_outcome({"error_surface": legacy})
+
+        self.assertEqual(adapted["attempt_action"], "pass")
+        self.assertEqual(adapted["layer"], "provider")
+        self.assertEqual(adapted["code"], "timeout")
+
+    def test_operational_outcome_takes_precedence_over_compatibility_alias(self):
+        canonical = {"layer": "auth", "code": "auth_permanent", "retryable": False}
+        legacy = {"layer": "provider", "code": "timeout", "retryable": True}
+
+        adapted = adapter.host_operational_outcome({
+            "operational_outcome": canonical,
+            "error_surface": legacy,
+        })
+
+        self.assertEqual(adapted["attempt_action"], "fail")
+        self.assertEqual(adapted["layer"], "auth")
+        self.assertEqual(adapted["code"], "auth_permanent")
+
+    def test_attempt_authority_fence_round_trips_with_exact_owner_dimensions(self):
+        binding = lifecycle_binding()
+        attempt = {
+            "cycle": {"id": "cycle-1", "generation": 3},
+            "attempt": {
+                "id": "attempt-1", "membershipId": "member-1",
+                "leaseExpiresAt": "2099-08-29T00:00:00Z",
+            },
+        }
+        key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+        binding.delivery_authority[key] = adapter._attempt_authority_record(
+            binding, "evt-5", attempt,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            restored = state_store.load(path).bindings[0]
+
+        self.assertEqual(restored.delivery_authority, binding.delivery_authority)
+        self.assertEqual(
+            restored.delivery_authority[key],
+            {
+                "room_id": "room-1", "source_event_id": "evt-5",
+                "membership_id": "member-1", "cycle_id": "cycle-1",
+                "attempt_id": "attempt-1", "generation": 3,
+                "lease_expires_at": "2099-08-29T00:00:00Z", "state": "active",
+            },
+        )
+
+    def test_legacy_authority_keys_fail_closed_without_losing_superseded_fence(self):
+        binding = lifecycle_binding()
+        active_attempt = {
+            "cycle": {"id": "cycle-active", "generation": 3},
+            "attempt": {
+                "id": "attempt-active", "membershipId": "member-1",
+                "leaseExpiresAt": "2099-08-29T00:00:00Z",
+            },
+        }
+        superseded_attempt = {
+            "cycle": {"id": "cycle-superseded", "generation": 4},
+            "attempt": {
+                "id": "attempt-superseded", "membershipId": "member-1",
+                "leaseExpiresAt": "2099-08-29T00:00:00Z",
+            },
+        }
+        active_record = adapter._attempt_authority_record(
+            binding, "evt-active", active_attempt,
+        )
+        superseded_record = adapter._attempt_authority_record(
+            binding, "evt-superseded", superseded_attempt,
+        )
+        superseded_record["state"] = "superseded"
+        legacy_active_key = json.dumps([
+            "room-1", "evt-active", "member-1", "attempt-active", 3,
+        ], separators=(",", ":"))
+        legacy_superseded_key = json.dumps([
+            "room-1", "evt-superseded", "member-1", "attempt-superseded", 4,
+        ], separators=(",", ":"))
+        binding.delivery_authority = {
+            legacy_active_key: active_record,
+            legacy_superseded_key: superseded_record,
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            restored = state_store.load(path).bindings[0]
+
+        canonical_active_key = adapter._attempt_authority_key(
+            restored, "evt-active", active_attempt,
+        )
+        canonical_superseded_key = adapter._attempt_authority_key(
+            restored, "evt-superseded", superseded_attempt,
+        )
+        self.assertNotIn(canonical_active_key, restored.delivery_authority)
+        self.assertEqual(
+            restored.delivery_authority[canonical_superseded_key]["state"],
+            "superseded",
+        )
+
+    def test_attempt_authority_persists_through_production_merge_save_load(self):
+        binding = lifecycle_binding()
+        attempt = {
+            "cycle": {"id": "cycle-1", "generation": 3},
+            "attempt": {
+                "id": "attempt-1", "membershipId": "member-1",
+                "leaseExpiresAt": "2099-08-29T00:00:00Z",
+            },
+        }
+        key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            runtime = state_store.load(path).bindings[0]
+            runtime.delivery_authority[key] = adapter._attempt_authority_record(
+                runtime, "evt-5", attempt,
+            )
+            instance, original_update = persisted_instance(path)
+            try:
+                self.assertTrue(instance._persist_binding(runtime))
+            finally:
+                adapter.update = original_update
+            restored = state_store.load(path).bindings[0]
+
+        self.assertEqual(restored.delivery_authority, runtime.delivery_authority)
+        self.assertEqual(restored.delivery_authority[key]["state"], "active")
+
+    def test_refreshed_claim_validator_rejects_every_hostile_authority_dimension(self):
+        expected = {
+            "cycle": {"id": "cycle-1", "generation": 3},
+            "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+        }
+        valid = {
+            "cycle": {"id": "cycle-1", "generation": 3},
+            "attempt": {
+                "id": "attempt-1", "membershipId": "member-1",
+                "leaseExpiresAt": "2099-08-29T00:00:00Z",
+            },
+        }
+
+        self.assertTrue(adapter._refreshed_claim_matches_expected(valid, expected, "member-1"))
+        mutations = {
+            "cycle": lambda claim: claim["cycle"].update(id="cycle-hostile"),
+            "attempt": lambda claim: claim["attempt"].update(id="attempt-hostile"),
+            "membership": lambda claim: claim["attempt"].update(membershipId="member-hostile"),
+            "boolean generation": lambda claim: claim["cycle"].update(generation=True),
+            "changed generation": lambda claim: claim["cycle"].update(generation=4),
+            "missing expiry": lambda claim: claim["attempt"].pop("leaseExpiresAt"),
+            "parseable noncanonical expiry": lambda claim: claim["attempt"].update(
+                leaseExpiresAt="2099-08-29T00:00:00+0000",
+            ),
+            "expired lease": lambda claim: claim["attempt"].update(
+                leaseExpiresAt="2020-01-01T00:00:00Z",
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                hostile = copy.deepcopy(valid)
+                mutate(hostile)
+                self.assertFalse(
+                    adapter._refreshed_claim_matches_expected(hostile, expected, "member-1")
+                )
+
+    def test_delayed_successful_authority_refresh_cannot_overwrite_durable_supersession(self):
+        async def run():
+            binding = lifecycle_binding()
+            attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {
+                    "id": "attempt-1", "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+            binding.delivery_authority[key] = adapter._attempt_authority_record(
+                binding, "evt-5", attempt,
+            )
+
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                runtime = state_store.load(path).bindings[0]
+                instance, original_update = persisted_instance(path)
+                claim_started = asyncio.Event()
+                release_claim = asyncio.Event()
+
+                async def delayed_successful_claim(*_args):
+                    claim_started.set()
+                    await release_claim.wait()
+                    return attempt
+
+                instance._claim_discussion_attempt = delayed_successful_claim
+                try:
+                    refresh = asyncio.create_task(
+                        instance._refresh_attempt_authority(runtime, "evt-5", attempt)
+                    )
+                    await asyncio.wait_for(claim_started.wait(), timeout=0.2)
+
+                    def supersede(latest):
+                        latest.binding("room-1").delivery_authority[key]["state"] = "superseded"
+                        return True
+
+                    self.assertTrue(state_store.update(supersede, path))
+                    release_claim.set()
+                    with self.assertRaises(adapter.ProtocolError) as raised:
+                        await refresh
+                finally:
+                    release_claim.set()
+                    adapter.update = original_update
+                restored = state_store.load(path).bindings[0]
+
+            self.assertEqual(raised.exception.code, "attempt_authority_superseded")
+            self.assertEqual(runtime.delivery_authority[key]["state"], "superseded")
+            self.assertEqual(restored.delivery_authority[key]["state"], "superseded")
+
+        asyncio.run(run())
+
+    def test_disconnect_reconnect_does_not_clear_durable_attempt_authority(self):
+        async def run():
+            binding = lifecycle_binding()
+            attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {
+                    "id": "attempt-1", "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+            binding.delivery_authority[key] = adapter._attempt_authority_record(
+                binding, "evt-5", attempt,
+            )
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._state = types.SimpleNamespace(bindings=[binding])
+            instance._stop = asyncio.Event()
+            instance._tasks = {}
+            instance._heartbeat_tasks = {}
+            instance._attempt_renewal_tasks = {}
+            instance._submission_tasks = {}
+            instance._lease_deadline = {}
+            instance._inflight_events = set()
+            instance._queued_events = {}
+            instance._active_dispatch_rooms = {}
+            instance._event_dispatch_generation = {}
+            instance._receive_locks = {}
+            instance._terminal_sources = {}
+            instance._terminal_results = {}
+            instance._cycle_attempts = {}
+            instance._cycle_response_sources = {}
+            instance._source_coordination_modes = {}
+            instance._open_reply_recipients = {}
+            instance._superseded_sources = set()
+            instance._stream_generations = {}
+            instance._mark_disconnected = lambda: None
+
+            await instance.disconnect()
+            instance._stop.clear()  # same-instance reconnect boundary
+
+            self.assertEqual(binding.delivery_authority[key]["state"], "active")
+            self.assertEqual(binding.delivery_authority[key]["generation"], 3)
+
+        asyncio.run(run())
+
+    def test_persisted_cycle_intent_without_durable_authority_fails_closed_before_post(self):
+        async def run():
+            binding = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential",
+                installation_id="installation-1", cursor=5, acknowledged_cursor=4,
+            )
+            generation = adapter.SyntheticSocialityAdapter._intent_binding(binding)
+            cycle = {"cycle_id": "cycle-1", "attempt_id": "attempt-1", "generation": 3}
+            binding.delivery_intents["evt-5"] = {
+                "state": "delivery_pending",
+                "delivery_state": "delivery_pending",
+                "lifecycle_state": "not_started",
+                "selected": {
+                    "action": "post", "source_event_id": "evt-5", "source_seq": 5,
+                    "observed_seq": 5, "observed_epoch_id": "epoch-1",
+                    "body": "Frozen answer", "coordination_mode": "coordinated",
+                    "cycle": cycle, "binding": generation,
+                },
+                "post": {
+                    "coordination_mode": "coordinated", "turn_id": "",
+                    "observed_seq": 5, "observed_epoch_id": "epoch-1",
+                    "body": "Frozen answer", "responds_to": "evt-5",
+                    "recipient_membership_ids": [], "contribution_type": "claim",
+                    "idempotency_key": "message-key",
+                    "logical_contribution_id": "logical-key",
+                    "message_payload_dialect": "v1", "cycle": cycle,
+                    "binding": generation,
+                },
+            }
+            self.assertEqual(binding.delivery_authority, {})
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                restored = state_store.load(path).bindings[0]
+
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._persist_binding = lambda _binding: True
+            calls = {"claim": 0, "post": 0}
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    calls["claim"] += 1
+                    return None
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                await instance._post_with_fresh_context(
+                    restored, restored.room_id, "", 5, "evt-5", "Regenerated bytes",
+                    "epoch-1", None, coordination_mode="coordinated",
+                )
+
+            self.assertEqual(raised.exception.code, "attempt_authority_missing")
+            self.assertEqual(calls, {"claim": 0, "post": 0})
+            self.assertEqual(restored.delivery_authority, {})
+
+        asyncio.run(run())
+
+    def test_partial_cycle_identity_fails_closed_at_posting_boundary(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents["evt-5"] = {
+                "state": "delivery_pending", "delivery_state": "delivery_pending",
+                "post": {
+                    "coordination_mode": "coordinated", "turn_id": "",
+                    "observed_seq": 5, "observed_epoch_id": "epoch-1",
+                    "body": "Frozen answer", "responds_to": "evt-5",
+                    "recipient_membership_ids": [], "idempotency_key": "message-key",
+                    "logical_contribution_id": "logical-key",
+                    "message_payload_dialect": "v1",
+                    "cycle": {"cycle_id": "cycle-1"},
+                    "binding": adapter.SyntheticSocialityAdapter._intent_binding(binding),
+                },
+            }
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._persist_binding = lambda _binding: True
+            calls = {"claim": 0, "post": 0}
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    calls["claim"] += 1
+                    return None
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                await instance._post_with_fresh_context(
+                    binding, binding.room_id, "", 5, "evt-5", "Regenerated bytes",
+                    "epoch-1", None, coordination_mode="coordinated",
+                )
+
+            self.assertEqual(raised.exception.code, "cycle_identity_incomplete")
+            self.assertEqual(calls, {"claim": 0, "post": 0})
+
+        asyncio.run(run())
+
+    def test_hostile_persisted_cycle_substitution_fails_closed_at_post_boundary(self):
+        async def run():
+            binding = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential",
+                installation_id="installation-1", cursor=5, acknowledged_cursor=4,
+            )
+            legitimate = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {
+                    "id": "attempt-1", "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            hostile = copy.deepcopy(legitimate)
+            hostile["cycle"]["id"] = "cycle-hostile"
+            cycle = {"cycle_id": "cycle-1", "attempt_id": "attempt-1", "generation": 3}
+            binding.delivery_intents["evt-5"] = {
+                "state": "delivery_pending", "delivery_state": "delivery_pending",
+                "lifecycle_state": "not_started",
+                "post": {
+                    "coordination_mode": "coordinated", "turn_id": "",
+                    "observed_seq": 5, "observed_epoch_id": "epoch-1",
+                    "body": "Frozen answer", "responds_to": "evt-5",
+                    "recipient_membership_ids": [], "idempotency_key": "message-key",
+                    "logical_contribution_id": "logical-key",
+                    "message_payload_dialect": "v1", "cycle": cycle,
+                    "binding": adapter.SyntheticSocialityAdapter._intent_binding(binding),
+                },
+            }
+            hostile_key = adapter._attempt_authority_key(binding, "evt-5", hostile)
+            binding.delivery_authority[hostile_key] = adapter._attempt_authority_record(
+                binding, "evt-5", hostile,
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                restored = state_store.load(path).bindings[0]
+
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._persist_binding = lambda _binding: True
+            calls = {"claim": 0, "post": 0}
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    calls["claim"] += 1
+                    return legitimate
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                await instance._post_with_fresh_context(
+                    restored, restored.room_id, "", 5, "evt-5", "Frozen answer",
+                    "epoch-1", legitimate, coordination_mode="coordinated",
+                )
+
+            self.assertEqual(raised.exception.code, "attempt_authority_missing")
+            self.assertEqual(calls, {"claim": 0, "post": 0})
+            self.assertEqual(
+                next(iter(restored.delivery_authority.values()))["cycle_id"],
+                "cycle-hostile",
+            )
+
+        asyncio.run(run())
+
+    def test_superseded_durable_attempt_authority_cannot_be_reactivated_or_post(self):
+        async def run():
+            binding = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential",
+                installation_id="installation-1", cursor=5, acknowledged_cursor=4,
+            )
+            attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {
+                    "id": "attempt-1", "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            cycle = {"cycle_id": "cycle-1", "attempt_id": "attempt-1", "generation": 3}
+            binding.delivery_intents["evt-5"] = {
+                "state": "delivery_pending", "delivery_state": "delivery_pending",
+                "lifecycle_state": "not_started",
+                "post": {
+                    "coordination_mode": "coordinated", "turn_id": "",
+                    "observed_seq": 5, "observed_epoch_id": "epoch-1",
+                    "body": "Frozen answer", "responds_to": "evt-5",
+                    "recipient_membership_ids": [], "idempotency_key": "message-key",
+                    "logical_contribution_id": "logical-key",
+                    "message_payload_dialect": "v1", "cycle": cycle,
+                    "binding": adapter.SyntheticSocialityAdapter._intent_binding(binding),
+                },
+            }
+            key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+            binding.delivery_authority[key] = adapter._attempt_authority_record(
+                binding, "evt-5", attempt,
+            )
+            binding.delivery_authority[key]["state"] = "superseded"
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                restored = state_store.load(path).bindings[0]
+
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._persist_binding = lambda _binding: True
+            calls = {"claim": 0, "post": 0}
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    calls["claim"] += 1
+                    return attempt
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                await instance._post_with_fresh_context(
+                    restored, restored.room_id, "", 5, "evt-5", "Frozen answer",
+                    "epoch-1", attempt, coordination_mode="coordinated",
+                )
+
+            self.assertEqual(raised.exception.code, "attempt_authority_superseded")
+            self.assertEqual(calls, {"claim": 0, "post": 0})
+            self.assertEqual(restored.delivery_authority[key]["state"], "superseded")
+
+        asyncio.run(run())
+
+    def test_post_admission_rechecks_authority_after_inflight_pause(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {
+                    "id": "attempt-1", "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+            binding.delivery_authority[key] = adapter._attempt_authority_record(
+                binding, "evt-5", attempt,
+            )
+            instance = configured_instance(binding, attempt, [])
+            entered = asyncio.Event()
+            resume = asyncio.Event()
+            calls = {"claim": 0, "post": 0}
+
+            async def checkpoint(*_args):
+                entered.set()
+                await resume.wait()
+
+            instance._post_admission_checkpoint = checkpoint
+
+            class API:
+                def claim_discussion_attempt(self, *_args):
+                    calls["claim"] += 1
+                    return attempt if calls["claim"] == 1 else None
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            task = asyncio.create_task(instance._post_with_fresh_context(
+                binding, binding.room_id, "", 5, "evt-5", "late bytes", "epoch-1",
+                attempt, "evt-human", coordination_mode="coordinated",
+            ))
+            await asyncio.wait_for(entered.wait(), timeout=0.2)
+            resume.set()
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                await task
+
+            self.assertEqual(raised.exception.code, "cycle_superseded")
+            self.assertEqual(calls, {"claim": 2, "post": 0})
+            self.assertEqual(binding.delivery_authority[key]["state"], "superseded")
+
+        asyncio.run(run())
+
+    def test_authority_generation_zero_is_not_coerced_to_missing(self):
+        async def run():
+            binding = lifecycle_binding()
+            attempt = {
+                "cycle": {"id": "cycle-1", "generation": 0},
+                "attempt": {
+                    "id": "attempt-1", "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+            binding.delivery_authority[key] = adapter._attempt_authority_record(
+                binding, "evt-5", attempt,
+            )
+            instance = configured_instance(binding, attempt, [])
+            instance._claim_discussion_attempt = lambda *_args: asyncio.sleep(0, result=attempt)
+
+            await instance._refresh_attempt_authority(binding, "evt-5", attempt)
+
+            self.assertEqual(binding.delivery_authority[key]["generation"], 0)
+            self.assertEqual(binding.delivery_authority[key]["state"], "active")
+
+        asyncio.run(run())
+
     def test_sse_stream_does_not_depend_on_shared_default_executor_capacity(self):
         async def run():
             instance = object.__new__(adapter.SyntheticSocialityAdapter)
@@ -2480,6 +3369,123 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     unrelated, "event-120", 120,
                 ))
                 self.assertEqual(unrelated.inbox["120"], "quarantined")
+
+    def test_renewal_rejects_malformed_same_attempt_claim_without_poisoning_state(self):
+        async def run():
+            binding = lifecycle_binding()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {
+                    "id": "attempt-1",
+                    "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            authority_key = adapter._attempt_authority_key(
+                binding, "evt-5", cycle_attempt,
+            )
+            binding.delivery_authority[authority_key] = adapter._attempt_authority_record(
+                binding, "evt-5", cycle_attempt,
+            )
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._stop = asyncio.Event()
+            instance._attempt_renewal_tasks = {}
+            instance._cycle_attempts = {"evt-5": cycle_attempt}
+            instance._superseded_sources = set()
+            persisted = []
+            instance._persist_binding = lambda current: persisted.append(
+                copy.deepcopy(current.delivery_authority)
+            ) or True
+            async def malformed_claim(_binding, _cycle_id):
+                return {"attempt": {"id": "attempt-1"}}
+
+            instance._claim_discussion_attempt = malformed_claim
+
+            original_sleep = adapter.asyncio.sleep
+
+            async def one_iteration(_delay):
+                instance._stop.set()
+
+            adapter.asyncio.sleep = one_iteration
+            try:
+                instance._start_attempt_renewal(binding, "evt-5", cycle_attempt)
+                task = instance._attempt_renewal_tasks["evt-5"]
+                await task
+            finally:
+                adapter.asyncio.sleep = original_sleep
+
+            self.assertNotIn("evt-5", instance._cycle_attempts)
+            self.assertIn("evt-5", instance._superseded_sources)
+            self.assertEqual(
+                binding.delivery_authority[authority_key]["state"], "superseded",
+            )
+            self.assertEqual(len(binding.delivery_authority), 1)
+            self.assertTrue(persisted)
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                restored = state_store.load(path).bindings[0]
+            self.assertEqual(
+                restored.delivery_authority[authority_key]["state"], "superseded",
+            )
+
+        asyncio.run(run())
+
+    def test_renewal_does_not_reactivate_authority_superseded_during_persist(self):
+        async def run():
+            binding = lifecycle_binding()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {
+                    "id": "attempt-1",
+                    "membershipId": "member-1",
+                    "leaseExpiresAt": "2099-08-29T00:00:00Z",
+                },
+            }
+            authority_key = adapter._attempt_authority_key(
+                binding, "evt-5", cycle_attempt,
+            )
+            binding.delivery_authority[authority_key] = adapter._attempt_authority_record(
+                binding, "evt-5", cycle_attempt,
+            )
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._stop = asyncio.Event()
+            instance._attempt_renewal_tasks = {}
+            instance._cycle_attempts = {"evt-5": cycle_attempt}
+            instance._superseded_sources = set()
+
+            refreshed = copy.deepcopy(cycle_attempt)
+            refreshed["attempt"]["leaseExpiresAt"] = "2099-09-29T00:00:00Z"
+
+            async def valid_claim(_binding, _cycle_id):
+                return refreshed
+
+            def persist_with_concurrent_supersession(current):
+                current.delivery_authority[authority_key]["state"] = "superseded"
+                return True
+
+            instance._claim_discussion_attempt = valid_claim
+            instance._persist_binding = persist_with_concurrent_supersession
+            original_sleep = adapter.asyncio.sleep
+
+            async def one_iteration(_delay):
+                instance._stop.set()
+
+            adapter.asyncio.sleep = one_iteration
+            try:
+                instance._start_attempt_renewal(binding, "evt-5", cycle_attempt)
+                task = instance._attempt_renewal_tasks["evt-5"]
+                await task
+            finally:
+                adapter.asyncio.sleep = original_sleep
+
+            self.assertNotIn("evt-5", instance._cycle_attempts)
+            self.assertIn("evt-5", instance._superseded_sources)
+            self.assertEqual(
+                binding.delivery_authority[authority_key]["state"], "superseded",
+            )
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":
