@@ -82,6 +82,7 @@ def load_adapter():
 
 adapter = load_adapter()
 state_store = sys.modules[f"{PACKAGE}.state"]
+cli = sys.modules[f"{PACKAGE}.cli"]
 room_tools = sys.modules[f"{PACKAGE}.room_tools"]
 
 
@@ -119,6 +120,8 @@ def lifecycle_binding():
         },
         "attempts": 1,
         "automatic_retry": True,
+        "last_error_code": "",
+        "last_error": "",
         "binding": {
             "membership_id": "member-1", "installation_id": "installation-1", "identity_version": 0,
         },
@@ -165,6 +168,47 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_state_load_accepts_server_nanosecond_authority_timestamp_without_rewriting_it(self):
+        real_datetime = state_store.datetime
+
+        class MicrosecondOnlyDatetime:
+            @staticmethod
+            def fromisoformat(value):
+                fraction = value.split(".", 1)[1].split("+", 1)[0] if "." in value else ""
+                if len(fraction) > 6:
+                    raise ValueError("runtime accepts at most microseconds")
+                return real_datetime.fromisoformat(value)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            binding = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential",
+                installation_id="installation-1",
+            )
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 1},
+                "attempt": {
+                    "id": "attempt-1", "membershipId": "member-1",
+                    "leaseExpiresAt": "2026-08-30T04:59:19.721933435Z",
+                },
+            }
+            key = adapter._attempt_authority_key(binding, "evt-1", cycle_attempt)
+            binding.delivery_authority[key] = adapter._attempt_authority_record(
+                binding, "evt-1", cycle_attempt,
+            )
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+
+            state_store.datetime = MicrosecondOnlyDatetime
+            try:
+                loaded = state_store.load(path).binding("room-1")
+            finally:
+                state_store.datetime = real_datetime
+
+            self.assertEqual(
+                loaded.delivery_authority[key]["lease_expires_at"],
+                "2026-08-30T04:59:19.721933435Z",
+            )
+
     def test_hermes_operational_outcome_retryable_provider_passes_attempt_without_posting(self):
         async def run():
             binding = lifecycle_binding()
@@ -1388,7 +1432,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.47"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.48"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -2942,6 +2986,270 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             reloaded = state_store.load(path).binding("room-1")
             self.assertEqual(reloaded.delivery_lifecycle["evt-5"]["lifecycle_state"], "blocked")
             self.assertFalse(reloaded.delivery_lifecycle["evt-5"]["automatic_retry"])
+
+    def test_audited_terminal_lifecycle_reconciliation_preserves_receipt_without_network_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            binding = lifecycle_binding()
+            binding.cursor = binding.acknowledged_cursor = 5
+            binding.delivery_intents.clear()
+            journal = binding.delivery_lifecycle["evt-5"]
+            journal.update(
+                state="lifecycle_blocked", lifecycle_state="blocked",
+                automatic_retry=False, last_error_code="cycle_conflict",
+                last_error="discussion cycle input conflicts with persisted cycle",
+            )
+            before_inbox = copy.deepcopy(binding.inbox)
+            before_intents = copy.deepcopy(binding.delivery_intents)
+            before_completion = copy.deepcopy(journal["completion"])
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            calls = []
+
+            class Protocol:
+                def __init__(self, *_args):
+                    pass
+
+                def get_discussion_cycle(self, room_id, cycle_id):
+                    calls.append(("get_discussion_cycle", room_id, cycle_id))
+                    return {
+                        "id": "cycle-1", "sourceEventId": "human-source",
+                        "state": "completed", "generation": 4,
+                        "contributions": [
+                            {"eventId": "posted-6", "membershipId": "member-1"},
+                        ],
+                    }
+
+                def __getattr__(self, name):
+                    raise AssertionError(f"reconciliation must not call {name}")
+
+            original_load, original_update, original_protocol = cli.load, cli.update, cli.RoomProtocol
+            cli.load = lambda: state_store.load(path)
+            cli.update = lambda mutator: state_store.update(mutator, path)
+            cli.RoomProtocol = Protocol
+            args = types.SimpleNamespace(
+                room_id="room-1", source_event_id="evt-5", source_seq=5,
+                canonical_event_id="posted-6", cycle_id="cycle-1",
+                terminal_state="completed", yes=True,
+            )
+            try:
+                self.assertEqual(cli._reconcile_terminal_lifecycle(args), 0)
+            finally:
+                cli.load, cli.update, cli.RoomProtocol = original_load, original_update, original_protocol
+
+            reloaded = state_store.load(path).binding("room-1")
+            self.assertNotIn("evt-5", reloaded.delivery_lifecycle)
+            audit = reloaded.resolved_delivery_lifecycle["evt-5"]
+            self.assertEqual(audit["receipt"], journal["receipt"])
+            self.assertEqual(audit["original_completion"], before_completion)
+            self.assertEqual(audit["terminal_state"], "completed")
+            self.assertEqual(audit["original_error_code"], "cycle_conflict")
+            self.assertEqual(audit["original_error"], journal["last_error"])
+            self.assertEqual(calls, [("get_discussion_cycle", "room-1", "cycle-1")])
+            self.assertEqual((reloaded.cursor, reloaded.acknowledged_cursor), (5, 5))
+            self.assertEqual(reloaded.inbox, before_inbox)
+            self.assertEqual(reloaded.delivery_intents, before_intents)
+
+            class NoIOProtocol:
+                def __init__(self, *_args):
+                    raise AssertionError("idempotent reconciliation must not use the network")
+
+            cli.RoomProtocol = NoIOProtocol
+            cli.load = lambda: state_store.load(path)
+            cli.update = lambda mutator: state_store.update(mutator, path)
+            try:
+                self.assertEqual(cli._reconcile_terminal_lifecycle(args), 0)
+            finally:
+                cli.load, cli.update, cli.RoomProtocol = original_load, original_update, original_protocol
+            self.assertEqual(
+                state_store.load(path).binding("room-1").resolved_delivery_lifecycle["evt-5"], audit,
+            )
+
+    def test_terminal_lifecycle_reconciliation_revalidates_locked_state_after_get(self):
+        mutations = (
+            ("ack regression", lambda binding: setattr(binding, "acknowledged_cursor", 0)),
+            ("cursor regression", lambda binding: setattr(binding, "cursor", 0)),
+            ("base URL change", lambda binding: setattr(binding, "base_url", "https://other.invalid/api")),
+            ("credential change", lambda binding: setattr(binding, "credential", "rotated-credential")),
+            ("installation change", lambda binding: setattr(binding, "installation_id", "other-installation")),
+            ("identity change", lambda binding: setattr(binding, "identity_version", 2)),
+            ("conflicting audit", lambda binding: binding.resolved_delivery_lifecycle.__setitem__(
+                "evt-5", {"version": 1, "source_event_id": "conflict"},
+            )),
+        )
+        for name, mutate in mutations:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                binding = lifecycle_binding()
+                binding.cursor = binding.acknowledged_cursor = 5
+                binding.delivery_intents.clear()
+                binding.delivery_lifecycle["evt-5"].update(
+                    state="lifecycle_blocked", lifecycle_state="blocked",
+                    automatic_retry=False, last_error_code="cycle_conflict",
+                )
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+
+                class Protocol:
+                    def __init__(self, *_args):
+                        pass
+
+                    def get_discussion_cycle(self, *_args):
+                        return {
+                            "id": "cycle-1", "state": "completed",
+                            "contributions": [{"eventId": "posted-6", "membershipId": "member-1"}],
+                        }
+
+                original_load, original_update, original_protocol = cli.load, cli.update, cli.RoomProtocol
+                cli.load = lambda _path=path: state_store.load(_path)
+
+                def racing_update(mutator, _path=path, _mutate=mutate):
+                    def race_then_reconcile(current, _race=_mutate, _reconcile=mutator):
+                        _race(current.binding("room-1"))  # noqa: B023 - bound callback parameters
+                        _reconcile(current)  # noqa: B023 - current is this callback's argument
+                    return state_store.update(race_then_reconcile, _path)
+
+                cli.update = racing_update
+                cli.RoomProtocol = Protocol
+                args = types.SimpleNamespace(
+                    room_id="room-1", source_event_id="evt-5", source_seq=5,
+                    canonical_event_id="posted-6", cycle_id="cycle-1",
+                    terminal_state="completed", yes=True,
+                )
+                try:
+                    with self.assertRaises(ValueError):
+                        cli._reconcile_terminal_lifecycle(args)
+                finally:
+                    cli.load, cli.update, cli.RoomProtocol = original_load, original_update, original_protocol
+                current = state_store.load(path).binding("room-1")
+                self.assertIn("evt-5", current.delivery_lifecycle)
+                self.assertNotIn("evt-5", current.resolved_delivery_lifecycle)
+
+    def test_resolved_lifecycle_audit_load_rejects_malformed_or_overlapping_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            binding = lifecycle_binding()
+            binding.cursor = binding.acknowledged_cursor = 5
+            binding.delivery_intents.clear()
+            binding.resolved_delivery_lifecycle["evt-5"] = {
+                "version": 1, "source_event_id": "evt-5", "source_seq": 5,
+                "canonical_event_id": "posted-6", "cycle_id": "cycle-1",
+                "terminal_state": "completed", "receipt": copy.deepcopy(
+                    binding.delivery_lifecycle["evt-5"]["receipt"]
+                ),
+            }
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            with self.assertRaisesRegex(ValueError, "resolved lifecycle audit"):
+                state_store.load(path)
+
+            raw = json.loads(path.read_text())
+            raw_binding = raw["bindings"][0]
+            completion = copy.deepcopy(raw_binding["delivery_lifecycle"]["evt-5"]["completion"])
+            raw_binding["resolved_delivery_lifecycle"]["evt-5"] = {
+                "version": 1,
+                "reason": "authoritative_terminal_cycle_after_canonical_delivery",
+                "source_event_id": "evt-5", "source_seq": 5,
+                "canonical_event_id": "posted-6", "cycle_id": "cycle-1",
+                "terminal_state": "completed",
+                "receipt": copy.deepcopy(raw_binding["delivery_lifecycle"]["evt-5"]["receipt"]),
+                "original_completion": completion,
+                "binding": {
+                    "membership_id": raw_binding["membership_id"],
+                    "installation_id": raw_binding["installation_id"],
+                    "identity_version": raw_binding["identity_version"],
+                },
+                "original_error_code": "cycle_conflict",
+                "original_error": "conflict",
+                "recorded_at": "2026-08-30T07:00:00Z",
+            }
+            path.write_text(json.dumps(raw))
+            with self.assertRaisesRegex(ValueError, "overlaps live work"):
+                state_store.load(path)
+
+    def test_lifecycle_error_and_audit_version_types_fail_closed(self):
+        for field, hostile in (("last_error", {"message": "conflict"}), ("last_error_code", ["cycle_conflict"])):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                binding = lifecycle_binding()
+                binding.delivery_lifecycle["evt-5"].update(
+                    state="lifecycle_blocked", lifecycle_state="blocked",
+                    automatic_retry=False, last_error_code="cycle_conflict",
+                    last_error="conflict",
+                )
+                binding.delivery_lifecycle["evt-5"][field] = hostile
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                with self.assertRaisesRegex(ValueError, "lifecycle error evidence"):
+                    state_store.load(path)
+
+        for version in (True, False, 1.0, "1"):
+            with self.subTest(version=repr(version)), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                binding = lifecycle_binding()
+                binding.cursor = binding.acknowledged_cursor = 5
+                binding.delivery_intents.clear()
+                journal = binding.delivery_lifecycle.pop("evt-5")
+                receipt = copy.deepcopy(journal["receipt"])
+                completion = copy.deepcopy(journal["completion"])
+                binding.resolved_delivery_lifecycle["evt-5"] = {
+                    "version": version,
+                    "reason": "authoritative_terminal_cycle_after_canonical_delivery",
+                    "source_event_id": "evt-5", "source_seq": 5,
+                    "canonical_event_id": "posted-6", "cycle_id": "cycle-1",
+                    "terminal_state": "completed", "receipt": receipt,
+                    "original_completion": completion,
+                    "binding": copy.deepcopy(journal["binding"]),
+                    "original_error_code": "cycle_conflict",
+                    "original_error": "conflict",
+                    "recorded_at": "2026-08-30T07:00:00Z",
+                }
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                with self.assertRaisesRegex(ValueError, "resolved lifecycle audit"):
+                    state_store.load(path)
+
+    def test_terminal_lifecycle_reconciliation_fails_closed_on_proof_mismatch(self):
+        cases = (
+            ("wrong cycle", {"id": "other", "state": "completed", "contributions": [{"eventId": "posted-6", "membershipId": "member-1"}]}),
+            ("missing contribution", {"id": "cycle-1", "state": "completed", "contributions": []}),
+            ("wrong actor", {"id": "cycle-1", "state": "completed", "contributions": [{"eventId": "posted-6", "membershipId": "other"}]}),
+            ("nonterminal", {"id": "cycle-1", "state": "active", "contributions": [{"eventId": "posted-6", "membershipId": "member-1"}]}),
+            ("wrong terminal", {"id": "cycle-1", "state": "interrupted", "contributions": [{"eventId": "posted-6", "membershipId": "member-1"}]}),
+        )
+        for name, cycle in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                binding = lifecycle_binding()
+                binding.cursor = binding.acknowledged_cursor = 5
+                binding.delivery_intents.clear()
+                binding.delivery_lifecycle["evt-5"].update(
+                    state="lifecycle_blocked", lifecycle_state="blocked",
+                    automatic_retry=False, last_error_code="cycle_conflict",
+                )
+                state_store.save(state_store.PluginState(bindings=[binding]), path)
+                before = path.read_bytes()
+
+                class Protocol:
+                    def __init__(self, *_args):
+                        pass
+
+                    def get_discussion_cycle(self, *_args, _cycle=cycle):
+                        return _cycle
+
+                    def __getattr__(self, method):
+                        raise AssertionError(f"reconciliation must not call {method}")
+
+                original_load, original_update, original_protocol = cli.load, cli.update, cli.RoomProtocol
+                cli.load = lambda _path=path: state_store.load(_path)
+                cli.update = lambda mutator, _path=path: state_store.update(mutator, _path)
+                cli.RoomProtocol = Protocol
+                args = types.SimpleNamespace(
+                    room_id="room-1", source_event_id="evt-5", source_seq=5,
+                    canonical_event_id="posted-6", cycle_id="cycle-1",
+                    terminal_state="completed", yes=True,
+                )
+                try:
+                    with self.assertRaisesRegex(ValueError, "authoritative cycle"):
+                        cli._reconcile_terminal_lifecycle(args)
+                finally:
+                    cli.load, cli.update, cli.RoomProtocol = original_load, original_update, original_protocol
+                self.assertEqual(path.read_bytes(), before)
 
     def test_repair_blocks_exhausted_and_nonretryable_lifecycle_work(self):
         async def exercise(path, error, attempts):

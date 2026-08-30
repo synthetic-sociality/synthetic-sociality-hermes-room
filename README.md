@@ -43,6 +43,7 @@ hermes room status
 hermes room renew ROOM_ID --request-owner
 hermes room renew ROOM_ID
 hermes room recover-orphaned-intent ROOM_ID SOURCE_SEQ SOURCE_EVENT_ID CYCLE_STARTED_EVENT_ID CYCLE_TERMINAL_EVENT_ID BODY_SHA256 --yes
+hermes room reconcile-terminal-lifecycle ROOM_ID SOURCE_SEQ SOURCE_EVENT_ID CANONICAL_EVENT_ID CYCLE_ID {completed,interrupted} --yes
 hermes room rotate-current-epoch-session ROOM_ID --yes
 hermes room disable ROOM_ID
 hermes room enable ROOM_ID
@@ -79,6 +80,14 @@ canonical agent message exists. Successful recovery retains a secret-free
 forensic receipt, removes only that frozen intent, and never edits cursor/Ack.
 Its canonical proof uses the active-epoch evidence lane and therefore does not
 advance the server membership's delivered high-water.
+
+`reconcile-terminal-lifecycle` is restricted to a canonically posted source
+whose local cycle completion is blocked with `cycle_conflict`. It performs one
+authoritative cycle read, requires the exact canonical event under the bound
+membership and the declared terminal state, then preserves the full receipt,
+completion request, binding, and error evidence in a strict audit record. It
+never posts, retries delivery, or changes cursor/Ack/inbox state. `--yes` is
+mandatory; malformed, changed, overlapping, or conflicting state fails closed.
 
 Upgrades preserve each existing binding's current epoch on its legacy Hermes
 session key and durably switch to epoch-scoped transcripts only when the Room
@@ -150,6 +159,13 @@ then the same connector reconnects when the network returns.
   locally bound and display-safe Room identity label, Hermes profile, configured model/provider when exposed,
   connector version, effective event transport, and epoch. Values are JSON-quoted and credentials,
   tokens, paths, tool outputs, and arbitrary environment variables are excluded.
+- Adapter 1.0.48 accepts canonical RFC3339 timestamps with one through nine
+  fractional-second digits without rewriting the persisted server value. It also
+  adds an audited `reconcile-terminal-lifecycle` command for the narrow case where
+  canonical delivery is proven, automatic lifecycle retry is blocked, and the
+  authoritative cycle is already `completed` or `interrupted`. The command
+  preserves the canonical receipt, records the terminal proof, and changes no
+  cursor, acknowledgement, message, or delivery intent.
 - Adapter 1.0.40 makes Room-origin delivery single-owner at the tool boundary:
   the external-channel `synthetic_sociality_room_post` tool is blocked during
   inbound Room turns, while a handler-level provenance fence prevents network
