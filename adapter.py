@@ -73,6 +73,10 @@ _PRIVATE_APPROVAL = re.compile(
     r"(?:approval\s+(?:is\s+)?required|reply\s+[`\"']?/?approve|/approve\b|dangerous\s+command)",
     re.IGNORECASE,
 )
+_GATEWAY_AUTHENTICATION_ERROR = (
+    "⚠️ Provider authentication failed. Check the configured credentials; "
+    "raw provider details are in the gateway logs."
+)
 _GATEWAY_OPERATIONAL_ERRORS = frozenset({
     (
         "Sorry, I encountered an unexpected error.\n"
@@ -82,7 +86,9 @@ _GATEWAY_OPERATIONAL_ERRORS = frozenset({
         "⚠️ The model provider failed after retries. I kept raw provider details "
         "out of chat; check gateway logs for diagnostics."
     ),
+    _GATEWAY_AUTHENTICATION_ERROR,
 })
+_GATEWAY_NONRETRYABLE_OPERATIONAL_ERRORS = frozenset({_GATEWAY_AUTHENTICATION_ERROR})
 # A room message that has not completed within this period is retried. Time is
 # never terminal evidence and therefore can never advance acknowledgement.
 PENDING_EVENT_TTL_SECONDS = 180.0
@@ -1432,10 +1438,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         binding = self._binding(chat_id)
         if not self._binding_generation_active(binding):
             return SendResult(success=False, error="Room membership was disabled, removed, or replaced")
-        # The host currently forwards this reserved exception fallback as plain
-        # final text without error metadata. Match only its exact raw body at
-        # this trusted Room-origin boundary; an explicit contribute envelope
-        # containing the same words remains ordinary model-authored output.
+        # Older hosts can forward reviewed operational fallbacks as plain final
+        # text without typed metadata. Match only exact raw bodies at this trusted
+        # Room-origin boundary; an explicit contribute envelope containing the
+        # same words remains ordinary model-authored output.
         gateway_operational_error = (
             isinstance(content, str) and content in _GATEWAY_OPERATIONAL_ERRORS
         )
@@ -1539,7 +1545,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if cycle_attempt:
                 attempt_action = (
                     operational_outcome["attempt_action"]
-                    if typed_operational_outcome else "pass"
+                    if typed_operational_outcome
+                    else (
+                        "fail"
+                        if content in _GATEWAY_NONRETRYABLE_OPERATIONAL_ERRORS
+                        else "pass"
+                    )
                 )
                 await self._complete_cycle_attempt(binding, cycle_attempt, attempt_action)
                 await self._stop_attempt_renewal(source_id)

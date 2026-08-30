@@ -159,6 +159,12 @@ then the same connector reconnects when the network returns.
   locally bound and display-safe Room identity label, Hermes profile, configured model/provider when exposed,
   connector version, effective event transport, and epoch. Values are JSON-quoted and credentials,
   tokens, paths, tool outputs, and arbitrary environment variables are excluded.
+- Adapter 1.0.49 consumes the exact legacy Hermes provider-authentication
+  fallback at the trusted Room final-output boundary when typed operational
+  metadata is unavailable. It creates no canonical message, terminalizes the
+  attempt as a non-retryable failure, and is idempotent on replay. Matching is
+  byte-for-byte only; near matches and explicit contribution envelopes remain
+  ordinary model-authored output.
 - Adapter 1.0.48 accepts canonical RFC3339 timestamps with one through nine
   fractional-second digits without rewriting the persisted server value. It also
   adds an audited `reconcile-terminal-lifecycle` command for the narrow case where

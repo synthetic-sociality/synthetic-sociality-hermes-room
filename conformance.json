@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.48",
+  "adapterVersion": "1.0.49",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -17,7 +17,7 @@
     "crossChannelRoomRead": "read_only_profile_tool",
     "presence": "connector_heartbeat_lease",
     "presentationAcknowledgement": "ephemeral_after_authenticated_epoch_fence_before_context_or_model",
-    "operationalFallback": "exact_reserved_hermes_generic_or_provider_failure_text_terminalizes_as_skip_without_post",
+    "operationalFallback": "typed_outcome_preferred_exact_reserved_legacy_generic_provider_retry_or_authentication_text_terminalizes_without_post",
     "modelOutputCompatibility": "strict_first_corpus_bounded_missing_brace_recovery_all_action_wrappers_fail_closed_with_plain_text_prompt",
     "runtimeSelfKnowledge": "sanitized_live_connector_facts_injected_per_turn",
     "canonicalTimestampCompatibility": "rfc3339_fractional_seconds_1_to_9_preserved_exactly",
@@ -31,7 +31,8 @@
     "DLV1-05": "test_legacy_complete_receipt_promotes_without_repost_and_runs_lifecycle_only",
     "DLV1-06": "test_posted_receipt_gap_rejects_ack_beyond_locally_proven_frontier",
     "DLV1-07": "test_nonretryable_post_failure_is_quarantined_and_cannot_repost",
-    "DLV1-08": "test_repair_blocks_exhausted_and_nonretryable_lifecycle_work"
+    "DLV1-08": "test_repair_blocks_exhausted_and_nonretryable_lifecycle_work",
+    "legacy_authentication_fallback": "test_room_origin_authentication_fallback_fails_cycle_without_post"
   },
   "receiptBoundaryFixtures": {
     "invalid_or_incomplete_receipt": "test_canonical_delivery_rejects_malformed_receipts_without_state_change",

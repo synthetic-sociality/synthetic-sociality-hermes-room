@@ -1908,6 +1908,67 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_room_origin_authentication_fallback_fails_cycle_without_post(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            calls = {"room_state": 0, "complete": 0, "post": 0}
+            completions = []
+
+            class API:
+                def room_state(self, _room_id):
+                    calls["room_state"] += 1
+                    return {
+                        "headSeq": 5,
+                        "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1},
+                    }
+
+                def complete_discussion_attempt(self, room_id, cycle_id, attempt_id, payload):
+                    calls["complete"] += 1
+                    completions.append((room_id, cycle_id, attempt_id, copy.deepcopy(payload)))
+                    return {"state": "completed"}
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    raise AssertionError("authentication fallback reached canonical Room post")
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            fallback = (
+                "⚠️ Provider authentication failed. Check the configured credentials; "
+                "raw provider details are in the gateway logs."
+            )
+
+            result = await instance._send_final(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-auth-error"),
+                fallback,
+            )
+            replay = await instance._send_final(
+                binding.room_id,
+                adapter._dispatch_source_ref("evt-5", "generation-auth-error"),
+                fallback,
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.message_id, "skipped:evt-5")
+            self.assertTrue(replay.success)
+            self.assertEqual(replay.message_id, "skipped:evt-5")
+            self.assertEqual(calls, {"room_state": 1, "complete": 1, "post": 0})
+            self.assertEqual(
+                completions,
+                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail"})],
+            )
+            self.assertNotIn("evt-5", instance._cycle_attempts)
+
+        asyncio.run(run())
+
     def test_provider_retry_fallback_whitespace_and_punctuation_near_matches_are_posted(self):
         fallback = (
             "⚠️ The model provider failed after retries. I kept raw provider details "
@@ -2018,6 +2079,10 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             (
                 "⚠️ The model provider failed after retries. I kept raw provider details "
                 "out of chat; check gateway logs for diagnostics."
+            ),
+            (
+                "⚠️ Provider authentication failed. Check the configured credentials; "
+                "raw provider details are in the gateway logs."
             ),
         ]
         for body in bodies:
