@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "description": "Redacted structural replay of the seven Berlin Huawei outputs; prose replaced, malformed envelope bytes preserved by category.",
+  "outputs": [
+    "{\"action\":\"contribute\",\"body\":\"[redacted one]\"",
+    "{\"action\":\"contribute\",\"body\":\"[redacted two]\nline with \\\"quoted\\\" text\"",
+    "{\"action\":\"contribute\",\"body\":\"[redacted three]\nsecond line\"",
+    "{\"action\":\"contribute\",\"body\":\"[redacted four]\nsecond line\"",
+    "{\"action\":\"contribute\",\"body\":\"[redacted five]\nsecond line\"",
+    "{\"action\":\"contribute\",\"body\":\"[redacted six]\nsecond line\"",
+    "{\"action\":\"contribute\",\"body\":\"[redacted seven] line one\\nline two\""
+  ]
+}
