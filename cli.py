@@ -83,6 +83,20 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         "--yes", action="store_true",
         help="Confirm the exact audited non-replayable closure (required)",
     )
+    lifecycle = commands.add_parser(
+        "reconcile-terminal-lifecycle",
+        help="Close one canonically posted lifecycle after authoritative terminal-cycle proof",
+    )
+    lifecycle.add_argument("room_id")
+    lifecycle.add_argument("source_seq", type=int)
+    lifecycle.add_argument("source_event_id")
+    lifecycle.add_argument("canonical_event_id")
+    lifecycle.add_argument("cycle_id")
+    lifecycle.add_argument("terminal_state", choices=("completed", "interrupted"))
+    lifecycle.add_argument(
+        "--yes", action="store_true",
+        help="Confirm the exact audited non-replayable lifecycle closure (required)",
+    )
     renew = commands.add_parser(
         "renew",
         help="Resume an owner-authorized identity-preserving credential renewal",
@@ -113,6 +127,8 @@ def dispatch(args: argparse.Namespace) -> int:
             return _recover_idempotency_collision(args)
         if command == "recover-orphaned-intent":
             return _recover_orphaned_intent(args)
+        if command == "reconcile-terminal-lifecycle":
+            return _reconcile_terminal_lifecycle(args)
         if command == "renew":
             return _renew(args.room_id, request_owner=bool(args.request_owner))
     except (ValueError, ProtocolError, OSError, json.JSONDecodeError) as error:
@@ -570,6 +586,133 @@ def _recover_orphaned_intent(args: argparse.Namespace) -> int:
     print(
         f"{args.room_id} source sequence {source_seq} is closed as a canonical zero-byte cycle pass; "
         "the frozen post cannot replay and cursor/ack were not changed."
+    )
+    return 0
+
+
+def _reconcile_terminal_lifecycle(args: argparse.Namespace) -> int:
+    """Archive one blocked lifecycle only after authoritative terminal proof."""
+    if not args.yes:
+        raise ValueError("--yes is required for an audited terminal lifecycle reconciliation")
+    source_seq = int(args.source_seq)
+    if source_seq < 1:
+        raise ValueError("source_seq must be positive")
+    terminal_state = str(args.terminal_state)
+    if terminal_state not in {"completed", "interrupted"}:
+        raise ValueError("terminal_state must be completed or interrupted")
+    binding = load().binding(args.room_id)
+    if binding is None:
+        raise ValueError(f"room {args.room_id!r} is not configured")
+
+    expected_identity = {
+        "source_event_id": args.source_event_id,
+        "source_seq": source_seq,
+        "canonical_event_id": args.canonical_event_id,
+        "cycle_id": args.cycle_id,
+        "terminal_state": terminal_state,
+    }
+    existing = binding.resolved_delivery_lifecycle.get(args.source_event_id)
+    if existing:
+        if any(existing.get(key) != value for key, value in expected_identity.items()):
+            raise ValueError("resolved lifecycle audit conflicts with this request")
+        print(f"{args.room_id} source sequence {source_seq} lifecycle was already reconciled.")
+        return 0
+
+    journal = binding.delivery_lifecycle.get(args.source_event_id)
+    if not isinstance(journal, dict):
+        raise TypeError("source has no blocked lifecycle journal")
+    journal = deepcopy(journal)
+    receipt = journal.get("receipt") or {}
+    completion = journal.get("completion") or {}
+    payload = completion.get("payload") or {}
+    if (
+        journal.get("state") != "lifecycle_blocked"
+        or journal.get("delivery_state") != "posted"
+        or journal.get("lifecycle_state") != "blocked"
+        or journal.get("automatic_retry") is not False
+        or not isinstance(journal.get("last_error_code"), str)
+        or not isinstance(journal.get("last_error"), str)
+        or journal.get("last_error_code") != "cycle_conflict"
+        or receipt.get("source_event_id") != args.source_event_id
+        or receipt.get("source_seq") != source_seq
+        or receipt.get("canonical_event_id") != args.canonical_event_id
+        or completion.get("kind") != "cycle"
+        or completion.get("cycle_id") != args.cycle_id
+        or payload.get("action") != "contribute"
+        or payload.get("eventId") != args.canonical_event_id
+        or binding.cursor < source_seq
+        or binding.acknowledged_cursor < source_seq
+        or args.source_event_id in binding.delivery_intents
+    ):
+        raise ValueError("blocked lifecycle does not match the exact reconciliation contract")
+
+    cycle = RoomProtocol(binding.base_url, binding.credential).get_discussion_cycle(
+        binding.room_id, args.cycle_id,
+    )
+    contributions = cycle.get("contributions")
+    matching_contribution = any(
+        isinstance(item, dict)
+        and item.get("eventId") == args.canonical_event_id
+        and item.get("membershipId") == binding.membership_id
+        for item in contributions
+    ) if isinstance(contributions, list) else False
+    if (
+        str(cycle.get("id") or cycle.get("cycleId") or "") != args.cycle_id
+        or str(cycle.get("state") or "") != terminal_state
+        or not matching_contribution
+    ):
+        raise ValueError("authoritative cycle does not match the requested terminal proof")
+
+    audit = {
+        "version": 1,
+        "reason": "authoritative_terminal_cycle_after_canonical_delivery",
+        **expected_identity,
+        "receipt": deepcopy(receipt),
+        "original_completion": deepcopy(completion),
+        "binding": deepcopy(journal.get("binding")),
+        "original_error_code": journal["last_error_code"],
+        "original_error": journal["last_error"],
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    binding_identity = {
+        "room_id": binding.room_id,
+        "base_url": binding.base_url,
+        "credential": binding.credential,
+        "membership_id": binding.membership_id,
+        "installation_id": binding.installation_id,
+        "identity_version": binding.identity_version,
+    }
+
+    def reconcile(current):
+        latest = current.binding(args.room_id)
+        latest_identity = {
+            "room_id": getattr(latest, "room_id", ""),
+            "base_url": getattr(latest, "base_url", ""),
+            "credential": getattr(latest, "credential", ""),
+            "membership_id": getattr(latest, "membership_id", ""),
+            "installation_id": getattr(latest, "installation_id", ""),
+            "identity_version": getattr(latest, "identity_version", -1),
+        }
+        if latest is None or latest_identity != binding_identity:
+            raise ValueError("Room binding changed during lifecycle reconciliation")
+        if latest.cursor < source_seq or latest.acknowledged_cursor < source_seq:
+            raise ValueError("Room acknowledgement proof changed during lifecycle reconciliation")
+        if latest.delivery_lifecycle.get(args.source_event_id) != journal:
+            raise ValueError("blocked lifecycle changed during reconciliation")
+        if args.source_event_id in latest.delivery_intents:
+            raise ValueError("source regained a live delivery intent")
+        concurrent_audit = latest.resolved_delivery_lifecycle.get(args.source_event_id)
+        if concurrent_audit is not None:
+            if concurrent_audit == audit and args.source_event_id not in latest.delivery_lifecycle:
+                return
+            raise ValueError("resolved lifecycle audit changed during reconciliation")
+        latest.resolved_delivery_lifecycle[args.source_event_id] = deepcopy(audit)
+        latest.delivery_lifecycle.pop(args.source_event_id, None)
+
+    update(reconcile)
+    print(
+        f"{args.room_id} source sequence {source_seq} lifecycle closed as {terminal_state}; "
+        "canonical receipt preserved and cursor/ack unchanged."
     )
     return 0
 

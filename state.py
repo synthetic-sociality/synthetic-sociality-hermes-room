@@ -21,13 +21,19 @@ T = TypeVar("T")
 
 
 def _valid_canonical_timestamp(value: Any) -> bool:
-    if not isinstance(value, str) or not re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+    match = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})",
         value,
-    ):
+    ) if isinstance(value, str) else None
+    if match is None:
         return False
+    fraction = match.group(2)
+    parse_value = match.group(1)
+    if fraction:
+        parse_value += "." + fraction[:6].ljust(6, "0")
+    parse_value += match.group(3)
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(parse_value.replace("Z", "+00:00"))
     except ValueError:
         return False
     return parsed.tzinfo is not None
@@ -98,6 +104,9 @@ class RoomBinding:
     # may remove the frozen delivery intent while cycle/turn completion remains
     # safely retryable without another post or model invocation.
     delivery_lifecycle: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Operator-audited closure of non-retryable lifecycle work after canonical
+    # delivery and authoritative terminal-cycle verification.
+    resolved_delivery_lifecycle: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Durable ownership of model work by the server-issued attempt identity.
     # Different canonical source events may describe the same attempt; only
     # the recorded source is allowed to dispatch it to Hermes.
@@ -142,6 +151,8 @@ class RoomBinding:
             raise ValueError("unsupported Room message payload dialect")
         if not isinstance(binding.delivery_lifecycle, dict):
             raise ValueError("Room delivery lifecycle journal must be an object")
+        if not isinstance(binding.resolved_delivery_lifecycle, dict):
+            raise TypeError("Room resolved lifecycle audit must be an object")
         if not isinstance(binding.delivery_authority, dict):
             raise ValueError("Room delivery authority fence must be an object")
         normalized_authority: dict[str, dict[str, Any]] = {}
@@ -234,6 +245,11 @@ class RoomBinding:
                 raise ValueError("Room lifecycle state label is inconsistent")
             if record.get("automatic_retry") is not expected_automatic_retry:
                 raise ValueError("Room lifecycle automatic-retry state is inconsistent")
+            if lifecycle_state == "blocked" and (
+                not isinstance(record.get("last_error_code"), str)
+                or not isinstance(record.get("last_error"), str)
+            ):
+                raise ValueError("Room lifecycle error evidence is invalid")
             if lifecycle_state == "not_required":
                 if completion:
                     raise ValueError("Room lifecycle marked not-required has a completion request")
@@ -269,6 +285,62 @@ class RoomBinding:
                     raise ValueError("Room turn lifecycle completion is invalid")
             else:
                 raise ValueError("Room lifecycle completion kind is invalid")
+        for source_id, record in binding.resolved_delivery_lifecycle.items():
+            receipt = record.get("receipt") if isinstance(record, dict) else None
+            completion = record.get("original_completion") if isinstance(record, dict) else None
+            audit_binding = record.get("binding") if isinstance(record, dict) else None
+            payload = completion.get("payload") if isinstance(completion, dict) else None
+            allowed_audit_fields = {
+                "version", "reason", "source_event_id", "source_seq",
+                "canonical_event_id", "cycle_id", "terminal_state", "receipt",
+                "original_completion", "binding", "original_error_code",
+                "original_error", "recorded_at",
+            }
+            if (
+                not isinstance(source_id, str) or not source_id
+                or not isinstance(record, dict)
+                or set(record) != allowed_audit_fields
+                or type(record.get("version")) is not int
+                or record["version"] != 1
+                or record.get("reason") != "authoritative_terminal_cycle_after_canonical_delivery"
+                or record.get("source_event_id") != source_id
+                or type(record.get("source_seq")) is not int
+                or record["source_seq"] <= 0
+                or record.get("terminal_state") not in {"completed", "interrupted"}
+                or not isinstance(record.get("cycle_id"), str) or not record["cycle_id"]
+                or not isinstance(record.get("canonical_event_id"), str)
+                or not record["canonical_event_id"]
+                or not _valid_canonical_timestamp(record.get("recorded_at"))
+                or not isinstance(receipt, dict)
+                or receipt.get("source_event_id") != source_id
+                or receipt.get("source_seq") != record["source_seq"]
+                or receipt.get("canonical_event_id") != record["canonical_event_id"]
+                or type(receipt.get("canonical_seq")) is not int
+                or receipt["canonical_seq"] <= 0
+                or not _valid_canonical_timestamp(receipt.get("canonical_ts"))
+                or not isinstance(completion, dict)
+                or completion.get("kind") != "cycle"
+                or completion.get("cycle_id") != record["cycle_id"]
+                or not isinstance(completion.get("attempt_id"), str)
+                or not completion["attempt_id"]
+                or not isinstance(payload, dict)
+                or type(payload.get("generation")) is not int
+                or payload["generation"] < 0
+                or payload.get("action") != "contribute"
+                or payload.get("eventId") != record["canonical_event_id"]
+                or audit_binding != {
+                    "membership_id": binding.membership_id,
+                    "installation_id": binding.installation_id,
+                    "identity_version": binding.identity_version,
+                }
+                or record.get("original_error_code") != "cycle_conflict"
+                or not isinstance(record.get("original_error"), str)
+                or binding.cursor < record["source_seq"]
+                or binding.acknowledged_cursor < record["source_seq"]
+            ):
+                raise ValueError("Room resolved lifecycle audit evidence is invalid")
+            if source_id in binding.delivery_lifecycle or source_id in binding.delivery_intents:
+                raise ValueError("Room resolved lifecycle audit overlaps live work")
         for source_id, intent in binding.delivery_intents.items():
             if not isinstance(source_id, str) or not source_id or not isinstance(intent, dict):
                 raise ValueError("Room delivery intent is invalid")

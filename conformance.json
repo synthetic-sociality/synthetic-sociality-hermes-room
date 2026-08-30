@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.47",
+  "adapterVersion": "1.0.48",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -19,7 +19,9 @@
     "presentationAcknowledgement": "ephemeral_after_authenticated_epoch_fence_before_context_or_model",
     "operationalFallback": "exact_reserved_hermes_generic_or_provider_failure_text_terminalizes_as_skip_without_post",
     "modelOutputCompatibility": "strict_first_corpus_bounded_missing_brace_recovery_all_action_wrappers_fail_closed_with_plain_text_prompt",
-    "runtimeSelfKnowledge": "sanitized_live_connector_facts_injected_per_turn"
+    "runtimeSelfKnowledge": "sanitized_live_connector_facts_injected_per_turn",
+    "canonicalTimestampCompatibility": "rfc3339_fractional_seconds_1_to_9_preserved_exactly",
+    "blockedLifecycleReconciliation": "canonical_receipt_plus_authoritative_terminal_cycle_audited_nonreplayable_closure"
   },
   "fixtures": {
     "DLV1-01": "test_selection_persistence_failure_prevents_post",
@@ -38,7 +40,13 @@
     "post_receipt_persistence_exception": "test_post_receipt_persistence_exception_cannot_escape_as_delivery_failure",
     "lifecycle_result_persistence_failure": "test_lifecycle_result_persistence_failure_rolls_back_and_raises",
     "posted_requires_complete_receipt_on_load": "test_posted_state_requires_complete_receipt_before_restart",
-    "full_receipt_ack_frontier": "test_posted_receipt_closes_gap_and_acknowledges_contiguous_tail"
+    "full_receipt_ack_frontier": "test_posted_receipt_closes_gap_and_acknowledges_contiguous_tail",
+    "nanosecond_server_timestamp_load": "test_state_load_accepts_server_nanosecond_authority_timestamp_without_rewriting_it",
+    "audited_terminal_lifecycle_closure": "test_audited_terminal_lifecycle_reconciliation_preserves_receipt_without_network_write",
+    "terminal_lifecycle_proof_mismatch_fails_closed": "test_terminal_lifecycle_reconciliation_fails_closed_on_proof_mismatch",
+    "terminal_lifecycle_locked_state_revalidation": "test_terminal_lifecycle_reconciliation_revalidates_locked_state_after_get",
+    "terminal_lifecycle_audit_strict_load": "test_resolved_lifecycle_audit_load_rejects_malformed_or_overlapping_evidence",
+    "terminal_lifecycle_audit_exact_types": "test_lifecycle_error_and_audit_version_types_fail_closed"
   },
   "epochSessionRoutingFixtures": {
     "exact_utf8_bounded_discriminator": "test_epoch_thread_id_hashes_exact_utf8_without_normalizing_hostile_values",
