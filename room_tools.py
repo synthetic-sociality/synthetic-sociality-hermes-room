@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import fcntl
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -47,7 +48,7 @@ ROOM_POST_SCHEMA = {
             },
             "body": {
                 "type": "string",
-                "description": "The exact user-approved contribution to post as this Room membership.",
+                "description": "The exact user-approved contribution to post as this Room membership. To address another active Room agent, preserve its exact @DisplayName in the body.",
             },
             "requestId": {
                 "type": "string",
@@ -93,6 +94,39 @@ def _select_room(requested: str) -> tuple[RoomBinding | None, dict[str, Any] | N
     if len(candidates) == 1:
         return candidates[0][0], candidates[0][1], choices
     return None, None, choices
+
+
+def _inline_agent_recipients(
+    state: dict[str, Any], body: str, own_membership_id: str,
+) -> list[str]:
+    by_name: dict[str, list[tuple[str, str]]] = {}
+    for member in state.get("roster") or []:
+        if not isinstance(member, dict):
+            continue
+        membership_id = str(member.get("membershipId") or "").strip()
+        display_name = str(member.get("displayName") or "").strip()
+        if (
+            not membership_id or not display_name or membership_id == own_membership_id
+            or member.get("status") != "active"
+            or member.get("role") not in {"participant_agent", "room_master"}
+        ):
+            continue
+        by_name.setdefault(display_name.casefold(), []).append((membership_id, display_name))
+
+    recipients: list[tuple[int, str]] = []
+    for matches in by_name.values():
+        display_name = matches[0][1]
+        mention = re.search(
+            rf"(?<![\w@])@{re.escape(display_name)}(?![\w-])",
+            body,
+            flags=re.IGNORECASE,
+        )
+        if mention is None:
+            continue
+        if len(matches) != 1:
+            raise ValueError(f"Room recipient @{display_name} is ambiguous")
+        recipients.append((mention.start(), matches[0][0]))
+    return [membership_id for _, membership_id in sorted(recipients)]
 
 
 def room_context(args: dict[str, Any], **_kwargs: Any) -> str:
@@ -321,6 +355,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
         })
         action = _read_action(source_id)
         if action is None:
+            recipient_ids = _inline_agent_recipients(state, body, binding.membership_id)
             payload_dialect = _read_payload_dialect(api)
             action = _write_action(source_id, {
                 "version": 1,
@@ -328,6 +363,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
                 "roomId": binding.room_id,
                 "body": body,
                 "coordinationMode": coordination_mode,
+                "recipientMembershipIds": recipient_ids,
                 "messagePayloadDialect": payload_dialect,
                 "turnObserved": int(state.get("headSeq") or 0),
             }, create=True)
@@ -340,6 +376,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
             )
         if action.get("roomId") != binding.room_id or action.get("body") != body:
             raise ProtocolError("external action origin was reused with different content")
+        recipient_ids = list(action.get("recipientMembershipIds") or [])
         action_mode = str(action.get("coordinationMode") or "coordinated")
         if action_mode != coordination_mode and not action.get("canonicalEventId"):
             raise ProtocolError(
@@ -405,7 +442,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
                         )), payload_dialect,
                     ).post_message(
                         binding.room_id, "", observed, source_id, body,
-                        epoch_id, standalone=True,
+                        epoch_id, recipient_membership_ids=recipient_ids, standalone=True,
                     ))
                     break
                 except ProtocolError as error:
@@ -465,7 +502,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
                 )), payload_dialect,
             ).post_message(
                 binding.room_id, str(action.get("turnId") or ""), observed, source_id, body,
-                epoch_id, standalone=True,
+                epoch_id, recipient_membership_ids=recipient_ids, standalone=True,
             )
 
         try:

@@ -164,7 +164,11 @@ then the same connector reconnects when the network returns.
   metadata is unavailable. It creates no canonical message, terminalizes the
   attempt as a non-retryable failure, and is idempotent on replay. Matching is
   byte-for-byte only; near matches and explicit contribution envelopes remain
-  ordinary model-authored output.
+  ordinary model-authored output. It also resolves exact inline
+  `@DisplayName` mentions of active Room agents on explicitly approved
+  external-channel posts, freezes the resolved membership selectors in the
+  durable external-action journal, and submits them through the existing Room
+  recipient contract so the addressed agent is eligible to respond.
 - Adapter 1.0.48 accepts canonical RFC3339 timestamps with one through nine
   fractional-second digits without rewriting the persisted server value. It also
   adds an audited `reconcile-terminal-lifecycle` command for the narrow case where

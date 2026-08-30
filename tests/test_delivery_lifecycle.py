@@ -1341,6 +1341,78 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertNotEqual(result.get("code"), "room_origin_delivery_owned_by_adapter")
         self.assertIn("not configured", result["error"])
 
+    def test_external_channel_inline_mention_resolves_recipient_for_room_routing(self):
+        binding = adapter.RoomBinding(
+            "https://room.example/api", "room-1", "paula-member", "credential",
+            installation_id="installation-1",
+        )
+        state = {
+            "title": "NewRoom",
+            "headSeq": 16,
+            "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1},
+            "roster": [
+                {
+                    "membershipId": "paula-member",
+                    "displayName": "Paula",
+                    "role": "participant_agent",
+                    "status": "active",
+                },
+                {
+                    "membershipId": "claude-member",
+                    "displayName": "Claude",
+                    "role": "participant_agent",
+                    "status": "active",
+                },
+            ],
+        }
+        posts = []
+
+        class API:
+            def room_policy(self, _room_id):
+                return {"coordinationMode": "open"}
+
+            def room_state(self, _room_id):
+                return state
+
+            def post_message(self, *args, **kwargs):
+                posts.append((copy.deepcopy(args), copy.deepcopy(kwargs)))
+                return {"id": "posted-17", "seq": 17, "ts": "2026-08-30T13:43:29Z"}
+
+        original_select_room = room_tools._select_room
+        original_protocol = room_tools.RoomProtocol
+        original_payload_dialect = room_tools._read_payload_dialect
+        original_state_root = room_tools.state_root
+        with tempfile.TemporaryDirectory() as directory:
+            room_tools._select_room = lambda _requested: (binding, state, [])
+            room_tools.RoomProtocol = lambda *_args, **_kwargs: API()
+            room_tools._read_payload_dialect = lambda _api: "v1"
+            room_tools.state_root = lambda: Path(directory)
+            try:
+                result = json.loads(room_tools.room_post(
+                    {
+                        "room": "NewRoom",
+                        "body": "@Claude, please review this evidence and respond.",
+                        "requestId": "telegram-claude-routing-0001",
+                    },
+                    session_id="telegram-session-1",
+                    turn_id="telegram-turn-1",
+                    user_task="Post this in NewRoom and address Claude directly.",
+                ))
+            finally:
+                room_tools._select_room = original_select_room
+                room_tools.RoomProtocol = original_protocol
+                room_tools._read_payload_dialect = original_payload_dialect
+                room_tools.state_root = original_state_root
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["canonicalEventId"], "posted-17")
+        self.assertEqual(len(posts), 1)
+        args, kwargs = posts[0]
+        self.assertEqual(args[0], "room-1")
+        self.assertEqual(args[4], "@Claude, please review this evidence and respond.")
+        self.assertEqual(kwargs.get("recipient_membership_ids"), ["claude-member"])
+        self.assertTrue(kwargs.get("standalone"))
+
     def test_installer_packages_room_origin_backstop_module(self):
         installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
         copy_line = next(line for line in installer.splitlines() if line.startswith("for file in "))

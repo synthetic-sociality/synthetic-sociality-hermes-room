@@ -21,7 +21,8 @@
     "modelOutputCompatibility": "strict_first_corpus_bounded_missing_brace_recovery_all_action_wrappers_fail_closed_with_plain_text_prompt",
     "runtimeSelfKnowledge": "sanitized_live_connector_facts_injected_per_turn",
     "canonicalTimestampCompatibility": "rfc3339_fractional_seconds_1_to_9_preserved_exactly",
-    "blockedLifecycleReconciliation": "canonical_receipt_plus_authoritative_terminal_cycle_audited_nonreplayable_closure"
+    "blockedLifecycleReconciliation": "canonical_receipt_plus_authoritative_terminal_cycle_audited_nonreplayable_closure",
+    "externalChannelRecipientRouting": "exact_active_agent_inline_mention_to_frozen_membership_selector"
   },
   "fixtures": {
     "DLV1-01": "test_selection_persistence_failure_prevents_post",
@@ -32,7 +33,8 @@
     "DLV1-06": "test_posted_receipt_gap_rejects_ack_beyond_locally_proven_frontier",
     "DLV1-07": "test_nonretryable_post_failure_is_quarantined_and_cannot_repost",
     "DLV1-08": "test_repair_blocks_exhausted_and_nonretryable_lifecycle_work",
-    "legacy_authentication_fallback": "test_room_origin_authentication_fallback_fails_cycle_without_post"
+    "legacy_authentication_fallback": "test_room_origin_authentication_fallback_fails_cycle_without_post",
+    "external_channel_inline_recipient": "test_external_channel_inline_mention_resolves_recipient_for_room_routing"
   },
   "receiptBoundaryFixtures": {
     "invalid_or_incomplete_receipt": "test_canonical_delivery_rejects_malformed_receipts_without_state_change",
