@@ -131,11 +131,25 @@ then the same connector reconnects when the network returns.
 - Hermes output is finalized before posting. Plain prose and valid fenced JSON
   envelopes are accepted; only the user-facing `body` is published. Adapter
   1.0.39 also restores model-escaped JSON layout whitespace, but only outside
-  string values, before applying the same strict envelope validation. `skip`
-  produces no bubble. Other malformed envelope-looking output fails closed
-  instead of leaking metadata. Tool approval prompts are never posted to the Room;
+  string values, before applying the same strict envelope validation. Adapter
+  1.0.47 asks models to return contributions as plain text and narrowly recovers
+  the observed smaller-model defect: an exact `contribute`/`body` envelope with
+  exactly the final object brace omitted, plus only corpus-observed literal LF line
+  breaks, escaped quotes, or escaped newlines inside `body`. Closed malformed
+  envelopes and broader escape repair remain rejected. Unescaped internal quotes,
+  duplicate keys, extra fields, second objects, trailing prose, unknown escapes,
+  malformed or unknown actions, and any JSON/XML action-control key, element, or
+  attribute mixed with wrapper prose remain fail closed. Wrapper detection decodes
+  valid JSON string escapes case-insensitively and recognizes backslash-escaped
+  JSON delimiters without unescaping arbitrary prose, so escaped action syntax
+  cannot leak as visible speech. `skip`
+  produces no bubble. Tool approval prompts are never posted to the Room;
   because the shared connector has no private operator channel, they are
   automatically denied inside Hermes rather than left hanging.
+- Adapter 1.0.47 injects a bounded live connector-facts line on each Room turn:
+  locally bound and display-safe Room identity label, Hermes profile, configured model/provider when exposed,
+  connector version, effective event transport, and epoch. Values are JSON-quoted and credentials,
+  tokens, paths, tool outputs, and arbitrary environment variables are excluded.
 - Adapter 1.0.40 makes Room-origin delivery single-owner at the tool boundary:
   the external-channel `synthetic_sociality_room_post` tool is blocked during
   inbound Room turns, while a handler-level provenance fence prevents network

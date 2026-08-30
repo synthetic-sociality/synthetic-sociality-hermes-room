@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.46",
+  "adapterVersion": "1.0.47",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -17,7 +17,9 @@
     "crossChannelRoomRead": "read_only_profile_tool",
     "presence": "connector_heartbeat_lease",
     "presentationAcknowledgement": "ephemeral_after_authenticated_epoch_fence_before_context_or_model",
-    "operationalFallback": "exact_reserved_hermes_generic_or_provider_failure_text_terminalizes_as_skip_without_post"
+    "operationalFallback": "exact_reserved_hermes_generic_or_provider_failure_text_terminalizes_as_skip_without_post",
+    "modelOutputCompatibility": "strict_first_corpus_bounded_missing_brace_recovery_all_action_wrappers_fail_closed_with_plain_text_prompt",
+    "runtimeSelfKnowledge": "sanitized_live_connector_facts_injected_per_turn"
   },
   "fixtures": {
     "DLV1-01": "test_selection_persistence_failure_prevents_post",
@@ -64,6 +66,26 @@
   "presentationAcknowledgementFixtures": {
     "before_policy_coordination_queue_context_and_model": "test_receive_boundary_ack_precedes_policy_coordination_queue_context_and_model",
     "separate_from_durable_cursor_ack": "test_durable_cursor_ack_does_not_emit_presentation_ack"
+  },
+  "modelOutputCompatibilityFixtures": {
+    "berlin_multiline_missing_brace_recovery": "test_extract_visible_body_recovers_berlin_multiline_contribution",
+    "trailing_content_and_extra_fields_fail_closed": "test_berlin_recovery_rejects_trailing_content_and_extra_fields",
+    "known_escape_recovery_and_unknown_escape_rejection": "test_berlin_recovery_is_narrow_and_decodes_only_known_string_escapes",
+    "canonical_single_post_from_recovered_output": "test_berlin_malformed_contribution_reaches_canonical_post_once",
+    "redacted_seven_output_corpus_exactly_once": "test_redacted_berlin_corpus_recovers_seven_and_posts_each_exactly_once",
+    "closed_valid_json_envelope_schema": "test_valid_json_room_envelope_schema_is_closed",
+    "duplicate_json_keys_fail_closed": "test_valid_json_room_envelope_schema_is_closed",
+    "wrapper_prose_envelope_fails_closed": "test_wrapper_prose_around_room_envelope_fails_closed",
+    "wrapper_prose_terminal_pass_without_post": "test_wrapper_prose_envelope_terminally_passes_without_post",
+    "ambiguous_envelopes_never_reach_canonical_post": "test_duplicate_key_and_escaped_wrapper_envelopes_never_post",
+    "unknown_and_unicode_case_action_wrappers_never_post": "test_duplicate_key_and_escaped_wrapper_envelopes_never_post",
+    "legacy_attribute_action_syntax_never_posts": "test_duplicate_key_and_escaped_wrapper_envelopes_never_post",
+    "backslash_escaped_json_action_syntax_never_posts": "test_duplicate_key_and_escaped_wrapper_envelopes_never_post",
+    "live_secret_free_runtime_context": "test_runtime_capability_context_is_live_and_secret_free",
+    "bound_identity_and_hostile_state_fallback": "test_runtime_context_uses_bound_identity_and_survives_hostile_room_state",
+    "active_sse_runtime_context": "test_runtime_capability_context_reports_active_sse_transport",
+    "effective_transport_set_before_consumption": "test_transport_cycle_tracks_effective_transport_before_event_consumption",
+    "plain_text_contribution_prompt": "test_room_prompt_requires_plain_text_contributions"
   },
   "supportedRuntime": {
     "python": ">=3.11",

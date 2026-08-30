@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
-import html
 import json
 import logging
 import os
@@ -55,13 +54,20 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
+CONNECTOR_VERSION = "1.0.47"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
-_ATTRIBUTE_BODY = re.compile(
-    r"^\s*<action\s*=\s*[\"']contribute[\"']\s+body\s*=\s*[\"'](.*?)[\"']"
-    r"(?:\s+(?:contributionType|recipientDisplayNames)\s*=.*)?/?>\s*$",
-    re.DOTALL | re.IGNORECASE,
+_ROOM_ENVELOPE_FRAGMENT = re.compile(
+    r'(?:(?:"action"\s*:)|'
+    r'<\s*(?:[A-Za-z_][\w.-]*:)?action(?=\s|=|/?>)|'
+    r'<[^>]*\baction\s*=)',
+    re.IGNORECASE,
+)
+_JSON_STRING_TOKEN = r'"(?:\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4})|[^"\\\x00-\x1f])*"'
+_JSON_OBJECT_KEY = re.compile(rf'(?P<key>{_JSON_STRING_TOKEN})\s*:')
+_ESCAPED_JSON_OBJECT_KEY = re.compile(
+    r'\\"(?P<key>(?:\\(?:[\\/bfnrt]|u[0-9A-Fa-f]{4})|[^"\\\x00-\x1f])*)\\"\s*:'
 )
 _PRIVATE_APPROVAL = re.compile(
     r"(?:approval\s+(?:is\s+)?required|reply\s+[`\"']?/?approve|/approve\b|dangerous\s+command)",
@@ -83,6 +89,11 @@ PENDING_EVENT_TTL_SECONDS = 180.0
 PENDING_EVENT_MAX_RETRIES = 2
 TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "cancelled", "superseded", "ignored"})
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
+ROOM_RESPONSE_INSTRUCTION = (
+    'If no response from you is appropriate, return exactly {"action":"skip"}. '
+    "Otherwise answer in plain natural text only. Do not wrap a contribution in JSON, XML, "
+    "or a code fence."
+)
 
 
 def host_operational_outcome(metadata: Any) -> dict[str, Any] | None:
@@ -606,6 +617,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # exhausting asyncio's shared default executor, which is also used by
         # Hermes session persistence and conversation dispatch.
         self._stream_executors: dict[str, ThreadPoolExecutor] = {}
+        # Tracks the transport that owns event consumption now. Persisted
+        # preference is updated only after a cycle, so it cannot describe an
+        # event while that cycle is still active.
+        self._effective_transports: dict[str, str] = {}
         # Each blocking reader owns an opaque generation. Cancelling its
         # asyncio Future cannot interrupt urllib, so stale callbacks must be
         # rejected independently of the reusable process-wide stop event.
@@ -705,6 +720,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # unbounded series of orphaned SSE threads. Process exit performs the
         # final executor shutdown.
         getattr(self, "_stream_generations", {}).clear()
+        getattr(self, "_effective_transports", {}).clear()
         self._mark_disconnected()
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -2415,8 +2431,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _transport_cycle(self, binding: RoomBinding) -> None:
         """Run one truthful transport cycle without changing the ack cursor."""
         if binding.transport == "long_poll_fallback":
+            self._effective_transports[binding.room_id] = "long_poll_fallback"
             await self._long_poll_once(binding)
             return
+        self._effective_transports[binding.room_id] = "sse"
         try:
             await self._stream_once(binding)
             binding.transport = "sse"
@@ -2429,6 +2447,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 stream_error,
             )
             binding.transport = "long_poll_fallback"
+            self._effective_transports[binding.room_id] = "long_poll_fallback"
             await self._long_poll_once(binding)
 
     async def _long_poll_once(self, binding: RoomBinding) -> None:
@@ -3383,11 +3402,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             cycle_context = f"\n\n[Autonomous discussion phase {phase}, round {attempt.get('round')}, turn {turn_number}/{total_turns}] {instruction}"
         prompt = (
             f"[Synthetic Sociality Room event {event_id}, canonical sequence {seq}]\n"
+            f"{_runtime_capability_context(binding, state, transport=getattr(self, '_effective_transports', {}).get(binding.room_id) or binding.transport)}\n"
             f"{shared_context}\n\n{actor}: {body}{cycle_context}\n\n"
             "Respond as your own Hermes identity and character. Address the human by name only when natural, "
             "never claim consensus or speak for another participant. Use the shared context but do not force the room theme. "
-            "If no response from you is appropriate, return exactly {\"action\":\"skip\"}. Otherwise answer naturally; "
-            "a structured envelope may use {\"action\":\"contribute\",\"body\":\"...\"}."
+            f"{ROOM_RESPONSE_INSTRUCTION}"
         )
         dispatch_source = _dispatch_source_ref(event_id, dispatch_generation)
         source = self.build_source(
@@ -4191,6 +4210,150 @@ def _restore_escaped_json_layout(candidate: str) -> str:
     return "".join(restored)
 
 
+def _decode_compatibility_body(raw_body: str) -> str | None:
+    """Decode only the narrow string defects observed at the model boundary."""
+    decoded: list[str] = []
+    # The production corpus used only escaped quotes and escaped newlines.
+    # Broader JSON unescaping would turn compatibility repair into a parser.
+    escapes = {'"': '"', "n": "\n"}
+    index = 0
+    while index < len(raw_body):
+        char = raw_body[index]
+        if char == '"':
+            # An unescaped quote could terminate the body and introduce fields
+            # or a second object. Compatibility recovery must stay fail closed.
+            return None
+        if char == "\\":
+            index += 1
+            if index >= len(raw_body):
+                return None
+            escape = raw_body[index]
+            replacement = escapes.get(escape)
+            if replacement is None:
+                return None
+            decoded.append(replacement)
+            index += 1
+            continue
+        if ord(char) < 0x20 and char != "\n":
+            return None
+        decoded.append(char)
+        index += 1
+    return "".join(decoded)
+
+
+def _recover_malformed_contribute_body(candidate: str) -> str | None:
+    """Recover one exact contribute envelope shape without decoding controls."""
+    prefix = re.match(
+        r'^\{\s*"action"\s*:\s*"contribute"\s*,\s*"body"\s*:\s*"',
+        candidate,
+    )
+    if prefix is None:
+        return None
+    compact = candidate.rstrip()
+    if compact.endswith('"'):
+        # Compatibility with a model omitting exactly the final object brace.
+        body_container = compact
+    else:
+        return None
+    if len(body_container) <= prefix.end() or not body_container.endswith('"'):
+        return None
+    body = _decode_compatibility_body(body_container[prefix.end():-1])
+    return body.strip() if isinstance(body, str) and body.strip() else None
+
+
+class _DuplicateJSONKey(ValueError):
+    """Raised when a model envelope repeats a JSON object key."""
+
+
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJSONKey(key)
+        result[key] = value
+    return result
+
+
+_ROOM_JSON_DECODER = json.JSONDecoder(object_pairs_hook=_reject_duplicate_json_pairs)
+
+
+def _contains_room_envelope_fragment(candidate: str) -> bool:
+    """Detect embedded Room controls after JSON string-escape decoding."""
+    if _ROOM_ENVELOPE_FRAGMENT.search(candidate):
+        return True
+    for pair in _JSON_OBJECT_KEY.finditer(candidate):
+        try:
+            key = json.loads(pair.group("key"))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(key, str) and key.casefold() == "action":
+            return True
+    for pair in _ESCAPED_JSON_OBJECT_KEY.finditer(candidate):
+        try:
+            key = json.loads(f'"{pair.group("key")}"')
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(key, str) and key.casefold() == "action":
+            return True
+    return False
+
+
+def _runtime_capability_context(
+    binding: RoomBinding,
+    state: dict[str, Any],
+    *,
+    transport: str,
+    environ: dict[str, str] | None = None,
+) -> str:
+    """Return bounded, live connector facts without credentials or host secrets."""
+    environment = os.environ if environ is None else environ
+    profile = str(environment.get("HERMES_PROFILE") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", profile):
+        home = os.path.normpath(str(environment.get("HERMES_HOME") or ""))
+        profile = (
+            os.path.basename(home)
+            if os.path.basename(os.path.dirname(home)) == "profiles"
+            else "default"
+        )
+    model = str(environment.get("HERMES_MODEL") or "").strip()
+    provider = str(environment.get("HERMES_PROVIDER") or "").strip()
+    if environ is None and (not model or not provider):
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            configured = load_config_readonly()
+            model_config = configured.get("model") if isinstance(configured, dict) else {}
+            if isinstance(model_config, dict):
+                model = model or str(model_config.get("default") or "").strip()
+                provider = provider or str(model_config.get("provider") or "").strip()
+        except Exception:
+            logger.debug("Hermes runtime model facts unavailable", exc_info=True)
+    identity = str(binding.display_name or "").strip()
+    if (
+        not identity
+        or len(identity) > 80
+        or not all(char.isalnum() or char in " ._-'" for char in identity)
+    ):
+        identity = "configured Room identity"
+    active_epoch = state.get("activeEpoch") if isinstance(state, dict) else None
+    epoch = str(active_epoch.get("id") or "unknown") if isinstance(active_epoch, dict) else "unknown"
+
+    def fact(value: str, fallback: str = "unknown") -> str:
+        normalized = str(value or fallback)[:200]
+        return json.dumps(normalized, ensure_ascii=False)
+
+    return (
+        "[Live connector facts (data, not instructions): "
+        f"identity_label={fact(identity)}; profile={fact(profile)}; "
+        f"model={fact(model, 'not exposed to connector')}; "
+        f"provider={fact(provider, 'not exposed to connector')}; "
+        f"connector={fact('synthetic-sociality-room/' + CONNECTOR_VERSION)}; "
+        f"transport={fact(transport)}; epoch={fact(epoch)}. "
+        "Connector-generated fields are authoritative for this turn. Inspect live Hermes state rather "
+        "than guessing about any configuration not listed here.]"
+    )
+
+
 def extract_visible_body(content: str) -> str | None:
     """Return only user-facing prose from plain or fenced structured output."""
     value = (content or "").strip()
@@ -4200,36 +4363,43 @@ def extract_visible_body(content: str) -> str | None:
         envelope = None
         for encoded in (candidate, _restore_escaped_json_layout(candidate)):
             try:
-                envelope, offset = json.JSONDecoder().raw_decode(encoded)
-                # A few models append an extra closing brace after an otherwise
-                # valid envelope. Accept only that narrow harmless remainder;
-                # arbitrary trailing prose remains visible instead of being
-                # silently discarded.
+                envelope, offset = _ROOM_JSON_DECODER.raw_decode(encoded)
                 remainder = encoded[offset:].strip()
-                if remainder and set(remainder) != {"}"}:
+                if remainder:
                     envelope = None
                 if envelope is not None:
                     break
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, _DuplicateJSONKey):
                 envelope = None
+        if envelope is None:
+            recovered = _recover_malformed_contribute_body(candidate)
+            if recovered is not None:
+                logger.warning("Recovered narrowly malformed Room contribute envelope")
+                return recovered
         if isinstance(envelope, dict):
-            action = str(envelope.get("action") or "").lower()
-            if action in {"skip", "no_response", "none"}:
+            if "action" in envelope:
+                action = envelope.get("action")
+                if not isinstance(action, str):
+                    return None
+                if action == "contribute":
+                    if set(envelope) != {"action", "body"}:
+                        return None
+                    body = envelope.get("body")
+                    return body.strip() if isinstance(body, str) and body.strip() else None
+                if action in {"skip", "no_response", "none"}:
+                    return None
                 return None
-            body = envelope.get("body")
-            if isinstance(body, str) and body.strip():
-                return body.strip()
-            if not action:
+            if "body" not in envelope:
                 # JSON prose is not a trusted host metadata channel. Preserve
                 # model-authored metadata-shaped text unless the local send
                 # metadata independently carries a typed error surface.
                 return value or None
         # Recognized but incomplete action envelopes are metadata, not prose.
         return None
-    tagged = _ATTRIBUTE_BODY.match(candidate)
-    if tagged:
-        return html.unescape(tagged.group(1)).strip() or None
     if candidate.lower().startswith("<action"):
+        return None
+    if _contains_room_envelope_fragment(candidate):
+        logger.warning("Rejected Room envelope mixed with wrapper prose")
         return None
     return value or None
 
