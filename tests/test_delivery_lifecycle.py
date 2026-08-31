@@ -1413,6 +1413,129 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(kwargs.get("recipient_membership_ids"), ["claude-member"])
         self.assertTrue(kwargs.get("standalone"))
 
+    def test_inline_mention_routing_orders_multiple_agents_and_excludes_ineligible_members(self):
+        state = {
+            "roster": [
+                {"membershipId": "self", "displayName": "Paula", "role": "participant_agent", "status": "active"},
+                {"membershipId": "claude", "displayName": "Claude", "role": "participant_agent", "status": "active"},
+                {"membershipId": "wu", "displayName": "Wu", "role": "room_master", "status": "active"},
+                {"membershipId": "human", "displayName": "Thorsten", "role": "human_owner", "status": "active"},
+                {"membershipId": "inactive", "displayName": "Berlin", "role": "participant_agent", "status": "inactive"},
+                {"membershipId": "observer", "displayName": "Reader", "role": "observer", "status": "active"},
+            ],
+        }
+        self.assertEqual(
+            room_tools._inline_agent_recipients(
+                state,
+                "@Wu compare this with @Claude. @Paula, @Thorsten, @Berlin and @Reader need no route.",
+                "self",
+            ),
+            ["wu", "claude"],
+        )
+
+    def test_inline_mention_routing_rejects_ambiguous_active_display_name(self):
+        state = {
+            "roster": [
+                {"membershipId": "claude-a", "displayName": "Claude", "role": "participant_agent", "status": "active"},
+                {"membershipId": "claude-b", "displayName": "CLAUDE", "role": "room_master", "status": "active"},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "@Claude is ambiguous"):
+            room_tools._inline_agent_recipients(state, "Please ask @Claude.", "paula")
+
+    def test_external_channel_coordinated_v2_mentions_freeze_and_replay(self):
+        binding = adapter.RoomBinding(
+            "https://room.example/api", "room-1", "paula-member", "credential",
+            installation_id="installation-1",
+        )
+        state = {
+            "title": "NewRoom",
+            "headSeq": 16,
+            "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1},
+            "roster": [
+                {"membershipId": "paula-member", "displayName": "Paula", "role": "participant_agent", "status": "active"},
+                {"membershipId": "claude-member", "displayName": "Claude", "role": "participant_agent", "status": "active"},
+                {"membershipId": "wu-member", "displayName": "Wu", "role": "room_master", "status": "active"},
+            ],
+        }
+        posts, finishes, dialects, logical_ids = [], [], [], []
+
+        class API:
+            def room_policy(self, _room_id):
+                return {"policy": {"coordinationMode": "coordinated"}}
+
+            def room_state(self, _room_id):
+                return state
+
+            def request_turn(self, *_args):
+                return {"turnId": "turn-1", "state": "granted"}
+
+            def with_message_payload_dialect(self, dialect):
+                dialects.append(dialect)
+                return self
+
+            def with_logical_contribution_id(self, logical_id):
+                logical_ids.append(logical_id)
+                return self
+
+            def post_message(self, *args, **kwargs):
+                posts.append((copy.deepcopy(args), copy.deepcopy(kwargs)))
+                return {"id": "posted-17", "seq": 17, "ts": "2026-08-30T13:43:29Z"}
+
+            def finish_turn(self, *args):
+                finishes.append(copy.deepcopy(args))
+                return {"state": "finished"}
+
+        api = API()
+        original_select_room = room_tools._select_room
+        original_protocol = room_tools.RoomProtocol
+        original_payload_dialect = room_tools._read_payload_dialect
+        original_state_root = room_tools.state_root
+        body = "@Claude compare this with @Wu."
+        with tempfile.TemporaryDirectory() as directory:
+            room_tools._select_room = lambda _requested: (binding, state, [])
+            room_tools.RoomProtocol = lambda *_args, **_kwargs: api
+            room_tools._read_payload_dialect = lambda _api: "v2"
+            room_tools.state_root = lambda: Path(directory)
+            try:
+                first = json.loads(room_tools.room_post(
+                    {"room": "NewRoom", "body": body, "requestId": "telegram-multi-routing-0001"},
+                    session_id="telegram-session-1", turn_id="telegram-turn-1",
+                    user_task="Post this in NewRoom and address Claude and Wu.",
+                ))
+                source_id = room_tools._origin_id(binding.room_id, body, {
+                    "session_id": "telegram-session-1",
+                    "turn_id": "telegram-turn-1",
+                    "user_task": "Post this in NewRoom and address Claude and Wu.",
+                    "request_id": "telegram-multi-routing-0001",
+                    "membership_id": binding.membership_id,
+                })
+                frozen = room_tools._read_action(source_id)
+                state["roster"] = [state["roster"][0]]
+                replay = json.loads(room_tools.room_post(
+                    {"room": "NewRoom", "body": body, "requestId": "telegram-multi-routing-0001"},
+                    session_id="telegram-session-1", turn_id="telegram-turn-1",
+                    user_task="Post this in NewRoom and address Claude and Wu.",
+                ))
+            finally:
+                room_tools._select_room = original_select_room
+                room_tools.RoomProtocol = original_protocol
+                room_tools._read_payload_dialect = original_payload_dialect
+                room_tools.state_root = original_state_root
+
+        self.assertTrue(first["success"], first)
+        self.assertTrue(replay["success"], replay)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(frozen["recipientMembershipIds"], ["claude-member", "wu-member"])
+        self.assertEqual(frozen["messagePayloadDialect"], "v2")
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][1].get("recipient_membership_ids"), ["claude-member", "wu-member"])
+        self.assertTrue(posts[0][1].get("standalone"))
+        self.assertEqual(dialects, ["v2"])
+        self.assertEqual(len(logical_ids), 1)
+        self.assertTrue(logical_ids[0])
+        self.assertEqual(len(finishes), 1)
+
     def test_installer_packages_room_origin_backstop_module(self):
         installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
         copy_line = next(line for line in installer.splitlines() if line.startswith("for file in "))
@@ -1476,6 +1599,17 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             with self.subTest(response=response):
                 self.assertIsNone(adapter.extract_visible_body(response))
 
+    def test_release_version_metadata_is_coherent(self):
+        plugin_version = next(
+            line.split(":", 1)[1].strip()
+            for line in (ROOT / "plugin.yaml").read_text().splitlines()
+            if line.startswith("version:")
+        )
+        conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.49")
+        self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
+        self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
+
     def test_runtime_capability_context_is_live_and_secret_free(self):
         binding = lifecycle_binding()
         binding.display_name = "Berlin"
@@ -1504,7 +1638,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.48"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.49"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -2041,12 +2175,17 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_provider_retry_fallback_whitespace_and_punctuation_near_matches_are_posted(self):
-        fallback = (
-            "⚠️ The model provider failed after retries. I kept raw provider details "
-            "out of chat; check gateway logs for diagnostics."
-        )
-        near_matches = [f" {fallback}", f"{fallback} ", f"{fallback}!"]
+    def test_operational_fallback_whitespace_and_punctuation_near_matches_are_posted(self):
+        fallbacks = [
+            (
+                "⚠️ The model provider failed after retries. I kept raw provider details "
+                "out of chat; check gateway logs for diagnostics."
+            ),
+            (
+                "⚠️ Provider authentication failed. Check the configured credentials; "
+                "raw provider details are in the gateway logs."
+            ),
+        ]
 
         async def exercise(content):
             binding = lifecycle_binding()
@@ -2085,16 +2224,17 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             )
             return result, posted_bodies, completions
 
-        for content in near_matches:
-            with self.subTest(content=content):
-                result, posted_bodies, completions = asyncio.run(exercise(content))
-                self.assertTrue(result.success, getattr(result, "error", None))
-                self.assertEqual(result.message_id, "posted-6")
-                self.assertEqual(posted_bodies, [content.strip()])
-                self.assertEqual(
-                    completions,
-                    [{"generation": 3, "action": "contribute", "eventId": "posted-6"}],
-                )
+        for fallback in fallbacks:
+            for content in (f" {fallback}", f"{fallback} ", f"{fallback}!"):
+                with self.subTest(content=content):
+                    result, posted_bodies, completions = asyncio.run(exercise(content))
+                    self.assertTrue(result.success, getattr(result, "error", None))
+                    self.assertEqual(result.message_id, "posted-6")
+                    self.assertEqual(posted_bodies, [content.strip()])
+                    self.assertEqual(
+                        completions,
+                        [{"generation": 3, "action": "contribute", "eventId": "posted-6"}],
+                    )
 
     def test_provider_retry_fallback_in_contribute_envelope_reaches_canonical_post(self):
         async def run():

@@ -34,7 +34,11 @@
     "DLV1-07": "test_nonretryable_post_failure_is_quarantined_and_cannot_repost",
     "DLV1-08": "test_repair_blocks_exhausted_and_nonretryable_lifecycle_work",
     "legacy_authentication_fallback": "test_room_origin_authentication_fallback_fails_cycle_without_post",
-    "external_channel_inline_recipient": "test_external_channel_inline_mention_resolves_recipient_for_room_routing"
+    "legacy_authentication_fallback_near_matches": "test_operational_fallback_whitespace_and_punctuation_near_matches_are_posted",
+    "external_channel_inline_recipient_open_v1": "test_external_channel_inline_mention_resolves_recipient_for_room_routing",
+    "external_channel_inline_recipient_coordinated_v2_replay": "test_external_channel_coordinated_v2_mentions_freeze_and_replay",
+    "external_channel_inline_recipient_eligibility": "test_inline_mention_routing_orders_multiple_agents_and_excludes_ineligible_members",
+    "external_channel_inline_recipient_ambiguity": "test_inline_mention_routing_rejects_ambiguous_active_display_name"
   },
   "receiptBoundaryFixtures": {
     "invalid_or_incomplete_receipt": "test_canonical_delivery_rejects_malformed_receipts_without_state_change",
