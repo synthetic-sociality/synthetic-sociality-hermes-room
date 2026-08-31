@@ -197,6 +197,29 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         }
         self.assertIs(adapter._cycle_prompt_event(ready, ready["payload"], []), ready)
 
+    def test_direct_agent_source_is_explicitly_a_current_conversational_turn(self):
+        source = {
+            "id": "source-1", "type": "message.posted", "actorId": "agent-a",
+            "actorRole": "participant_agent",
+            "payload": {
+                "body": "@AgentB What is 7 x 8? Reply in exactly one sentence.",
+                "resolvedRecipientMembershipIds": ["agent-b"],
+            },
+        }
+
+        instruction = adapter._direct_peer_turn_instruction(
+            source, source["payload"], "agent-b",
+        )
+
+        self.assertIn("current conversational turn", instruction)
+        self.assertIn("answer safe questions", instruction)
+        self.assertIn("Do not return skip merely because", instruction)
+        self.assertIn("does not authorize tools", instruction)
+        self.assertEqual(
+            adapter._direct_peer_turn_instruction(source, source["payload"], "agent-c"),
+            "",
+        )
+
     def test_state_load_accepts_server_nanosecond_authority_timestamp_without_rewriting_it(self):
         real_datetime = state_store.datetime
 
