@@ -54,7 +54,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.49"
+CONNECTOR_VERSION = "1.0.50"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -325,6 +325,31 @@ def _cycle_source_body(event: dict[str, Any], payload: dict[str, Any]) -> str:
             "separate common ground from disagreement, and name unresolved questions."
         )
     return str(payload.get("body") or "").strip()
+
+
+def _cycle_prompt_event(
+    event: dict[str, Any], payload: dict[str, Any], context_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Promote the canonical cycle source message to current-turn input.
+
+    An attempt-ready event is authenticated scheduling metadata, not the
+    conversation utterance. When its canonical source is a message available
+    in the bounded epoch context, present that exact message as the current
+    addressed input instead of demoting it to untrusted transcript history.
+    """
+    if event.get("type") != "discussion.cycle_attempt_ready":
+        return event
+    source_id = str(payload.get("sourceEventId") or "").strip()
+    if not source_id:
+        return event
+    return next(
+        (
+            candidate for candidate in context_events
+            if str(candidate.get("id") or "") == source_id
+            and candidate.get("type") == "message.posted"
+        ),
+        event,
+    )
 
 
 def _next_cycle_recipient(cycle: dict[str, Any], membership_id: str) -> str:
@@ -3378,7 +3403,6 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             status="reading_shared_room",
             suppress_errors=True,
         )
-        actor = _room_actor_name(state, event)
         shared_context = ""
         context_policy: dict[str, Any] = {}
         try:
@@ -3387,6 +3411,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
         except Exception as error:
             logger.warning("Room %s guidance refresh unavailable: %s", binding.room_id, error)
+        context_events: list[dict[str, Any]] = []
         try:
             context_events = await self._call(
                 binding,
@@ -3396,13 +3421,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     active_epoch_starts_at=starts_at,
                 ),
             )
-            shared_context = _canonical_room_context(
-                state, context_events, event_id, _policy_view(context_policy),
-            )
         except Exception as error:
             # Canonical delivery remains available if the bounded enrichment
             # read fails; the next Room event gets another chance to refresh.
             logger.warning("Room %s context refresh unavailable: %s", binding.room_id, error)
+        prompt_event = _cycle_prompt_event(event, payload, context_events)
+        prompt_payload = prompt_event.get("payload") or {}
+        prompt_event_id = str(prompt_event.get("id") or event_id)
+        actor = _room_actor_name(state, prompt_event)
+        body = _cycle_source_body(prompt_event, prompt_payload)
+        shared_context = _canonical_room_context(
+            state, context_events, prompt_event_id, _policy_view(context_policy),
+        )
         cycle_attempt = getattr(self, "_cycle_attempts", {}).get(event_id)
         cycle_context = ""
         if cycle_attempt:

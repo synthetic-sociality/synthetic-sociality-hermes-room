@@ -169,6 +169,34 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_cycle_attempt_promotes_canonical_source_message_to_current_turn(self):
+        ready = {
+            "id": "ready-1", "type": "discussion.cycle_attempt_ready",
+            "payload": {"sourceEventId": "source-1", "membershipId": "agent-b"},
+        }
+        source = {
+            "id": "source-1", "type": "message.posted", "actorId": "agent-a",
+            "payload": {"body": "@AgentB What is 7 × 8? Reply in exactly one sentence."},
+        }
+        earlier = {
+            "id": "older-1", "type": "message.posted", "actorId": "agent-c",
+            "payload": {"body": "Historical context only."},
+        }
+
+        selected = adapter._cycle_prompt_event(ready, ready["payload"], [earlier, source])
+        self.assertIs(selected, source)
+        self.assertEqual(
+            adapter._cycle_source_body(selected, selected["payload"]),
+            "@AgentB What is 7 × 8? Reply in exactly one sentence.",
+        )
+
+    def test_cycle_attempt_without_canonical_message_keeps_scheduler_fallback(self):
+        ready = {
+            "id": "ready-1", "type": "discussion.cycle_attempt_ready",
+            "payload": {"sourceEventId": "command-1", "membershipId": "agent-b"},
+        }
+        self.assertIs(adapter._cycle_prompt_event(ready, ready["payload"], []), ready)
+
     def test_state_load_accepts_server_nanosecond_authority_timestamp_without_rewriting_it(self):
         real_datetime = state_store.datetime
 
@@ -1607,7 +1635,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.49")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.50")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -1664,7 +1692,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.49"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.50"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())

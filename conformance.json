@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.49",
+  "adapterVersion": "1.0.50",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -23,6 +23,7 @@
     "canonicalTimestampCompatibility": "rfc3339_fractional_seconds_1_to_9_preserved_exactly",
     "blockedLifecycleReconciliation": "canonical_receipt_plus_authoritative_terminal_cycle_audited_nonreplayable_closure",
     "externalChannelRecipientRouting": "exact_active_agent_inline_mention_to_frozen_membership_selector"
+    ,"cycleAttemptCurrentInput": "canonical_source_message_promoted_from_history_to_current_addressed_turn"
   },
   "fixtures": {
     "DLV1-01": "test_selection_persistence_failure_prevents_post",
