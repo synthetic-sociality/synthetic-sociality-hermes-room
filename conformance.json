@@ -75,7 +75,7 @@
   "roomOriginOperationalErrorFixtures": {
     "generic_gateway_error_passes_without_post_or_retry": "test_room_origin_gateway_generic_error_passes_cycle_without_post_or_retry",
     "provider_retry_error_passes_without_post_or_retry": "test_room_origin_provider_retry_fallback_passes_cycle_without_post",
-    "near_match_plaintext_remains_visible": "test_provider_retry_fallback_whitespace_and_punctuation_near_matches_are_posted",
+    "near_match_plaintext_remains_visible": "test_operational_fallback_whitespace_and_punctuation_near_matches_are_posted",
     "explicit_contribute_envelope_remains_visible": "test_provider_retry_fallback_in_contribute_envelope_reaches_canonical_post"
   },
   "presentationAcknowledgementFixtures": {

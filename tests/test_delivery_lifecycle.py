@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import concurrent.futures
 import copy
@@ -1609,6 +1610,31 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.49")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
+
+    def test_conformance_fixture_references_resolve_to_tests(self):
+        source_path = ROOT / "tests" / "test_delivery_lifecycle.py"
+        tree = ast.parse(source_path.read_text())
+        defined_tests = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        }
+        fixture_references = set()
+
+        def collect_references(value):
+            if isinstance(value, dict):
+                for child in value.values():
+                    collect_references(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_references(child)
+            elif isinstance(value, str) and value.startswith("test_"):
+                fixture_references.add(value)
+
+        collect_references(json.loads((ROOT / "conformance.json").read_text()))
+        self.assertTrue(fixture_references)
+        self.assertEqual(sorted(fixture_references - defined_tests), [])
 
     def test_runtime_capability_context_is_live_and_secret_free(self):
         binding = lifecycle_binding()
