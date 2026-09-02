@@ -287,7 +287,10 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             api = API()
             instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
-            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            activity = []
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(
+                0, result=activity.append(kwargs)
+            )
             wording = "Provider unavailable; this exact sentence could also be model-authored."
 
             result = await instance.send(
@@ -1658,7 +1661,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.50")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.51")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -1715,7 +1718,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.50"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.51"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -1849,7 +1852,10 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             api = API()
             instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
-            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            activity = []
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(
+                0, result=activity.append(kwargs)
+            )
             result = await instance._send_final(
                 binding.room_id,
                 adapter._dispatch_source_ref("evt-5", "generation-error"),
@@ -2102,7 +2108,10 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             api = API()
             instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
-            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            activity = []
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(
+                0, result=activity.append(kwargs)
+            )
 
             result = await instance._send_final(
                 binding.room_id,
@@ -2127,7 +2136,57 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 completions,
                 [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "pass"})],
             )
+            self.assertEqual(activity[-1]["status"], "failed")
+            self.assertEqual(
+                instance._terminal_results[
+                    adapter._dispatch_source_ref("evt-5", "generation-error")
+                ]["status"],
+                "failed",
+            )
             self.assertNotIn("evt-5", instance._cycle_attempts)
+
+        asyncio.run(run())
+
+    def test_room_origin_connection_error_is_operational_failure_not_room_speech(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            cycle_attempt = {
+                "cycle": {"id": "cycle-1", "generation": 3},
+                "attempt": {"id": "attempt-1", "membershipId": "member-1"},
+            }
+            instance = configured_instance(binding, cycle_attempt, [])
+            calls = {"post": 0}
+            activity = []
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def complete_discussion_attempt(self, *_args):
+                    return {"state": "completed"}
+
+                def post_message(self, *_args, **_kwargs):
+                    calls["post"] += 1
+                    raise AssertionError("connection error reached canonical Room post")
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(
+                0, result=activity.append(kwargs)
+            )
+            source_ref = adapter._dispatch_source_ref("evt-5", "generation-connection")
+            result = await instance._send_final(
+                binding.room_id,
+                source_ref,
+                "⚠️ The model server is not responding — it looks like the configured "
+                "model endpoint is not running or is unreachable.",
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(calls["post"], 0)
+            self.assertEqual(activity[-1]["status"], "failed")
+            self.assertEqual(instance._terminal_results[source_ref]["status"], "failed")
 
         asyncio.run(run())
 

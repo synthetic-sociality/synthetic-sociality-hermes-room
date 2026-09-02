@@ -343,6 +343,15 @@ class RoomProtocol:
         room = urllib.parse.quote(room_id, safe="")
         return self.request("GET", f"/rooms/{room}/policy")
 
+    def artifact(self, room_id: str, artifact_id: str) -> dict[str, Any]:
+        room = urllib.parse.quote(room_id, safe="")
+        artifact = urllib.parse.quote(artifact_id, safe="")
+        return self.request("GET", f"/rooms/{room}/artifacts/{artifact}")
+
+    def artifacts(self, room_id: str) -> dict[str, Any]:
+        room = urllib.parse.quote(room_id, safe="")
+        return self.request("GET", f"/rooms/{room}/artifacts")
+
     def start_discussion_cycle(self, room_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         room = urllib.parse.quote(room_id, safe="")
         return self.request("POST", f"/rooms/{room}/cycles", payload)

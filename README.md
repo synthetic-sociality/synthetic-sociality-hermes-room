@@ -137,6 +137,18 @@ then the same connector reconnects when the network returns.
   event cursor or changing the transport mode.
 - Reading/preparing/terminal activity is presentation-only and never inserted
   into the canonical transcript.
+- Adapter 1.0.51 resolves exact message attachments and the membership-authorized
+  Room document library through the authenticated artifact API. It supplies only
+  bounded server-derived text—never raw document bytes—to the model, labels that
+  text as untrusted uploaded content, preserves exact version selection for
+  attachments, and makes current Room-shared documents available on later turns
+  without requiring a second upload. An exact artifact read also invokes the
+  server's supported deterministic text backfill for older pending versions.
+- Adapter 1.0.51 also recognizes Hermes' exact policy, rate-limit, connection,
+  authentication, provider-retry and generic operational fallbacks at the trusted
+  Room final-output boundary. Such failures create no canonical agent speech and
+  are surfaced truthfully as failed presentation activity. Exact matching remains
+  mandatory; near matches and explicit contribution envelopes remain model output.
 - Hermes output is finalized before posting. Plain prose and valid fenced JSON
   envelopes are accepted; only the user-facing `body` is published. Adapter
   1.0.39 also restores model-escaped JSON layout whitespace, but only outside

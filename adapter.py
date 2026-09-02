@@ -24,6 +24,7 @@ from . import cli
 from .context import canonical_room_context as _canonical_room_context
 from .context import recent_room_messages as _recent_room_messages
 from .context import room_actor_name as _room_actor_name
+from .context import source_artifact_context as _source_artifact_context
 from .origin_context import forget_room_context, is_room_context
 from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
@@ -54,7 +55,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.50"
+CONNECTOR_VERSION = "1.0.51"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -77,6 +78,17 @@ _GATEWAY_AUTHENTICATION_ERROR = (
     "⚠️ Provider authentication failed. Check the configured credentials; "
     "raw provider details are in the gateway logs."
 )
+_GATEWAY_POLICY_ERROR = (
+    "⚠️ The model provider rejected the request. I kept the raw provider "
+    "error out of chat; check gateway logs for details or try rephrasing."
+)
+_GATEWAY_RATE_LIMIT_ERROR = (
+    "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
+)
+_GATEWAY_CONNECTION_ERROR = (
+    "⚠️ The model server is not responding — it looks like the configured "
+    "model endpoint is not running or is unreachable."
+)
 _GATEWAY_OPERATIONAL_ERRORS = frozenset({
     (
         "Sorry, I encountered an unexpected error.\n"
@@ -87,13 +99,16 @@ _GATEWAY_OPERATIONAL_ERRORS = frozenset({
         "out of chat; check gateway logs for diagnostics."
     ),
     _GATEWAY_AUTHENTICATION_ERROR,
+    _GATEWAY_POLICY_ERROR,
+    _GATEWAY_RATE_LIMIT_ERROR,
+    _GATEWAY_CONNECTION_ERROR,
 })
 _GATEWAY_NONRETRYABLE_OPERATIONAL_ERRORS = frozenset({_GATEWAY_AUTHENTICATION_ERROR})
 # A room message that has not completed within this period is retried. Time is
 # never terminal evidence and therefore can never advance acknowledgement.
 PENDING_EVENT_TTL_SECONDS = 180.0
 PENDING_EVENT_MAX_RETRIES = 2
-TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "cancelled", "superseded", "ignored"})
+TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "failed", "cancelled", "superseded", "ignored"})
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_RESPONSE_INSTRUCTION = (
     'If no response from you is appropriate, return exactly {"action":"skip"}. '
@@ -1604,14 +1619,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding,
                 source_id,
                 "terminal",
-                status="skipped",
+                status="failed" if typed_operational_outcome or gateway_operational_error else "skipped",
                 suppress_errors=True,
             )
             getattr(self, "_source_coordination_modes", {}).pop(source_id, None)
             getattr(self, "_open_reply_recipients", {}).pop(source_id, None)
             return self._successful_terminal(
                 source_ref, dispatch_generation, f"skipped:{source_id}",
-                terminal_status="skipped",
+                terminal_status=(
+                    "failed" if typed_operational_outcome or gateway_operational_error else "skipped"
+                ),
                 reason=(
                     f"host_operational_outcome:{operational_outcome['layer']}:{operational_outcome['code']}"
                     if typed_operational_outcome
@@ -3423,6 +3440,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             suppress_errors=True,
         )
         shared_context = ""
+        artifact_context = ""
         context_policy: dict[str, Any] = {}
         try:
             context_policy = await self._call(
@@ -3452,6 +3470,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         shared_context = _canonical_room_context(
             state, context_events, prompt_event_id, _policy_view(context_policy),
         )
+        try:
+            artifact_context = await self._call(
+                binding,
+                lambda api: _source_artifact_context(
+                    prompt_event,
+                    context_events,
+                    lambda artifact_id: api.artifact(binding.room_id, artifact_id),
+                    list((api.artifacts(binding.room_id).get("items") or [])),
+                ),
+            )
+        except Exception as error:
+            logger.warning("Room %s document context unavailable: %s", binding.room_id, error)
         cycle_attempt = getattr(self, "_cycle_attempts", {}).get(event_id)
         cycle_context = ""
         if cycle_attempt:
@@ -3466,7 +3496,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         prompt = (
             f"[Synthetic Sociality Room event {event_id}, canonical sequence {seq}]\n"
             f"{_runtime_capability_context(binding, state, transport=getattr(self, '_effective_transports', {}).get(binding.room_id) or binding.transport)}\n"
-            f"{shared_context}\n\n{actor}: {body}{cycle_context}\n\n"
+            f"{shared_context}\n\n{artifact_context}\n\n{actor}: {body}{cycle_context}\n\n"
             "Respond as your own Hermes identity and character. Address the human by name only when natural, "
             "never claim consensus or speak for another participant. Use the shared context but do not force the room theme. "
             f"{ROOM_RESPONSE_INSTRUCTION}"
