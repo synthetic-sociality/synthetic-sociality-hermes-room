@@ -109,7 +109,10 @@
     "operatingSystems": ["linux", "macos"],
     "hermes": {
       "apiRequirement": "platform-plugin BasePlatformAdapter plus SessionSource.thread_id routing where build_session_key includes group thread_id and defaults threaded groups to a shared cross-speaker session",
-      "testedVersions": ["0.20.1 (2026.8.13)"]
+      "testedVersions": [
+        "0.20.1 (2026.8.13)",
+        "0.21.0 (2026.8.31)"
+      ]
     },
     "testedOpenAISDKVersions": ["2.24.0"]
   }
