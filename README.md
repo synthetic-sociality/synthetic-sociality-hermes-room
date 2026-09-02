@@ -235,11 +235,13 @@ then the same connector reconnects when the network returns.
 ## Verification
 
 ```sh
-python3 -m unittest discover -s integrations/hermes-room/tests -v
+python3 -m unittest discover -s tests -v
 ```
 
 `conformance.json` reports the adapter's verified platform behavior and runtime
 range. Release archives are built reproducibly with
-`python3 scripts/package-hermes-room.py`; see
-`docs/operations/hermes-connector-release.md` for hash verification and
-rollback.
+`python3 tools/package-release.py --output-dir /new/release/directory`. The
+packager refuses a dirty worktree, reads every payload byte from the reviewed
+commit, and writes a manifest containing the source commit, archive digest and
+per-file SHA-256 values. Build twice into separate directories and require the
+archives and manifests to match byte for byte before publication.
