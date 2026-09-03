@@ -137,6 +137,11 @@ then the same connector reconnects when the network returns.
   event cursor or changing the transport mode.
 - Reading/preparing/terminal activity is presentation-only and never inserted
   into the canonical transcript.
+- Adapter 1.0.52 accepts only the reviewed prior-epoch lifecycle terminal pairs
+  after the authoritative epoch boundary, allowing the connector to acknowledge
+  terminal cleanup without policy, activity, attempt, model, or posting work.
+  Contradictory, malformed, unknown, and conversational old-epoch events remain
+  fail closed and unacknowledged.
 - Adapter 1.0.51 resolves exact message attachments and the membership-authorized
   Room document library through the authenticated artifact API. It supplies only
   bounded server-derived text—never raw document bytes—to the model, labels that

@@ -55,7 +55,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.51"
+CONNECTOR_VERSION = "1.0.52"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -115,6 +115,81 @@ ROOM_RESPONSE_INSTRUCTION = (
     "Otherwise answer in plain natural text only. Do not wrap a contribution in JSON, XML, "
     "or a code fence."
 )
+
+_PRIOR_EPOCH_LIFECYCLE_TERMINALS = frozenset({
+    ("human_owner", "interrupted", "human_interrupted"),
+    ("agent_owner", "interrupted", "human_interrupted"),
+    ("system", "timed_out", "cycle_deadline_reached"),
+    ("system", "interrupted", "coordination_mode_changed"),
+    ("system", "interrupted", "epoch_superseded"),
+})
+
+
+def _exact_epoch_id(value: Any, label: str = "Room epoch") -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > 512
+        or re.search(r"[\x00-\x1f\x7f]", value)
+    ):
+        raise ProtocolError(
+            f"{label} is invalid",
+            code="epoch_evidence_malformed",
+            retryable=False,
+        )
+    return value
+
+
+def _event_epoch_evidence(event: Any) -> str:
+    """Return exact epoch evidence while rejecting conflicting sources."""
+    if not isinstance(event, dict):
+        event = {}
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    epoch = payload.get("epoch")
+    epoch = epoch if isinstance(epoch, dict) else {}
+    epoch_topic = epoch.get("topic")
+    epoch_topic = epoch_topic if isinstance(epoch_topic, dict) else {}
+    topic = payload.get("topic")
+    topic = topic if isinstance(topic, dict) else {}
+    summary = payload.get("summaryHandoff")
+    summary = summary if isinstance(summary, dict) else {}
+    candidates = [
+        payload.get("epochId"),
+        epoch.get("id"),
+        epoch_topic.get("epochId"),
+        topic.get("epochId"),
+    ]
+    if event.get("type") == "discussion.cycle_terminal":
+        candidates.append(summary.get("epochId"))
+    evidence = {
+        _exact_epoch_id(value, "Malformed Room event epoch evidence")
+        for value in candidates
+        if value is not None and value != ""
+    }
+    if len(evidence) > 1:
+        raise ProtocolError(
+            "Room event contains contradictory epoch evidence",
+            code="epoch_evidence_contradictory",
+            retryable=False,
+        )
+    return next(iter(evidence), "")
+
+
+def _is_lifecycle_only_cycle_terminal(event: Any) -> bool:
+    """Match only the reviewed old-epoch lifecycle terminal allowlist."""
+    _event_epoch_evidence(event)
+    if not isinstance(event, dict) or event.get("type") != "discussion.cycle_terminal":
+        return False
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if not str(payload.get("cycleId") or "").strip():
+        return False
+    return (
+        str(event.get("actorRole") or ""),
+        str(payload.get("state") or ""),
+        str(payload.get("reason") or ""),
+    ) in _PRIOR_EPOCH_LIFECYCLE_TERMINALS
 
 
 def host_operational_outcome(metadata: Any) -> dict[str, Any] | None:
@@ -2860,6 +2935,43 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         payload = event.get("payload") or {}
         event_type = str(event.get("type") or "")
+        # Authenticate the authoritative epoch before eligibility, policy,
+        # activity, attempt ownership, queueing, or model work. A terminal from
+        # the reviewed lifecycle allowlist may cross the boundary only to close
+        # the local delivery chain; all other contradictory evidence fails
+        # closed and remains unacknowledged.
+        receive_state = await self._call(
+            binding, lambda api: api.room_state(binding.room_id),
+        )
+        active_epoch = receive_state.get("activeEpoch") or {}
+        active_epoch_id = active_epoch.get("id")
+        if not isinstance(active_epoch_id, str) or not active_epoch_id.strip():
+            raise ProtocolError(
+                "Room state has no active epoch at receive boundary",
+                code="active_epoch_unavailable",
+                retryable=True,
+            )
+        active_epoch_id = _exact_epoch_id(active_epoch_id, "Room state active epoch")
+        starts_at = int(active_epoch.get("startsAtSeq") or 0)
+        event_epoch_id = _event_epoch_evidence(event)
+        if starts_at and seq < starts_at:
+            await self._complete_event(
+                binding, seq, terminal_status="ignored", source_id=event_id,
+                reason="historical_epoch",
+            )
+            return
+        if event_epoch_id and event_epoch_id != active_epoch_id:
+            if _is_lifecycle_only_cycle_terminal(event):
+                await self._complete_event(
+                    binding, seq, terminal_status="ignored", source_id=event_id,
+                    reason="prior_epoch_lifecycle",
+                )
+                return
+            raise ProtocolError(
+                "Room event epoch evidence contradicts the authoritative active epoch boundary",
+                code="epoch_boundary_contradiction",
+                retryable=False,
+            )
         legacy_untyped_message = event_type == "message.posted" and not str(event.get("actorRole") or "")
         human_source = _is_human_cycle_source(event)
         agent_seed = _is_agent_cycle_seed(event)
@@ -2891,28 +3003,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
             return
         # This authenticated, addressed event is now accepted at the receive
-        # boundary. Fence historical epochs before presentation acknowledgement;
-        # policy, coordination, attempt ownership, and queue dispatch are all
-        # deliberately downstream. Durable cursor acknowledgement remains
-        # terminal-evidence gated in _complete_event.
-        receive_state = await self._call(
-            binding, lambda api: api.room_state(binding.room_id),
-        )
-        active_epoch = receive_state.get("activeEpoch") or {}
-        starts_at = int(active_epoch.get("startsAtSeq") or 0)
-        if starts_at and seq < starts_at:
-            await self._complete_event(
-                binding, seq, terminal_status="ignored", source_id=event_id,
-                reason="historical_epoch",
-            )
-            return
-        active_epoch_id = active_epoch.get("id")
-        if not isinstance(active_epoch_id, str) or not active_epoch_id.strip():
-            raise ProtocolError(
-                "Room state has no active epoch at receive boundary",
-                code="active_epoch_unavailable",
-                retryable=True,
-            )
+        # boundary. Presentation acknowledgement, policy, coordination, attempt
+        # ownership, and queue dispatch remain downstream of the epoch fence.
         if event_id and event_id not in self._run_for_event:
             self._run_for_event[event_id] = "hermes:" + uuid.uuid4().hex
             self._activity_seq[event_id] = 0

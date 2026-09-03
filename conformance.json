@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.51",
+  "adapterVersion": "1.0.52",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -25,6 +25,13 @@
     "externalChannelRecipientRouting": "exact_active_agent_inline_mention_to_frozen_membership_selector"
     ,"cycleAttemptCurrentInput": "canonical_source_message_promoted_from_history_to_current_addressed_turn"
   },
+  "priorEpochLifecycleTerminals": [
+    {"actorRole": "human_owner", "state": "interrupted", "reason": "human_interrupted"},
+    {"actorRole": "agent_owner", "state": "interrupted", "reason": "human_interrupted"},
+    {"actorRole": "system", "state": "timed_out", "reason": "cycle_deadline_reached"},
+    {"actorRole": "system", "state": "interrupted", "reason": "coordination_mode_changed"},
+    {"actorRole": "system", "state": "interrupted", "reason": "epoch_superseded"}
+  ],
   "fixtures": {
     "DLV1-01": "test_selection_persistence_failure_prevents_post",
     "DLV1-02": "test_retryable_post_failure_before_receipt_remains_delivery_pending",
@@ -64,7 +71,9 @@
     "durable_restart_migration": "test_epoch_routing_initialization_uses_real_merge_and_survives_restart",
     "operator_authorized_current_rotation": "test_operator_authorized_current_epoch_rotation_is_durable_and_one_shot",
     "historical_recovery_fence": "test_historical_selected_recovery_is_fenced_before_delivery_io",
-    "stale_inflight_output_fence": "test_inflight_old_epoch_output_is_superseded_before_selection_or_post"
+    "stale_inflight_output_fence": "test_inflight_old_epoch_output_is_superseded_before_selection_or_post",
+    "prior_epoch_lifecycle_allowlist": "test_prior_epoch_lifecycle_allowlist_is_exact_and_contradiction_safe",
+    "zurie_timeout_boundary_fixture": "test_zurie_fixture_closes_prior_epoch_timeout_without_downstream_work"
   },
   "roomOriginToolFenceFixtures": {
     "hook_emits_block_directive": "test_room_origin_turn_blocks_external_room_post_tool_before_network_io",

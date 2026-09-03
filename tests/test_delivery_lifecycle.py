@@ -18,6 +18,22 @@ from gateway.session import build_session_key as hermes_build_session_key
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "synthetic_sociality_delivery_lifecycle_test"
+ZURIE_FIXTURE_HASHES = {
+    132: "136e0ad9f1b82b40338da0def2cecd6fccf2e05dcb70f8838520de23cf2b1194",
+    133: "6891830fa71f0592fd1749ea7cd6361add53e426e84de3ec94bd3024c7345bb4",
+    134: "fa953f52ef58410726a0c61687b88cc7d329874210820b015c93ca638dda0a49",
+}
+
+
+def load_zurie_fixture(seq):
+    raw = (ROOT / "tests" / "fixtures" / "zurie-epoch-boundary" /
+           f"seq-{seq}.canonical.json").read_bytes()
+    if not raw.endswith(b"\n"):
+        raise AssertionError("Frozen fixture must preserve its documented final LF")
+    canonical = raw[:-1]
+    if hashlib.sha256(canonical).hexdigest() != ZURIE_FIXTURE_HASHES[seq]:
+        raise AssertionError("Frozen fixture does not match the stored canonical hash")
+    return json.loads(canonical)
 
 
 def load_adapter():
@@ -1661,7 +1677,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.51")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.52")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -1718,7 +1734,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.51"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.52"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -2676,6 +2692,118 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 for task in (first, duplicate):
                     task.cancel()
                 await asyncio.gather(first, duplicate, return_exceptions=True)
+
+        asyncio.run(run())
+
+    def test_prior_epoch_lifecycle_allowlist_is_exact_and_contradiction_safe(self):
+        terminal = {
+            "type": "discussion.cycle_terminal", "actorRole": "human_owner",
+            "payload": {
+                "cycleId": "cycle-old", "epochId": "epoch-old",
+                "state": "interrupted", "reason": "human_interrupted",
+            },
+        }
+        accepted = [
+            terminal,
+            {**terminal, "actorRole": "agent_owner"},
+            {**terminal, "actorRole": "system", "payload": {
+                **terminal["payload"], "state": "timed_out",
+                "reason": "cycle_deadline_reached",
+            }},
+            {**terminal, "actorRole": "system", "payload": {
+                **terminal["payload"], "reason": "coordination_mode_changed",
+            }},
+            {**terminal, "actorRole": "system", "payload": {
+                **terminal["payload"], "reason": "epoch_superseded",
+            }},
+        ]
+        for event in accepted:
+            with self.subTest(event=event):
+                self.assertTrue(adapter._is_lifecycle_only_cycle_terminal(event))
+
+        rejected = [
+            {**terminal, "actorRole": "system"},
+            {**terminal, "type": "message.posted"},
+            {**terminal, "payload": {**terminal["payload"], "cycleId": ""}},
+            {**terminal, "payload": {**terminal["payload"], "state": "completed"}},
+            {**terminal, "payload": {**terminal["payload"], "reason": "budget_exhausted"}},
+            {**terminal, "actorRole": "human_owner", "payload": {
+                **terminal["payload"], "state": "timed_out",
+                "reason": "cycle_deadline_reached",
+            }},
+        ]
+        for event in rejected:
+            with self.subTest(event=event):
+                self.assertFalse(adapter._is_lifecycle_only_cycle_terminal(event))
+
+        with self.assertRaises(adapter.ProtocolError) as raised:
+            adapter._event_epoch_evidence({
+                **terminal,
+                "payload": {
+                    **terminal["payload"],
+                    "summaryHandoff": {"epochId": "epoch-other"},
+                },
+            })
+        self.assertEqual(raised.exception.code, "epoch_evidence_contradictory")
+
+    def test_zurie_fixture_closes_prior_epoch_timeout_without_downstream_work(self):
+        async def run():
+            binding = lifecycle_binding()
+            # 132 and 133 are loaded and hash-checked as context, while the
+            # production recovery boundary begins at Zurie's durable cursor 133.
+            fixtures = {seq: load_zurie_fixture(seq) for seq in (132, 133, 134)}
+            binding.cursor = 133
+            binding.acknowledged_cursor = 133
+            binding.inbox.clear()
+            binding.pending_since.clear()
+            binding.pending_retries.clear()
+            binding.terminal_evidence.clear()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            for name, value in {
+                "_inflight_events": set(), "_event_seq": {}, "_event_epoch": {},
+                "_latest_source": {}, "_run_for_event": {}, "_activity_seq": {},
+                "_context_acknowledged_sources": set(), "_cycle_attempts": {},
+                "_cycle_response_sources": {}, "_source_coordination_modes": {},
+                "_open_reply_recipients": {}, "_queued_events": {},
+                "_active_dispatch_rooms": {}, "_event_dispatch_generation": {},
+                "_receive_locks": {},
+            }.items():
+                setattr(instance, name, value)
+            instance._persist_binding = lambda _binding: True
+
+            class API:
+                def room_state(self, _room_id):
+                    return {
+                        "activeEpoch": {"id": "dqb8eamems9yi2e", "startsAtSeq": 133},
+                    }
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(
+                0, result=operation(api),
+            )
+            completed = []
+
+            async def complete(_binding, seq, **kwargs):
+                completed.append((seq, kwargs.get("terminal_status"), kwargs.get("reason")))
+                _binding.acknowledged_cursor = seq
+
+            instance._complete_event = complete
+            instance._publish = lambda *_args, **_kwargs: self.fail(
+                "prior-epoch lifecycle handling must not publish activity"
+            )
+            instance._dispatch_next_queued = lambda *_args, **_kwargs: self.fail(
+                "prior-epoch lifecycle handling must not queue or dispatch"
+            )
+            await instance._consume(binding, fixtures[134])
+
+            self.assertEqual(completed, [
+                (134, "ignored", "prior_epoch_lifecycle"),
+            ])
+            self.assertEqual(binding.acknowledged_cursor, 134)
+            self.assertEqual(binding.delivery_intents, {})
+            self.assertEqual(binding.delivery_lifecycle, {})
 
         asyncio.run(run())
 
