@@ -725,6 +725,26 @@ def _recover_stale_context_idempotency(args: argparse.Namespace) -> int:
         selected_observed = int(selected.get("observed_seq") or 0)
         post_observed = int(post.get("observed_seq") or 0)
         local_body = str(selected.get("body") or "")
+        authority_keys = sorted(
+            key for key, record in latest.delivery_authority.items()
+            if isinstance(record, dict)
+            and record.get("source_event_id") == args.source_event_id
+            and record.get("room_id") == args.room_id
+            and record.get("membership_id") == latest.membership_id
+            and record.get("cycle_id") == args.cycle_id
+            and record.get("attempt_id") == args.attempt_id
+        )
+        embedded_cycle = post.get("cycle") or {}
+        embedded_cycle_matches = (
+            isinstance(embedded_cycle, dict)
+            and str(embedded_cycle.get("cycle_id") or "") == args.cycle_id
+            and str(embedded_cycle.get("attempt_id") or "") == args.attempt_id
+        )
+        # Connector 1.0.51 persisted the exact attempt in delivery_authority,
+        # but its post snapshot could contain an empty cycle object. Accept
+        # that historical shape only when one exact authority record supplies
+        # the missing binding; never infer it merely from the operator args.
+        cycle_binding_proven = embedded_cycle_matches or len(authority_keys) == 1
         if (
             selected.get("action") != "post"
             or str(selected.get("source_event_id") or "") != args.source_event_id
@@ -737,19 +757,13 @@ def _recover_stale_context_idempotency(args: argparse.Namespace) -> int:
             or post_observed <= selected_observed
             or str(selected.get("message_idempotency_key") or "")
                != str(post.get("idempotency_key") or "")
-            or str((post.get("cycle") or {}).get("cycle_id") or "") != args.cycle_id
-            or str((post.get("cycle") or {}).get("attempt_id") or "") != args.attempt_id
+            or not cycle_binding_proven
             or intent.get("delivery_state") != "quarantined"
             or intent.get("state") != "quarantined"
             or intent.get("last_error_code") != "idempotency_mismatch"
             or (intent.get("canonical_event") or {}).get("id")
         ):
             raise ValueError("local intent is not the exact stale-context idempotency signature")
-        authority_keys = sorted(
-            key for key, record in latest.delivery_authority.items()
-            if isinstance(record, dict)
-            and record.get("source_event_id") == args.source_event_id
-        )
         receipt = dict(audit_base)
         receipt.update({
             "selectedObservedSeq": selected_observed,
