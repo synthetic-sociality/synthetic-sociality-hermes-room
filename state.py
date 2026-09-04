@@ -115,8 +115,9 @@ class RoomBinding:
     delivery_authority: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Secret-free forensic receipts for explicitly recovered delivery intents
     # whose canonical source was already acknowledged and whose server-owned
-    # discussion cycle had terminally accepted a pass with zero bytes. The
-    # frozen response body is never copied here; only its SHA-256 is retained.
+    # discussion cycle either accepted a zero-byte pass or already contains
+    # this membership's exact canonical contribution. The frozen response body
+    # is never copied here; only its SHA-256 is retained.
     abandoned_delivery_intents: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Crash-safe credential-renewal journal. It is profile-private state and
     # deliberately contains the exact grant, replacement, and previous

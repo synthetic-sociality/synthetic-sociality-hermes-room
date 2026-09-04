@@ -83,6 +83,22 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         "--yes", action="store_true",
         help="Confirm the exact audited non-replayable closure (required)",
     )
+    stale_context = commands.add_parser(
+        "recover-stale-context-idempotency",
+        help="Close one proven stale-context rekey failure after its canonical cycle contribution",
+    )
+    stale_context.add_argument("room_id")
+    stale_context.add_argument("source_seq", type=int)
+    stale_context.add_argument("source_event_id")
+    stale_context.add_argument("canonical_event_id")
+    stale_context.add_argument("cycle_id")
+    stale_context.add_argument("attempt_id")
+    stale_context.add_argument("local_body_sha256")
+    stale_context.add_argument("canonical_body_sha256")
+    stale_context.add_argument(
+        "--yes", action="store_true",
+        help="Confirm the exact audited non-replayable closure (required)",
+    )
     lifecycle = commands.add_parser(
         "reconcile-terminal-lifecycle",
         help="Close one canonically posted lifecycle after authoritative terminal-cycle proof",
@@ -127,6 +143,8 @@ def dispatch(args: argparse.Namespace) -> int:
             return _recover_idempotency_collision(args)
         if command == "recover-orphaned-intent":
             return _recover_orphaned_intent(args)
+        if command == "recover-stale-context-idempotency":
+            return _recover_stale_context_idempotency(args)
         if command == "reconcile-terminal-lifecycle":
             return _reconcile_terminal_lifecycle(args)
         if command == "renew":
@@ -586,6 +604,170 @@ def _recover_orphaned_intent(args: argparse.Namespace) -> int:
     print(
         f"{args.room_id} source sequence {source_seq} is closed as a canonical zero-byte cycle pass; "
         "the frozen post cannot replay and cursor/ack were not changed."
+    )
+    return 0
+
+
+def _recover_stale_context_idempotency(args: argparse.Namespace) -> int:
+    """Close one overtaken intent whose contribution already committed.
+
+    The command recognizes only the 1.0.51 stale-context signature: the
+    connector changed ``observed_seq`` while retaining one idempotency key,
+    the server rejected the later request as an idempotency mismatch, and the
+    same membership already has one canonical contribution for the exact
+    cycle.  No message is replayed and cursor/acknowledgement are unchanged.
+    """
+    if not args.yes:
+        raise ValueError("--yes is required for an audited stale-context recovery")
+    source_seq = int(args.source_seq)
+    if source_seq < 1:
+        raise ValueError("source_seq must be positive")
+    local_body_sha = str(args.local_body_sha256 or "").lower()
+    canonical_body_sha = str(args.canonical_body_sha256 or "").lower()
+    for label, digest in (
+        ("local_body_sha256", local_body_sha),
+        ("canonical_body_sha256", canonical_body_sha),
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{label} must be exactly 64 lowercase hexadecimal characters")
+
+    binding = load().binding(args.room_id)
+    if binding is None:
+        raise ValueError(f"room {args.room_id!r} is not configured")
+    page = RoomProtocol(binding.base_url, binding.credential).events(
+        binding.room_id, source_seq - 1, 0, all_epochs=False,
+    )
+    canonical = {str(event.get("id") or ""): event for event in page.get("events") or []}
+    source = canonical.get(args.source_event_id) or {}
+    result = canonical.get(args.canonical_event_id) or {}
+    source_payload = source.get("payload") or {}
+    result_payload = result.get("payload") or {}
+    if (
+        int(source.get("seq") or 0) != source_seq
+        or str(source.get("type") or "") != "discussion.cycle_attempt_ready"
+        or str(source_payload.get("cycleId") or "") != args.cycle_id
+        or str(source_payload.get("membershipId") or "") != binding.membership_id
+    ):
+        raise ValueError("canonical source is not this membership's exact cycle attempt")
+    canonical_body = str(result_payload.get("body") or "")
+    if (
+        str(result.get("type") or "") != "message.posted"
+        or str(result.get("actorId") or "") != binding.membership_id
+        or str(result_payload.get("cycleId") or "") != args.cycle_id
+        or str(result_payload.get("attemptId") or "") != args.attempt_id
+        or hashlib.sha256(canonical_body.encode("utf-8")).hexdigest() != canonical_body_sha
+    ):
+        raise ValueError("canonical result is not the exact contributed cycle message")
+
+    cycle = RoomProtocol(binding.base_url, binding.credential).get_discussion_cycle(
+        binding.room_id, args.cycle_id,
+    )
+    matching = [
+        item for item in (cycle.get("contributions") or [])
+        if isinstance(item, dict)
+        and item.get("membershipId") == binding.membership_id
+        and item.get("eventId") == args.canonical_event_id
+    ]
+    if (
+        str(cycle.get("id") or cycle.get("cycleId") or "") != args.cycle_id
+        or str(cycle.get("state") or "") not in {"completed", "interrupted", "timed_out"}
+        or len(matching) != 1
+    ):
+        raise ValueError("authoritative cycle does not prove one terminal canonical contribution")
+
+    audit_base = {
+        "version": 1,
+        "reason": "stale_context_observed_seq_changed_under_same_idempotency_key",
+        "sourceSeq": source_seq,
+        "sourceEventId": args.source_event_id,
+        "canonicalEventId": args.canonical_event_id,
+        "cycleId": args.cycle_id,
+        "attemptId": args.attempt_id,
+        "localBodySha256": local_body_sha,
+        "canonicalBodySha256": canonical_body_sha,
+        "cycleState": str(cycle.get("state") or ""),
+    }
+
+    def recover(current):
+        latest = current.binding(args.room_id)
+        if latest is None or latest.membership_id != binding.membership_id:
+            raise ValueError("Room membership changed during stale-context recovery")
+        existing_audit = latest.abandoned_delivery_intents.get(args.source_event_id)
+        if existing_audit:
+            comparable = {key: existing_audit.get(key) for key in audit_base}
+            if comparable != audit_base:
+                raise ValueError("stale-context recovery audit conflicts with this request")
+            return
+        if latest.cursor < source_seq or latest.acknowledged_cursor < source_seq:
+            raise ValueError("source sequence has not been canonically acknowledged")
+        seq_key = str(source_seq)
+        if any(
+            seq_key in ledger for ledger in (
+                latest.inbox, latest.pending_since, latest.pending_retries,
+                latest.terminal_evidence,
+            )
+        ):
+            raise ValueError("source still has live receive-ledger evidence")
+        if args.source_event_id in latest.delivery_lifecycle:
+            raise ValueError("source unexpectedly has a delivery lifecycle journal")
+        intent = latest.delivery_intents.get(args.source_event_id)
+        if not isinstance(intent, dict):
+            raise ValueError("source has no exact durable delivery intent")
+        selected = intent.get("selected")
+        post = intent.get("post")
+        if not isinstance(selected, dict) or not isinstance(post, dict):
+            raise ValueError("source lacks selected and posted request evidence")
+        expected_binding = {
+            "membership_id": latest.membership_id,
+            "installation_id": latest.installation_id,
+            "identity_version": latest.identity_version,
+        }
+        selected_observed = int(selected.get("observed_seq") or 0)
+        post_observed = int(post.get("observed_seq") or 0)
+        local_body = str(selected.get("body") or "")
+        if (
+            selected.get("action") != "post"
+            or str(selected.get("source_event_id") or "") != args.source_event_id
+            or int(selected.get("source_seq") or 0) != source_seq
+            or selected.get("binding") != expected_binding
+            or post.get("binding") != expected_binding
+            or str(post.get("body") or "") != local_body
+            or hashlib.sha256(local_body.encode("utf-8")).hexdigest() != local_body_sha
+            or selected_observed < 1
+            or post_observed <= selected_observed
+            or str(selected.get("message_idempotency_key") or "")
+               != str(post.get("idempotency_key") or "")
+            or str((post.get("cycle") or {}).get("cycle_id") or "") != args.cycle_id
+            or str((post.get("cycle") or {}).get("attempt_id") or "") != args.attempt_id
+            or intent.get("delivery_state") != "quarantined"
+            or intent.get("state") != "quarantined"
+            or intent.get("last_error_code") != "idempotency_mismatch"
+            or (intent.get("canonical_event") or {}).get("id")
+        ):
+            raise ValueError("local intent is not the exact stale-context idempotency signature")
+        authority_keys = sorted(
+            key for key, record in latest.delivery_authority.items()
+            if isinstance(record, dict)
+            and record.get("source_event_id") == args.source_event_id
+        )
+        receipt = dict(audit_base)
+        receipt.update({
+            "selectedObservedSeq": selected_observed,
+            "postObservedSeq": post_observed,
+            "authorityKeys": authority_keys,
+            "recordedAt": datetime.now(timezone.utc).isoformat(),
+        })
+        latest.abandoned_delivery_intents[args.source_event_id] = receipt
+        latest.delivery_intents.pop(args.source_event_id, None)
+        latest.turn_sequences.pop(args.source_event_id, None)
+        latest.turn_observed.pop(args.source_event_id, None)
+        for key in authority_keys:
+            latest.delivery_authority.pop(key, None)
+
+    update(recover)
+    print(
+        f"{args.room_id} source sequence {source_seq} closed after its canonical cycle contribution; "
+        "the quarantined request cannot replay and cursor/ack were not changed."
     )
     return 0
 

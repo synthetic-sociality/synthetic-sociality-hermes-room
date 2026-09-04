@@ -55,7 +55,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.52"
+CONNECTOR_VERSION = "1.0.53"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -2296,8 +2296,33 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     raise
                 if error.code == "stale_context":
                     state = await self._call(binding, lambda api: api.room_state(chat_id))
+                    previous_observed = observed
+                    previous_key = post_key
                     observed = max(observed, int(state.get("headSeq") or 0))
+                    if observed <= previous_observed:
+                        raise
+                    # ``observedSeq`` is part of the server's immutable
+                    # idempotency payload.  A stale-context rejection proves
+                    # that the old request did not commit, so retry the same
+                    # semantic contribution under a new, observation-scoped
+                    # key.  Reusing the old key after changing observedSeq
+                    # produces a deterministic idempotency_mismatch and pins
+                    # the ordered receive ledger behind a quarantined intent.
+                    post_key = stable_key(
+                        "message-context", f"{source_id}:{observed}",
+                        room_id=binding.room_id,
+                        membership_id=binding.membership_id,
+                    )
+                    superseded = intent["post"].setdefault(
+                        "superseded_idempotency_attempts", [],
+                    )
+                    superseded.append({
+                        "idempotency_key": previous_key,
+                        "observed_seq": previous_observed,
+                        "reason": "stale_context",
+                    })
                     intent["post"]["observed_seq"] = observed
+                    intent["post"]["idempotency_key"] = post_key
                     if not self._persist_binding(binding):
                         raise ProtocolError(
                             "Room membership changed before stale message retry",

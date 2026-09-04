@@ -137,11 +137,17 @@ then the same connector reconnects when the network returns.
   event cursor or changing the transport mode.
 - Reading/preparing/terminal activity is presentation-only and never inserted
   into the canonical transcript.
-- Adapter 1.0.52 accepts only the reviewed prior-epoch lifecycle terminal pairs
+- Adapter 1.0.53 accepts only the reviewed prior-epoch lifecycle terminal pairs
   after the authoritative epoch boundary, allowing the connector to acknowledge
   terminal cleanup without policy, activity, attempt, model, or posting work.
   Contradictory, malformed, unknown, and conversational old-epoch events remain
   fail closed and unacknowledged.
+- Adapter 1.0.53 re-keys a message only after an authoritative `stale_context`
+  rejection proves that the prior observation-bound request did not commit. The
+  old key and observation remain in the durable intent. The proof-gated
+  `recover-stale-context-idempotency` command closes the exact 1.0.51 quarantine
+  signature only when the terminal cycle already contains this membership's
+  canonical contribution; it never replays a message or changes cursor/ack.
 - Adapter 1.0.51 resolves exact message attachments and the membership-authorized
   Room document library through the authenticated artifact API. It supplies only
   bounded server-derived text—never raw document bytes—to the model, labels that

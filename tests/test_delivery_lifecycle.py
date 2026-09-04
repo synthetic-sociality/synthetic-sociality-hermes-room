@@ -1677,7 +1677,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.52")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.53")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -1734,7 +1734,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.52"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.53"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -4649,6 +4649,180 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     unrelated, "event-120", 120,
                 ))
                 self.assertEqual(unrelated.inbox["120"], "quarantined")
+
+    def test_stale_context_rekeys_before_changing_observed_sequence(self):
+        async def exercise():
+            binding = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential",
+                installation_id="installation-1", cursor=10, acknowledged_cursor=9,
+                message_payload_dialect="v2",
+            )
+            generation = adapter.SyntheticSocialityAdapter._intent_binding(binding)
+            first_key = adapter.stable_key(
+                "message", "source-10", room_id="room-1", membership_id="member-1",
+            )
+            binding.delivery_intents["source-10"] = {
+                "delivery_state": "selected", "lifecycle_state": "not_started", "state": "selected",
+                "selected": {
+                    "action": "post", "source_event_id": "source-10", "source_seq": 10,
+                    "body": "One exact answer", "responds_to": "source-10",
+                    "recipient_membership_ids": [], "coordination_mode": "open",
+                    "observed_seq": 10, "observed_epoch_id": "epoch-1",
+                    "message_idempotency_key": first_key,
+                    "logical_contribution_id": "logical-1",
+                    "message_payload_dialect": "v2", "cycle": {}, "binding": generation,
+                },
+            }
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            snapshots = []
+            instance._persist_binding = lambda current: snapshots.append(
+                copy.deepcopy(current.delivery_intents["source-10"])
+            ) or True
+            calls = []
+
+            class API:
+                def __init__(self):
+                    self.key = ""
+
+                def with_idempotency_key(self, key):
+                    self.key = key
+                    return self
+
+                def with_logical_contribution_id(self, _value):
+                    return self
+
+                def with_message_payload_dialect(self, _value):
+                    return self
+
+                def room_state(self, _room_id):
+                    return {"headSeq": 11}
+
+                def post_message(self, _room_id, _turn_id, observed, *_args, **_kwargs):
+                    calls.append((self.key, observed))
+                    if len(calls) == 1:
+                        raise adapter.ProtocolError(
+                            "stale", code="stale_context", retryable=True,
+                        )
+                    return {"id": "posted-12", "seq": 12, "ts": "2026-09-04T03:00:00Z"}
+
+            api = API()
+
+            async def invoke(_binding, operation):
+                return operation(api)
+
+            instance._call = invoke
+            event, observed = await instance._post_with_fresh_context(
+                binding, "room-1", "", 10, "source-10", "One exact answer", "epoch-1",
+                coordination_mode="open",
+            )
+            return binding, calls, snapshots, event, observed
+
+        binding, calls, snapshots, event, observed = asyncio.run(exercise())
+        self.assertEqual(event["id"], "posted-12")
+        self.assertEqual(observed, 11)
+        self.assertEqual(calls[0], (binding.delivery_intents["source-10"]["selected"]["message_idempotency_key"], 10))
+        self.assertNotEqual(calls[0][0], calls[1][0])
+        self.assertEqual(calls[1], (binding.delivery_intents["source-10"]["post"]["idempotency_key"], 11))
+        self.assertEqual(
+            binding.delivery_intents["source-10"]["post"]["superseded_idempotency_attempts"],
+            [{"idempotency_key": calls[0][0], "observed_seq": 10, "reason": "stale_context"}],
+        )
+        self.assertGreaterEqual(len(snapshots), 2)
+
+    def test_audited_stale_context_recovery_archives_without_replay_or_cursor_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            binding = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential",
+                installation_id="installation-1", cursor=12, acknowledged_cursor=12,
+            )
+            generation = adapter.SyntheticSocialityAdapter._intent_binding(binding)
+            body = "Frozen local answer"
+            local_digest = hashlib.sha256(body.encode()).hexdigest()
+            canonical_body = "Canonical answer"
+            canonical_digest = hashlib.sha256(canonical_body.encode()).hexdigest()
+            key = adapter.stable_key(
+                "message", "ready-10", room_id="room-1", membership_id="member-1",
+            )
+            cycle = {"cycle_id": "cycle-1", "attempt_id": "attempt-1", "generation": 1}
+            binding.turn_sequences["ready-10"] = 10
+            authority_key = json.dumps(
+                ["room-1", "ready-10", "member-1", "cycle-1", "attempt-1", 1],
+                separators=(",", ":"),
+            )
+            binding.delivery_authority[authority_key] = {
+                "room_id": "room-1", "source_event_id": "ready-10",
+                "membership_id": "member-1", "cycle_id": "cycle-1",
+                "attempt_id": "attempt-1", "generation": 1,
+                "lease_expires_at": "2099-09-04T00:00:00Z", "state": "active",
+            }
+            binding.delivery_intents["ready-10"] = {
+                "delivery_state": "quarantined", "lifecycle_state": "not_started",
+                "state": "quarantined", "last_error_code": "idempotency_mismatch",
+                "selected": {
+                    "action": "post", "source_event_id": "ready-10", "source_seq": 10,
+                    "body": body, "observed_seq": 10,
+                    "message_idempotency_key": key, "cycle": cycle, "binding": generation,
+                },
+                "post": {
+                    "body": body, "observed_seq": 12,
+                    "idempotency_key": key, "cycle": cycle, "binding": generation,
+                },
+            }
+            state_store.save(state_store.PluginState(bindings=[binding]), path)
+            calls = []
+
+            class Protocol:
+                def __init__(self, *_args):
+                    pass
+
+                def events(self, room_id, after, limit, *, all_epochs):
+                    calls.append(("events", room_id, after, limit, all_epochs))
+                    return {"events": [
+                        {"id": "ready-10", "seq": 10, "type": "discussion.cycle_attempt_ready",
+                         "payload": {"cycleId": "cycle-1", "membershipId": "member-1"}},
+                        {"id": "posted-11", "seq": 11, "type": "message.posted",
+                         "actorId": "member-1", "payload": {
+                             "body": canonical_body, "cycleId": "cycle-1", "attemptId": "attempt-1",
+                         }},
+                    ]}
+
+                def get_discussion_cycle(self, room_id, cycle_id):
+                    calls.append(("cycle", room_id, cycle_id))
+                    return {"id": "cycle-1", "state": "timed_out", "contributions": [
+                        {"membershipId": "member-1", "eventId": "posted-11"},
+                    ]}
+
+                def __getattr__(self, name):
+                    raise AssertionError(f"recovery must not call {name}")
+
+            original_load, original_update, original_protocol = cli.load, cli.update, cli.RoomProtocol
+            cli.load = lambda: state_store.load(path)
+            cli.update = lambda mutator: state_store.update(mutator, path)
+            cli.RoomProtocol = Protocol
+            args = types.SimpleNamespace(
+                room_id="room-1", source_seq=10, source_event_id="ready-10",
+                canonical_event_id="posted-11", cycle_id="cycle-1", attempt_id="attempt-1",
+                local_body_sha256=local_digest, canonical_body_sha256=canonical_digest, yes=True,
+            )
+            try:
+                self.assertEqual(cli._recover_stale_context_idempotency(args), 0)
+            finally:
+                cli.load, cli.update, cli.RoomProtocol = original_load, original_update, original_protocol
+
+            reloaded = state_store.load(path).binding("room-1")
+            self.assertEqual((reloaded.cursor, reloaded.acknowledged_cursor), (12, 12))
+            self.assertNotIn("ready-10", reloaded.delivery_intents)
+            self.assertNotIn("ready-10", reloaded.turn_sequences)
+            self.assertNotIn(authority_key, reloaded.delivery_authority)
+            audit = reloaded.abandoned_delivery_intents["ready-10"]
+            self.assertEqual(audit["canonicalEventId"], "posted-11")
+            self.assertEqual(audit["localBodySha256"], local_digest)
+            self.assertEqual(audit["canonicalBodySha256"], canonical_digest)
+            self.assertEqual(calls, [
+                ("events", "room-1", 9, 0, False),
+                ("cycle", "room-1", "cycle-1"),
+            ])
 
     def test_renewal_rejects_malformed_same_attempt_claim_without_poisoning_state(self):
         async def run():
