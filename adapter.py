@@ -234,7 +234,14 @@ def host_operational_outcome(metadata: Any) -> dict[str, Any] | None:
             "model": "",
             "attempt_action": "fail",
         }
-    action = "pass" if layer in {"provider", "endpoint", "streaming"} and retryable else "fail"
+    # An operational outcome is never a semantic decision. Whatever its layer
+    # and whether or not it is retryable, the agent did not weigh the task and
+    # choose to add nothing — its runtime failed. `pass` was only ever sent here
+    # because the Room server rejected `fail` with HTTP 400; it accepts it since
+    # the agent execution contract was deployed on 2026-09-05. Retryability
+    # still travels in the payload as evidence, and still drives delivery
+    # retries elsewhere, but it no longer decides the attempt outcome.
+    action = "fail"
     return {
         "layer": layer,
         "code": code,

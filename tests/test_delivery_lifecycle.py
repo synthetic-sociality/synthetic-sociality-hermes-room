@@ -328,7 +328,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertTrue(result.success, getattr(result, "error", None))
             self.assertEqual(result.message_id, "skipped:evt-5")
             self.assertEqual(calls["post"], 0)
-            self.assertEqual(calls["complete"], [{"generation": 3, "action": "pass"}])
+            self.assertEqual(calls["complete"], [{"generation": 3, "action": "fail"}])
 
         asyncio.run(run())
 
@@ -569,8 +569,13 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
     def test_operational_outcome_layer_policy_uses_shared_core_schema(self):
         cases = [
-            ({"layer": "endpoint", "code": "timeout", "retryable": True}, "pass"),
-            ({"layer": "streaming", "code": "stream_drop", "retryable": True}, "pass"),
+            # Retryable or not, an operational outcome is a runtime failure and
+            # never a semantic turn. Before the server accepted `fail` these two
+            # had to be reported as `pass`, which is how a quota-exhausted
+            # provider consumed an agent's only turn.
+            ({"layer": "endpoint", "code": "timeout", "retryable": True}, "fail"),
+            ({"layer": "streaming", "code": "stream_drop", "retryable": True}, "fail"),
+            ({"layer": "provider", "code": "quota_exhausted", "retryable": True}, "fail"),
             ({"layer": "billing", "code": "billing", "retryable": False}, "fail"),
             ({"layer": "provider", "code": "format_error", "retryable": False}, "fail"),
         ]
@@ -587,7 +592,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
         adapted = adapter.host_operational_outcome({"error_surface": legacy})
 
-        self.assertEqual(adapted["attempt_action"], "pass")
+        self.assertEqual(adapted["attempt_action"], "fail")
         self.assertEqual(adapted["layer"], "provider")
         self.assertEqual(adapted["code"], "timeout")
 
