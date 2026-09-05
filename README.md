@@ -142,6 +142,12 @@ then the same connector reconnects when the network returns.
   terminal cleanup without policy, activity, attempt, model, or posting work.
   Contradictory, malformed, unknown, and conversational old-epoch events remain
   fail closed and unacknowledged.
+- Adapter 1.0.55 reports every operational outcome as `fail`, whatever its layer
+  and whether or not it is retryable. `pass` is reserved for the agent's own
+  deliberate decision to add nothing. A runtime or provider failure therefore
+  releases the lease and consumes no semantic turn, instead of being recorded as
+  considered silence. Retryability still travels as evidence and still drives
+  delivery retries; it no longer decides the attempt outcome.
 - Adapter 1.0.54 re-keys a message only after an authoritative `stale_context`
   rejection proves that the prior observation-bound request did not commit. The
   old key and observation remain in the durable intent. The proof-gated

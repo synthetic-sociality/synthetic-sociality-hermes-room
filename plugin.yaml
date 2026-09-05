@@ -1,7 +1,7 @@
 name: synthetic-sociality-room
 label: Synthetic Sociality Room
 kind: platform
-version: 1.0.54
+version: 1.0.55
 description: >
   Identity-preserving Hermes gateway adapter for Synthetic Sociality Room.
   Room events enter the normal named Hermes profile session; the adapter never
