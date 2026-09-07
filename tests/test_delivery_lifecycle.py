@@ -1682,7 +1682,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.55")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.56")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -1739,7 +1739,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.55"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.56"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -4945,6 +4945,97 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertEqual(
                 binding.delivery_authority[authority_key]["state"], "superseded",
             )
+
+        asyncio.run(run())
+
+
+class ConnectorEnrollmentTests(unittest.TestCase):
+    def test_protocol_uses_authenticated_connector_enrollment_routes(self):
+        protocol = adapter.RoomProtocol("https://room.example/api", "credential")
+        calls = []
+
+        def request(method, path, payload=None, **_kwargs):
+            calls.append((method, path, payload))
+            return [] if method == "GET" else {"roomId": "room-2"}
+
+        protocol.request = request
+        self.assertEqual(protocol.connector_enrollments("install one"), [])
+        self.assertEqual(
+            protocol.claim_connector_enrollment("invite/one", "install one"),
+            {"roomId": "room-2"},
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("GET", "/connector/enrollments?clientInstanceId=install+one", None),
+                ("POST", "/connector/enrollments/invite%2Fone/claim", {"clientInstanceId": "install one"}),
+            ],
+        )
+
+    def test_claim_is_persisted_before_new_room_watcher_starts(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "state.json"
+                source = adapter.RoomBinding(
+                    "https://room.example/api", "room-1", "member-1", "credential-1",
+                    display_name="Aura", identity_version=2,
+                    installation_id="installation-1", cursor=5, acknowledged_cursor=5,
+                )
+                state_store.save(state_store.PluginState(bindings=[source]), path)
+                instance = object.__new__(adapter.SyntheticSocialityAdapter)
+                instance._state = state_store.PluginState(bindings=[source])
+                instance._tasks = {}
+                instance._stop = asyncio.Event()
+                instance._enrollment_lock = asyncio.Lock()
+                calls = []
+                watcher_observations = []
+
+                async def call(_binding, operation):
+                    class Protocol:
+                        def connector_enrollments(self, installation_id):
+                            calls.append(("list", installation_id))
+                            return [{"invitationId": "invite-2"}]
+
+                        def claim_connector_enrollment(self, invitation_id, installation_id):
+                            calls.append(("claim", invitation_id, installation_id))
+                            return {
+                                "invitationId": invitation_id,
+                                "roomId": "room-2",
+                                "roomTitle": "WAM GGF3",
+                                "displayName": "Aura",
+                                "membershipId": "member-2",
+                                "credential": "credential-2",
+                                "credentialExpiresAt": "2026-12-01T00:00:00Z",
+                                "identityVersion": 2,
+                                "headSeq": 7,
+                            }
+                    return operation(Protocol())
+
+                async def watch(binding, *, is_reconnect):
+                    persisted = state_store.load(path).binding(binding.room_id)
+                    watcher_observations.append((binding.room_id, is_reconnect, persisted.credential))
+
+                instance._call = call
+                instance._watch = watch
+                original_update = adapter.update
+                adapter.update = lambda mutator: state_store.update(mutator, path)
+                try:
+                    await instance._accept_connector_enrollments(source)
+                    await asyncio.gather(*instance._tasks.values())
+                finally:
+                    adapter.update = original_update
+
+                persisted = state_store.load(path).binding("room-2")
+                self.assertEqual(persisted.membership_id, "member-2")
+                self.assertEqual(persisted.credential, "credential-2")
+                self.assertEqual(persisted.cursor, 7)
+                self.assertEqual(persisted.acknowledged_cursor, 7)
+                self.assertEqual(persisted.installation_id, "installation-1")
+                self.assertEqual(calls, [
+                    ("list", "installation-1"),
+                    ("claim", "invite-2", "installation-1"),
+                ])
+                self.assertEqual(watcher_observations, [("room-2", False, "credential-2")])
 
         asyncio.run(run())
 

@@ -33,7 +33,7 @@ from .protocol import (
     stable_key,
 )
 from .room_tools import ROOM_CONTEXT_SCHEMA, ROOM_POST_SCHEMA, room_context, room_post
-from .state import PluginState, RoomBinding, load, update
+from .state import PluginState, RoomBinding, load, update, upsert
 
 
 def _epoch_thread_id(epoch_id: str) -> str:
@@ -55,7 +55,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.55"
+CONNECTOR_VERSION = "1.0.56"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -798,6 +798,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._source_coordination_modes: dict[str, str] = {}
         self._open_reply_recipients: dict[str, list[str]] = {}
         self._message_contract_checked: set[str] = set()
+        self._enrollment_lock = asyncio.Lock()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         self._stop.clear()
@@ -2543,6 +2544,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             retryable=False,
                         )
                     connector = await self._ensure_connector(binding)
+                    await self._accept_connector_enrollments(binding)
                     await self._ensure_epoch_session_routing(binding)
                     await self._repair_pending_lifecycles(binding)
                     if binding.room_id not in self._heartbeat_tasks:
@@ -2753,6 +2755,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
                     )
                     self._note_connected(binding, heartbeat)
+                    await self._accept_connector_enrollments(binding)
                     await self._publish(
                         binding,
                         f"presence:{binding.room_id}",
@@ -2779,6 +2782,79 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             self._mark_disconnected()
         finally:
             self._heartbeat_tasks.pop(binding.room_id, None)
+
+    async def _accept_connector_enrollments(self, source: RoomBinding) -> None:
+        """Durably activate owner-approved Rooms for this exact installation."""
+        lock = getattr(self, "_enrollment_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._enrollment_lock = lock
+        async with lock:
+            try:
+                pending = await self._call(
+                    source,
+                    lambda api: api.connector_enrollments(source.installation_id),
+                )
+            except ProtocolError as error:
+                # Rolling upgrades may briefly run a server without this
+                # additive route. Presence and ordinary Room work continue.
+                if error.status in {404, 405, 501}:
+                    return
+                logger.warning("Room connector enrollment check failed: %s", error)
+                return
+            for enrollment in pending[:32]:
+                invitation_id = str(enrollment.get("invitationId") or "").strip()
+                if not invitation_id:
+                    logger.warning("Room connector returned an enrollment without an invitation id")
+                    continue
+                try:
+                    claimed = await self._call(
+                        source,
+                        lambda api, invitation_id=invitation_id: api.claim_connector_enrollment(
+                            invitation_id, source.installation_id,
+                        ),
+                    )
+                except ProtocolError as error:
+                    if error.code in {"invitation_consumed", "not_found"}:
+                        continue
+                    logger.warning("Room connector could not claim enrollment %s: %s", invitation_id, error)
+                    continue
+                room_id = str(claimed.get("roomId") or "").strip()
+                membership_id = str(claimed.get("membershipId") or "").strip()
+                credential = str(claimed.get("credential") or "").strip()
+                if not room_id or not membership_id or not credential:
+                    raise ProtocolError(
+                        "Room connector enrollment response omitted its durable binding",
+                        code="connector_enrollment_malformed",
+                    )
+                if self._state.binding(room_id) is not None:
+                    logger.warning("Room %s was already bound while its enrollment was claimed", room_id)
+                    continue
+                head_seq = int(claimed.get("headSeq") or 0)
+                binding = RoomBinding(
+                    base_url=source.base_url,
+                    room_id=room_id,
+                    membership_id=membership_id,
+                    credential=credential,
+                    credential_expires_at=str(claimed.get("credentialExpiresAt") or ""),
+                    display_name=str(claimed.get("displayName") or source.display_name),
+                    identity_version=int(claimed.get("identityVersion") or source.identity_version),
+                    installation_id=source.installation_id,
+                    cursor=head_seq,
+                    acknowledged_cursor=head_seq,
+                    transport=source.transport,
+                )
+                # Persist the one-time credential before exposing the binding
+                # to any runtime task. update() uses the profile-private 0600
+                # atomic state transaction.
+                update(lambda current, binding=binding: upsert(current, binding))
+                self._state.bindings.append(binding)
+                if not self._stop.is_set() and room_id not in self._tasks:
+                    self._tasks[room_id] = asyncio.create_task(
+                        self._watch(binding, is_reconnect=False),
+                        name=f"synthetic-sociality:{room_id}",
+                    )
+                logger.info("Activated owner-approved Room %s for %s", room_id, binding.display_name)
 
     async def _stream_once(self, binding: RoomBinding) -> None:
         loop = asyncio.get_running_loop()

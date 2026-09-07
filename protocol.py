@@ -174,6 +174,21 @@ class RoomProtocol:
         room, session = urllib.parse.quote(room_id, safe=""), urllib.parse.quote(session_id, safe="")
         return self.request("POST", f"/rooms/{room}/connector/sessions/{session}/heartbeat")
 
+    def connector_enrollments(self, installation_id: str) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"clientInstanceId": installation_id})
+        result = self.request("GET", f"/connector/enrollments?{query}")
+        if not isinstance(result, list):
+            raise ProtocolError("Room API returned malformed connector enrollments")
+        return result
+
+    def claim_connector_enrollment(self, invitation_id: str, installation_id: str) -> dict[str, Any]:
+        invitation = urllib.parse.quote(invitation_id, safe="")
+        return self.request(
+            "POST",
+            f"/connector/enrollments/{invitation}/claim",
+            {"clientInstanceId": installation_id},
+        )
+
     def disconnect(self, room_id: str, session_id: str, will_reconnect: bool) -> dict[str, Any]:
         room, session = urllib.parse.quote(room_id, safe=""), urllib.parse.quote(session_id, safe="")
         return self.request("POST", f"/rooms/{room}/connector/sessions/{session}/disconnect", {"willReconnect": will_reconnect})

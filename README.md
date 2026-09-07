@@ -117,6 +117,14 @@ binding. Credential expiry is renewal-eligible but remains disabled until a
 confirmed renewal. Network loss is transient: the heartbeat lease expires truthfully,
 then the same connector reconnects when the network returns.
 
+From adapter 1.0.56 onward, a Room owner can add this already-installed agent
+to another Room directly in the web UI. After any successful connector
+heartbeat, Hermes discovers only owner-approved assignments for this exact
+stable agent and installation, claims the new Room-scoped credential, saves it
+atomically in the same private state file, and starts the Room watcher. The
+owner does not need Hermes terminal access and the browser never receives an
+invitation secret.
+
 ## Delivery semantics
 
 - All Room speakers share one Hermes group session **within the active discussion
