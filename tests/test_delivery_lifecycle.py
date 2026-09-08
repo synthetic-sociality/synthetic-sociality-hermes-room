@@ -6,6 +6,7 @@ import concurrent.futures
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import threading
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gateway.session import build_session_key as hermes_build_session_key
 
@@ -99,6 +101,7 @@ def load_adapter():
 
 adapter = load_adapter()
 state_store = sys.modules[f"{PACKAGE}.state"]
+room_protocol = sys.modules[f"{PACKAGE}.protocol"]
 cli = sys.modules[f"{PACKAGE}.cli"]
 room_tools = sys.modules[f"{PACKAGE}.room_tools"]
 
@@ -1682,7 +1685,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.56")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.57")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -1739,7 +1742,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.56"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.57"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -4950,6 +4953,142 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
 
 class ConnectorEnrollmentTests(unittest.TestCase):
+    class _Response:
+        def __init__(self, body, *, status=200):
+            self.body = body
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return self.body
+
+    def test_protocol_normalizes_successful_html_spa_fallback(self):
+        protocol = adapter.RoomProtocol("https://room.example/api", "credential")
+        response = self._Response(b"<!doctype html><title>Room</title>")
+        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                protocol.connector_enrollments("installation-1")
+
+        self.assertEqual(raised.exception.status, 200)
+        self.assertEqual(raised.exception.code, "invalid_json_response")
+        self.assertFalse(raised.exception.retryable)
+
+    def test_protocol_normalizes_missing_and_empty_enrollment_routes(self):
+        protocol = adapter.RoomProtocol("https://room.example/api", "credential")
+        missing = room_protocol.urllib.error.HTTPError(
+            "https://room.example/api/connector/enrollments",
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b""),
+        )
+        with mock.patch.object(room_protocol.urllib.request, "urlopen", side_effect=missing):
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                protocol.connector_enrollments("installation-1")
+        self.assertEqual(raised.exception.status, 404)
+
+        response = self._Response(b"")
+        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(adapter.ProtocolError, "malformed connector enrollments"):
+                protocol.connector_enrollments("installation-1")
+
+    def test_protocol_rejects_non_object_enrollment_and_claim_items(self):
+        protocol = adapter.RoomProtocol("https://room.example/api", "credential")
+
+        response = self._Response(b"[null]")
+        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                protocol.connector_enrollments("installation-1")
+        self.assertEqual(raised.exception.code, "connector_enrollments_malformed")
+
+        response = self._Response(b"[]")
+        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                protocol.claim_connector_enrollment("invite-1", "installation-1")
+        self.assertEqual(raised.exception.code, "connector_enrollment_malformed")
+
+    def test_enrollment_compatibility_failures_never_escape_optional_boundary(self):
+        async def run(failure):
+            source = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential-1",
+                installation_id="installation-1",
+            )
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._enrollment_lock = asyncio.Lock()
+
+            async def call(_binding, _operation):
+                raise failure
+
+            instance._call = call
+            await instance._accept_connector_enrollments(source)
+
+        cases = [
+            adapter.ProtocolError("missing", status=404),
+            adapter.ProtocolError("redirected", status=307),
+            adapter.ProtocolError(
+                "Room API returned a non-JSON response",
+                status=200,
+                code="invalid_json_response",
+            ),
+            adapter.ProtocolError("malformed empty response"),
+            json.JSONDecodeError("unexpected decoder leak", "", 0),
+        ]
+        for failure in cases:
+            with self.subTest(failure=repr(failure)):
+                asyncio.run(run(failure))
+
+    def test_malformed_enrollment_and_claim_payloads_never_escape_optional_boundary(self):
+        async def run(list_result, claim_result=None):
+            source = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential-1",
+                installation_id="installation-1",
+            )
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._state = state_store.PluginState(bindings=[source])
+            instance._tasks = {}
+            instance._stop = asyncio.Event()
+            instance._enrollment_lock = asyncio.Lock()
+            persist_calls = []
+
+            async def call(_binding, operation):
+                class Protocol:
+                    def connector_enrollments(self, _installation_id):
+                        return list_result
+
+                    def claim_connector_enrollment(self, _invitation_id, _installation_id):
+                        return claim_result
+
+                return operation(Protocol())
+
+            instance._call = call
+            with mock.patch.object(
+                adapter, "update", side_effect=lambda mutator: persist_calls.append(mutator),
+            ):
+                await instance._accept_connector_enrollments(source)
+            self.assertEqual(instance._state.bindings, [source])
+            self.assertEqual(instance._tasks, {})
+            self.assertEqual(persist_calls, [])
+
+        cases = [
+            ([None], None),
+            ([{"invitationId": "invite-1"}], []),
+            ([{"invitationId": "invite-1"}], {"roomId": []}),
+            ([{"invitationId": "invite-1"}], {
+                "roomId": "room-2",
+                "membershipId": "member-2",
+                "credential": "credential-2",
+                "headSeq": [1],
+            }),
+        ]
+        for list_result, claim_result in cases:
+            with self.subTest(list_result=list_result, claim_result=claim_result):
+                asyncio.run(run(list_result, claim_result))
+
     def test_protocol_uses_authenticated_connector_enrollment_routes(self):
         protocol = adapter.RoomProtocol("https://room.example/api", "credential")
         calls = []

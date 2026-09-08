@@ -55,7 +55,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.56"
+CONNECTOR_VERSION = "1.0.57"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -2797,64 +2797,140 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
             except ProtocolError as error:
                 # Rolling upgrades may briefly run a server without this
-                # additive route. Presence and ordinary Room work continue.
+                # additive route.  Older deployments can also return their
+                # HTML SPA fallback with HTTP 200.  Presence and ordinary Room
+                # work must continue for every compatibility shape.
                 if error.status in {404, 405, 501}:
                     return
                 logger.warning("Room connector enrollment check failed: %s", error)
                 return
+            except Exception as error:
+                # Enrollment is an optional additive capability.  Keep an
+                # unexpected discovery failure inside this boundary so it can
+                # never terminate heartbeat, SSE delivery or normal execution.
+                logger.warning("Room connector enrollment check failed: %s", error)
+                return
             for enrollment in pending[:32]:
-                invitation_id = str(enrollment.get("invitationId") or "").strip()
-                if not invitation_id:
-                    logger.warning("Room connector returned an enrollment without an invitation id")
-                    continue
                 try:
+                    if not isinstance(enrollment, dict):
+                        raise ProtocolError(
+                            "Room connector returned a malformed enrollment",
+                            code="connector_enrollments_malformed",
+                            retryable=False,
+                        )
+                    invitation_id = str(enrollment.get("invitationId") or "").strip()
+                    if not invitation_id:
+                        raise ProtocolError(
+                            "Room connector returned an enrollment without an invitation id",
+                            code="connector_enrollment_malformed",
+                            retryable=False,
+                        )
                     claimed = await self._call(
                         source,
                         lambda api, invitation_id=invitation_id: api.claim_connector_enrollment(
                             invitation_id, source.installation_id,
                         ),
                     )
+                    if not isinstance(claimed, dict):
+                        raise ProtocolError(
+                            "Room connector returned a malformed enrollment claim",
+                            code="connector_enrollment_malformed",
+                            retryable=False,
+                        )
                 except ProtocolError as error:
                     if error.code in {"invitation_consumed", "not_found"}:
                         continue
-                    logger.warning("Room connector could not claim enrollment %s: %s", invitation_id, error)
-                    continue
-                room_id = str(claimed.get("roomId") or "").strip()
-                membership_id = str(claimed.get("membershipId") or "").strip()
-                credential = str(claimed.get("credential") or "").strip()
-                if not room_id or not membership_id or not credential:
-                    raise ProtocolError(
-                        "Room connector enrollment response omitted its durable binding",
-                        code="connector_enrollment_malformed",
+                    logger.warning(
+                        "Room connector could not process enrollment %s: %s",
+                        str(enrollment.get("invitationId") or "").strip()
+                        if isinstance(enrollment, dict) else "<malformed>",
+                        error,
                     )
-                if self._state.binding(room_id) is not None:
-                    logger.warning("Room %s was already bound while its enrollment was claimed", room_id)
                     continue
-                head_seq = int(claimed.get("headSeq") or 0)
-                binding = RoomBinding(
-                    base_url=source.base_url,
-                    room_id=room_id,
-                    membership_id=membership_id,
-                    credential=credential,
-                    credential_expires_at=str(claimed.get("credentialExpiresAt") or ""),
-                    display_name=str(claimed.get("displayName") or source.display_name),
-                    identity_version=int(claimed.get("identityVersion") or source.identity_version),
-                    installation_id=source.installation_id,
-                    cursor=head_seq,
-                    acknowledged_cursor=head_seq,
-                    transport=source.transport,
-                )
-                # Persist the one-time credential before exposing the binding
-                # to any runtime task. update() uses the profile-private 0600
-                # atomic state transaction.
-                update(lambda current, binding=binding: upsert(current, binding))
-                self._state.bindings.append(binding)
-                if not self._stop.is_set() and room_id not in self._tasks:
-                    self._tasks[room_id] = asyncio.create_task(
-                        self._watch(binding, is_reconnect=False),
-                        name=f"synthetic-sociality:{room_id}",
+                except Exception as error:
+                    # Discovery and claim are optional additive work.  A
+                    # hostile or legacy response shape must not escape into
+                    # the heartbeat or watcher task that called this method.
+                    logger.warning(
+                        "Room connector could not process enrollment %s: %s",
+                        str(enrollment.get("invitationId") or "").strip()
+                        if isinstance(enrollment, dict) else "<malformed>",
+                        error,
                     )
-                logger.info("Activated owner-approved Room %s for %s", room_id, binding.display_name)
+                    continue
+                try:
+                    room_id = claimed.get("roomId")
+                    membership_id = claimed.get("membershipId")
+                    credential = claimed.get("credential")
+                    if not all(
+                        isinstance(value, str) and value.strip()
+                        for value in (room_id, membership_id, credential)
+                    ):
+                        raise ProtocolError(
+                            "Room connector enrollment response omitted its durable binding",
+                            code="connector_enrollment_malformed",
+                            retryable=False,
+                        )
+                    room_id = room_id.strip()
+                    membership_id = membership_id.strip()
+                    credential = credential.strip()
+                    head_seq = claimed.get("headSeq", 0)
+                    identity_version = claimed.get("identityVersion", source.identity_version)
+                    credential_expires_at = claimed.get("credentialExpiresAt", "")
+                    display_name = claimed.get("displayName", source.display_name)
+                    if (
+                        type(head_seq) is not int or head_seq < 0
+                        or type(identity_version) is not int or identity_version < 0
+                        or not isinstance(credential_expires_at, str)
+                        or not isinstance(display_name, str)
+                    ):
+                        raise ProtocolError(
+                            "Room connector enrollment response contains malformed binding fields",
+                            code="connector_enrollment_malformed",
+                            retryable=False,
+                        )
+                    if not room_id or not membership_id or not credential:
+                        raise ProtocolError(
+                            "Room connector enrollment response omitted its durable binding",
+                            code="connector_enrollment_malformed",
+                            retryable=False,
+                        )
+                    if self._state.binding(room_id) is not None:
+                        logger.warning("Room %s was already bound while its enrollment was claimed", room_id)
+                        continue
+                    binding = RoomBinding(
+                        base_url=source.base_url,
+                        room_id=room_id,
+                        membership_id=membership_id,
+                        credential=credential,
+                        credential_expires_at=credential_expires_at,
+                        display_name=display_name,
+                        identity_version=identity_version,
+                        installation_id=source.installation_id,
+                        cursor=head_seq,
+                        acknowledged_cursor=head_seq,
+                        transport=source.transport,
+                    )
+                    # Persist the one-time credential before exposing the
+                    # binding to any runtime task. update() uses the
+                    # profile-private 0600 atomic state transaction.
+                    update(lambda current, binding=binding: upsert(current, binding))
+                    self._state.bindings.append(binding)
+                    if not self._stop.is_set() and room_id not in self._tasks:
+                        self._tasks[room_id] = asyncio.create_task(
+                            self._watch(binding, is_reconnect=False),
+                            name=f"synthetic-sociality:{room_id}",
+                        )
+                    logger.info("Activated owner-approved Room %s for %s", room_id, binding.display_name)
+                except Exception as error:
+                    # Contain malformed scalar fields and persistence errors
+                    # as well.  The optional enrollment path must never take
+                    # down an otherwise healthy Room connector lease.
+                    logger.warning(
+                        "Room connector could not activate enrollment %s: %s",
+                        invitation_id,
+                        error,
+                    )
 
     async def _stream_once(self, binding: RoomBinding) -> None:
         loop = asyncio.get_running_loop()

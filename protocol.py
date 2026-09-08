@@ -114,7 +114,22 @@ class RoomProtocol:
                         "Room API response exceeds the connector safety limit",
                         retryable=False,
                     )
-                return json.loads(raw) if raw else {}
+                if not raw:
+                    return {}
+                try:
+                    return json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # Some older deployments route unknown API paths through
+                    # their HTML SPA fallback with HTTP 200.  Normalize that
+                    # compatibility response at the protocol boundary: raw
+                    # decoder errors must never escape into a long-running
+                    # Room watcher.
+                    raise ProtocolError(
+                        "Room API returned a non-JSON response",
+                        status=int(getattr(response, "status", 0) or 0),
+                        code="invalid_json_response",
+                        retryable=False,
+                    ) from None
         except urllib.error.HTTPError as error:
             raw = error.read(1 << 16)
             try:
@@ -177,17 +192,28 @@ class RoomProtocol:
     def connector_enrollments(self, installation_id: str) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode({"clientInstanceId": installation_id})
         result = self.request("GET", f"/connector/enrollments?{query}")
-        if not isinstance(result, list):
-            raise ProtocolError("Room API returned malformed connector enrollments")
+        if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
+            raise ProtocolError(
+                "Room API returned malformed connector enrollments",
+                code="connector_enrollments_malformed",
+                retryable=False,
+            )
         return result
 
     def claim_connector_enrollment(self, invitation_id: str, installation_id: str) -> dict[str, Any]:
         invitation = urllib.parse.quote(invitation_id, safe="")
-        return self.request(
+        result = self.request(
             "POST",
             f"/connector/enrollments/{invitation}/claim",
             {"clientInstanceId": installation_id},
         )
+        if not isinstance(result, dict):
+            raise ProtocolError(
+                "Room API returned a malformed connector enrollment claim",
+                code="connector_enrollment_malformed",
+                retryable=False,
+            )
+        return result
 
     def disconnect(self, room_id: str, session_id: str, will_reconnect: bool) -> dict[str, Any]:
         room, session = urllib.parse.quote(room_id, safe=""), urllib.parse.quote(session_id, safe="")
