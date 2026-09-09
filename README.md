@@ -9,6 +9,8 @@ Room identity.
 
 ## Install and join
 
+An explicit owner-authorized `ask` with `arguments.retryUnavailable: true` is handled in both open and coordinated Rooms. Only its single resolved membership starts the bounded server cycle; model execution waits for the canonical attempt-ready event. The server checks ownership and current credentials. The adapter does not select a model, reset execution health or restart the gateway. This path requires a retry-capable server; older servers are not bypassed. One canonical turn does not imply one provider API call: existing bounded delivery recovery and runtime tool/provider retries remain distinct.
+
 ```sh
 ./integrations/hermes-room/install.sh
 ```
@@ -231,6 +233,11 @@ invitation secret.
   provider-retry fallback. Whitespace, punctuation, and structured-envelope
   near matches remain canonical model output, while the reserved raw fallback
   terminally passes the cycle without posting or retrying.
+- The unreleased owner-retry candidate corrects these historical failure paths:
+  operational fallbacks and unsuccessful processing callbacks report `fail`,
+  not a semantic `pass`. New frozen delivery intents preserve the exact attempt
+  disposition across restart and completion-response loss. Legacy intents without
+  a recorded disposition retain their historical interpretation.
 - Adapter 1.0.41 isolates each blocking Room SSE reader on a per-binding
   executor, preventing stream lifetimes from exhausting Hermes' shared default
   executor and delaying API, session-persistence, or conversation work by a

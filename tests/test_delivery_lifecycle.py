@@ -188,6 +188,133 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_failure_disposition_survives_restart_before_and_after_completion_commit(self):
+        async def exercise(committed):
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            attempt = {"cycle": {"id": "cycle-1", "generation": 3},
+                       "attempt": {"id": "attempt-1", "membershipId": "member-1"}}
+            snapshots, completions, committed_actions = [], [], []
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                def complete_discussion_attempt(self, _room, _cycle, _attempt, payload):
+                    completions.append(copy.deepcopy(payload))
+                    if len(completions) == 1:
+                        if committed:
+                            committed_actions.append(payload["action"])
+                        raise adapter.ProtocolError("lost completion response", retryable=True)
+                    if not committed_actions:
+                        committed_actions.append(payload["action"])
+                    else:
+                        self_test.assertEqual(payload["action"], committed_actions[0])
+                    return {"state": "completed"}
+
+                def post_message(self, *_args, **_kwargs):
+                    raise AssertionError("failure recovery must not post")
+
+            self_test = self
+            api = API()
+
+            def configure(cycle_attempt):
+                instance = configured_instance(binding, cycle_attempt, snapshots)
+                instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+                instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+                instance._inflight_events = set()
+                instance._complete_event = lambda *_args, **_kwargs: asyncio.sleep(0)
+                instance.handle_message = lambda *_args, **_kwargs: self.fail("recovery invoked model")
+                return instance
+
+            instance = configure(attempt)
+            with self.assertRaises(adapter.ProtocolError):
+                await instance._send_final(binding.room_id, adapter._dispatch_source_ref("evt-5", "first"),
+                                          "Sorry, I encountered an unexpected error.\n"
+                                          "Try again or use /reset to start a fresh session.")
+            self.assertEqual(snapshots[-1]["evt-5"]["selected"]["attempt_action"], "fail")
+            # Fresh adapter: no original operational metadata or in-memory attempt.
+            restarted = configure(None)
+            restarted._cycle_attempts.clear()
+            self.assertFalse(await restarted._dispatch_room_event(
+                binding, {"id": "evt-5", "seq": 5, "payload": {"body": "try again"}}, "restart"))
+            self.assertEqual([entry["action"] for entry in completions], ["fail", "fail"])
+            self.assertEqual(committed_actions, ["fail"])
+            self.assertEqual(restarted._terminal_results[
+                adapter._dispatch_source_ref("evt-5", "restart")]["status"], "failed")
+
+        for committed in (False, True):
+            with self.subTest(completion_committed=committed):
+                asyncio.run(exercise(committed))
+
+    def test_explicit_retry_in_open_and_coordinated_rooms_only_starts_target_cycle(self):
+        async def exercise(mode):
+            binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential", cursor=4, acknowledged_cursor=4)
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            for name, value in {
+                "_inflight_events": set(), "_event_seq": {}, "_event_epoch": {},
+                "_latest_source": {}, "_run_for_event": {}, "_activity_seq": {},
+                "_context_acknowledged_sources": set(), "_cycle_attempts": {},
+                "_cycle_response_sources": {}, "_source_coordination_modes": {},
+                "_open_reply_recipients": {}, "_queued_events": {},
+                "_active_dispatch_rooms": {}, "_event_dispatch_generation": {},
+                "_receive_locks": {}, "_ledger_locks": {}, "_terminal_sources": {},
+                "_terminal_results": {}, "_attempt_renewal_tasks": {},
+            }.items():
+                setattr(instance, name, value)
+            instance._persist_binding = lambda _binding: True
+            instance._state = types.SimpleNamespace(binding=lambda _room_id: binding)
+            starts = []
+            completed = []
+
+            class API:
+                def room_state(self, _room):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}, "roster": [
+                        {"membershipId": member, "displayName": member, "role": "participant_agent", "status": "active", "executionReady": False}
+                        for member in ("summary-agent", "member-1")
+                    ]}
+                def room_policy(self, _room):
+                    return {"coordinationMode": mode, "summaryCoordinatorMembershipId": "summary-agent"}
+                def start_discussion_cycle(self, _room, request):
+                    starts.append(request)
+                    return {"id": "retry-cycle"}
+                def activity(self, *_args):
+                    return {"accepted": True}
+
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+            instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
+            instance.handle_message = lambda *_args: self.fail("retry source must wait for canonical ready event")
+            event = {"id": "retry-source", "seq": 5, "type": "human.command", "actorId": "human-owner", "actorRole": "human_owner", "payload": {"command": {
+                "command": "ask", "resolvedTargetMembershipIds": ["member-1"], "arguments": {"instruction": "Try once", "retryUnavailable": True},
+            }}}
+            await instance._consume(binding, event)
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(starts[0]["roster"], [{"membershipId": "member-1", "displayName": "member-1"}])
+            self.assertEqual(starts[0]["sourceEventId"], "retry-source")
+            self.assertTrue(completed)
+
+        for mode in ("open", "coordinated"):
+            with self.subTest(mode=mode):
+                asyncio.run(exercise(mode))
+
+    def test_processing_failure_reports_fail_never_deliberate_pass(self):
+        async def run():
+            binding = lifecycle_binding()
+            instance = configured_instance(binding, {"cycle": {"id": "cycle-1", "generation": 3}, "attempt": {"id": "attempt-1"}}, [])
+            instance._state = types.SimpleNamespace(binding=lambda _room_id: binding)
+            instance._inflight_events = {"evt-5"}
+            actions, terminals = [], []
+            instance._complete_cycle_attempt = lambda _b, _a, action: asyncio.sleep(0, result=actions.append(action))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=terminals.append(kwargs))
+            instance._dispatch_next_queued = lambda *_args: asyncio.sleep(0)
+            event = adapter.MessageEvent(message_id=adapter._dispatch_source_ref("evt-5", "g1"), source=types.SimpleNamespace(chat_id=binding.room_id), raw_message={"id": "evt-5", "seq": 5, "_dispatchGeneration": "g1"})
+            await instance.on_processing_complete(event, "failure")
+            self.assertEqual(actions, ["fail"])
+            self.assertEqual(terminals[0]["terminal_status"], "failed")
+        asyncio.run(run())
+
     def test_cycle_attempt_promotes_canonical_source_message_to_current_turn(self):
         ready = {
             "id": "ready-1", "type": "discussion.cycle_attempt_ready",
@@ -2101,7 +2228,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('{"action":"skip"}', instruction)
         self.assertNotIn('{"action":"contribute"', instruction)
 
-    def test_room_origin_gateway_generic_error_passes_cycle_without_post_or_retry(self):
+    def test_room_origin_gateway_generic_error_fails_cycle_without_post_or_retry(self):
         async def run():
             binding = lifecycle_binding()
             binding.delivery_intents.clear()
@@ -2158,7 +2285,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertEqual(calls, {"room_state": 1, "complete": 1, "post": 0})
             self.assertEqual(
                 completions,
-                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "pass"})],
+                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail"})],
             )
             self.assertEqual(activity[-1]["status"], "failed")
             self.assertEqual(
@@ -2214,7 +2341,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_room_origin_provider_retry_fallback_passes_cycle_without_post(self):
+    def test_room_origin_provider_retry_fallback_fails_cycle_without_post(self):
         async def run():
             binding = lifecycle_binding()
             binding.delivery_intents.clear()
@@ -2268,7 +2395,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertEqual(calls, {"room_state": 1, "complete": 1, "post": 0})
             self.assertEqual(
                 completions,
-                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "pass"})],
+                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail"})],
             )
             self.assertNotIn("evt-5", instance._cycle_attempts)
 

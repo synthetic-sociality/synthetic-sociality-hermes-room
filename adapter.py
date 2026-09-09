@@ -1290,6 +1290,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         observed_seq: int,
         observed_epoch_id: str,
         cycle_attempt: dict[str, Any] | None,
+        attempt_action: str = "pass",
+        terminal_reason: str = "model_skip",
     ) -> dict[str, Any]:
         """Durably freeze model output and all stable delivery inputs."""
         intent = binding.delivery_intents.setdefault(source_id, {})
@@ -1331,6 +1333,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         selected = {
             "state": "selected",
             "action": "post" if body is not None else "skip",
+            "attempt_action": attempt_action,
+            "terminal_reason": terminal_reason,
             "source_event_id": source_id,
             "source_seq": int(
                 getattr(self, "_event_seq", {}).get(binding.room_id, {}).get(source_id, 0)
@@ -1665,6 +1669,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             selected = self._select_delivery_intent(
                 binding, source_id, body, responds_to_id, open_recipients,
                 coordination_mode, observed, observed_epoch, cycle_attempt,
+                attempt_action=(
+                    operational_outcome["attempt_action"] if typed_operational_outcome
+                    else ("fail" if gateway_operational_error else "pass")
+                ),
+                terminal_reason=(
+                    f"host_operational_outcome:{operational_outcome['layer']}:{operational_outcome['code']}"
+                    if typed_operational_outcome
+                    else ("legacy_gateway_operational_error" if gateway_operational_error else "model_skip")
+                ),
             )
         except ProtocolError as error:
             return SendResult(success=False, error=str(error), retryable=error.retryable)
@@ -1684,16 +1697,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "attempt": {"id": str(selected_cycle["attempt_id"])},
             }
         if body is None:
+            # Frozen intent, not the reconstructed skip envelope, owns replay.
+            # Legacy intents had no disposition; preserve their recorded format.
+            attempt_action = str(selected.get("attempt_action") or "pass")
+            if attempt_action not in {"pass", "fail", "decline"}:
+                raise ProtocolError("Invalid persisted attempt disposition", code="invalid_intent", retryable=False)
+            terminal_status = "skipped" if attempt_action == "pass" else "failed"
             if cycle_attempt:
-                attempt_action = (
-                    operational_outcome["attempt_action"]
-                    if typed_operational_outcome
-                    else (
-                        "fail"
-                        if content in _GATEWAY_NONRETRYABLE_OPERATIONAL_ERRORS
-                        else "pass"
-                    )
-                )
                 await self._complete_cycle_attempt(binding, cycle_attempt, attempt_action)
                 await self._stop_attempt_renewal(source_id)
                 self._cycle_attempts.pop(source_id, None)
@@ -1702,21 +1712,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding,
                 source_id,
                 "terminal",
-                status="failed" if typed_operational_outcome or gateway_operational_error else "skipped",
+                status=terminal_status,
                 suppress_errors=True,
             )
             getattr(self, "_source_coordination_modes", {}).pop(source_id, None)
             getattr(self, "_open_reply_recipients", {}).pop(source_id, None)
             return self._successful_terminal(
                 source_ref, dispatch_generation, f"skipped:{source_id}",
-                terminal_status=(
-                    "failed" if typed_operational_outcome or gateway_operational_error else "skipped"
-                ),
-                reason=(
-                    f"host_operational_outcome:{operational_outcome['layer']}:{operational_outcome['code']}"
-                    if typed_operational_outcome
-                    else ("legacy_gateway_operational_error" if gateway_operational_error else "model_skip")
-                ),
+                terminal_status=terminal_status,
+                reason=str(selected.get("terminal_reason") or "model_skip"),
             )
         event: dict[str, Any] | None = None
         canonical_recorded = False
@@ -3236,7 +3240,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 self._source_coordination_modes = modes
             modes[event_id] = coordination_mode
 
-        if coordination_mode == "open" and event_type == "human.command":
+        command = payload.get("command") or {}
+        retry_targets = command.get("resolvedTargetMembershipIds") or []
+        explicit_retry = (
+            human_source and event_type == "human.command"
+            and command.get("command") == "ask"
+            and (command.get("arguments") or {}).get("retryUnavailable") is True
+            and retry_targets == [binding.membership_id]
+            and not command.get("targetSelectors")
+        )
+        if coordination_mode == "open" and event_type == "human.command" and not explicit_retry:
             # Structured bounded-discussion commands belong to coordinated
             # rooms. Ordinary open-room prose follows the earlier free path.
             await self._complete_event(
@@ -3869,22 +3882,22 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 and (cycle_attempt := getattr(self, "_cycle_attempts", {}).get(event_id))
             ):
                 try:
-                    await self._complete_cycle_attempt(binding, cycle_attempt, "pass")
+                    await self._complete_cycle_attempt(binding, cycle_attempt, "fail")
                 except ProtocolError as error:
                     if error.code != "cycle_superseded":
                         raise
                 getattr(self, "_cycle_attempts", {}).pop(event_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(event_id, None)
                 await self._publish(
-                    binding, event_id, "terminal", status="skipped", suppress_errors=True,
+                    binding, event_id, "terminal", status="failed", suppress_errors=True,
                 )
                 terminal_completion = True
                 await self._complete_event(
                     binding,
                     seq,
-                    terminal_status="skipped",
+                    terminal_status="failed",
                     source_id=event_id,
-                    reason="processing_failure_cycle_pass",
+                    reason="processing_failure_cycle_fail",
                 )
         except Exception as error:
             completion_error = error
