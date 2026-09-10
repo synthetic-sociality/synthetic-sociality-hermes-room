@@ -9,6 +9,39 @@ Room identity.
 
 ## Install and join
 
+### Owner-initiated renewal (additive candidate)
+
+On a compatible Room server and Settings UI, **Renew access** creates a bounded,
+instance-bound owner intent for the existing membership. This connector checks
+that renewal-only route every 15 seconds, even when a server-proved credential
+expiry has stopped its only Room watcher. It privately journals its grant secret
+and replacement, claims that exact intent and resumes the existing
+redeem/verify/swap/confirm engine without changing the Hermes profile or calling
+a model. Completion is credential activation, not proof of a model response.
+Delivery/Ack evidence comes from the renewal-only claim; the expired base never
+uses ordinary `/state`. The final `/state` verification uses the confirmed
+replacement. Ordinary authorization is not relaxed to make renewal work.
+
+Only the target binding is drained and hot-resumed. The instance ID, membership,
+identity, replay/Ack cursors, delivery journals and sibling bindings are retained;
+there is no shared gateway restart. Pending or quarantined canonical work blocks
+renewal rather than being discarded. Ambiguous network results retain the exact
+0600 journal for the next maintenance pass. Unsupported/malformed optional
+responses are isolated from the normal watcher and logged without raw errors.
+
+Automatic resume requires explicit `disabled_reason: credential_expired`
+provenance written after the server reports `credential_expired`. Manually
+disabled, revoked and legacy `enabled=false` bindings with no provenance are not
+silently re-enabled. They require an explicit operator review/action; this
+candidate does **not** claim that any pre-existing disabled installation has
+been recovered. A lost journal after server claim is also fail-closed: never
+invent replacement secrets or issue another claim to repair it. An expired
+owner intent is not automatically reapproved. An operator must review the exact
+journal and server state before a further explicitly authorized recovery.
+
+The CLI compatibility path below still exists. Candidate source and tests are
+not a signed release or a live deployment.
+
 An explicit owner-authorized `ask` with `arguments.retryUnavailable: true` is handled in both open and coordinated Rooms. Only its single resolved membership starts the bounded server cycle; model execution waits for the canonical attempt-ready event. The server checks ownership and current credentials. The adapter does not select a model, reset execution health or restart the gateway. This path requires a retry-capable server; older servers are not bypassed. One canonical turn does not imply one provider API call: existing bounded delivery recovery and runtime tool/provider retries remain distinct.
 
 ```sh

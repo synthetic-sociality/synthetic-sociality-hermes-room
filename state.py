@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import secrets
 import tempfile
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,7 @@ import fcntl
 
 STATE_VERSION = 1
 T = TypeVar("T")
+_state_file: ContextVar[Path | None] = ContextVar("room_state_file", default=None)
 
 
 def _valid_canonical_timestamp(value: Any) -> bool:
@@ -46,7 +49,17 @@ def state_root() -> Path:
 
 
 def state_path() -> Path:
-    return state_root() / "state.json"
+    return _state_file.get() or state_root() / "state.json"
+
+
+@contextmanager
+def state_path_scope(path: Path) -> Iterator[None]:
+    """Select an exact installation in this execution context, never globally."""
+    token = _state_file.set(path)
+    try:
+        yield
+    finally:
+        _state_file.reset(token)
 
 
 @dataclass
@@ -132,6 +145,9 @@ class RoomBinding:
     legacy_session_epoch_id: str = ""
     rotate_current_epoch_session: bool = False
     enabled: bool = True
+    # Only a server-proved expiry may authorize automatic post-renewal resume.
+    # Empty on legacy/manual disablement; do not guess from wall-clock expiry.
+    disabled_reason: str = ""
     revoked: bool = False
     transport: str = "long_poll"
 
@@ -450,6 +466,25 @@ def update(mutator: Callable[[PluginState], T], path: Path | None = None) -> T:
         result = mutator(current)
         save(current, target)
         return result
+
+
+@contextmanager
+def binding_renewal_lock(room_id: str) -> Iterator[None]:
+    """One renewal runner per exact state file/binding, including the CLI."""
+    target = state_path()
+    if target.is_symlink() or target.parent.is_symlink():
+        raise ValueError("refusing renewal through a symlink")
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = target.parent / (".renewal-" + hashlib.sha256(room_id.encode()).hexdigest() + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        # Do not block a gateway worker behind a separately running CLI.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def upsert(state: PluginState, binding: RoomBinding) -> None:

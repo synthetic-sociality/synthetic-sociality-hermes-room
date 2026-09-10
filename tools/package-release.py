@@ -26,6 +26,7 @@ PAYLOAD = (
     "origin_context.py",
     "plugin.yaml",
     "protocol.py",
+    "renewal.py",
     "room_tools.py",
     "state.py",
     "tests/__init__.py",
@@ -38,6 +39,7 @@ PAYLOAD = (
     "tests/test_context.py",
     "tests/test_delivery_lifecycle.py",
     "tests/test_protocol_artifacts.py",
+    "tests/test_credential_renewal.py",
 )
 
 

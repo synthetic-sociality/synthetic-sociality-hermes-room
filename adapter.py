@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
-from . import cli
+from . import cli, renewal
 from .context import canonical_room_context as _canonical_room_context
 from .context import recent_room_messages as _recent_room_messages
 from .context import room_actor_name as _room_actor_name
@@ -33,7 +33,7 @@ from .protocol import (
     stable_key,
 )
 from .room_tools import ROOM_CONTEXT_SCHEMA, ROOM_POST_SCHEMA, room_context, room_post
-from .state import PluginState, RoomBinding, load, update, upsert
+from .state import PluginState, RoomBinding, load, state_path, update, upsert
 
 
 def _epoch_thread_id(epoch_id: str) -> str:
@@ -716,7 +716,8 @@ def check_requirements() -> bool:
 
 def validate_config(_config: PlatformConfig) -> bool:
     try:
-        return any(binding.enabled and not binding.revoked for binding in load().bindings)
+        return any((binding.enabled and not binding.revoked) or renewal.eligible(binding)
+                   for binding in load().bindings)
     except Exception:
         return False
 
@@ -799,21 +800,33 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._open_reply_recipients: dict[str, list[str]] = {}
         self._message_contract_checked: set[str] = set()
         self._enrollment_lock = asyncio.Lock()
+        self._renewal_task: asyncio.Task | None = None
+        self._renewing_rooms: set[str] = set()
+        self._renewal_retry_after: dict[str, float] = {}
+        self._state_file = state_path()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         self._stop.clear()
+        if any(renewal.eligible(binding) for binding in self._state.bindings):
+            if self._renewal_task is None or self._renewal_task.done():
+                self._renewal_task = asyncio.create_task(self._renewal_loop(), name="room-renewal-maintenance")
         for binding in self._state.bindings:
-            if binding.enabled and not binding.revoked and binding.room_id not in self._tasks:
+            if binding.enabled and not binding.revoked and not binding.credential_rotation and binding.room_id not in self._tasks:
                 self._tasks[binding.room_id] = asyncio.create_task(
                     self._watch(binding, is_reconnect=is_reconnect),
                     name=f"synthetic-sociality:{binding.room_id}",
                 )
-        if not self._tasks:
+        if not self._tasks and self._renewal_task is None:
             return False
         return True
 
     async def disconnect(self) -> None:
         self._stop.set()
+        maintenance = getattr(self, "_renewal_task", None)
+        if maintenance is not None:
+            maintenance.cancel()
+            await asyncio.gather(maintenance, return_exceptions=True)
+            self._renewal_task = None
         for task in self._tasks.values():
             task.cancel()
         for task in self._heartbeat_tasks.values():
@@ -2787,6 +2800,73 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         finally:
             self._heartbeat_tasks.pop(binding.room_id, None)
 
+    async def _renewal_loop(self) -> None:
+        """Bounded renewal discovery even when the only credential has expired."""
+        while not self._stop.is_set():
+            try:
+                for binding in load(self._state_file).bindings:
+                    if renewal.eligible(binding):
+                        await self._maintain_renewal(binding)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Optional old routes can return HTML 200, malformed JSON or
+                # network failures. Never log raw errors/HTTP bodies here.
+                logger.warning("Room renewal maintenance unavailable; existing journals retained")
+            await asyncio.sleep(15)
+
+    async def _maintain_renewal(self, binding: RoomBinding) -> None:
+        room_id = binding.room_id
+        if self._renewal_retry_after.get(room_id, 0) > time.monotonic():
+            return
+        try:
+            if room_id in self._active_dispatch_rooms or not renewal.quiescent(binding):
+                return
+            intent = None
+            if not binding.credential_rotation:
+                intent = await asyncio.to_thread(renewal.discover, binding)
+                if intent is None:
+                    return
+            self._renewing_rooms.add(room_id)
+            self._stream_generations.pop(room_id, None)
+            tasks = [task for task in (self._tasks.get(room_id), self._heartbeat_tasks.get(room_id)) if task]
+            for task in tasks:
+                task.cancel()
+            # _call drains its bounded worker even when its asyncio caller is
+            # cancelled. SSE callbacks are independently generation-fenced.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            receive_lock = self._receive_locks.setdefault(room_id, asyncio.Lock())
+            async with receive_lock:
+                latest = load(self._state_file).binding(room_id)
+                if (latest is None or not renewal.eligible(latest) or not renewal.quiescent(latest)
+                        or room_id in self._active_dispatch_rooms
+                        or not self._same_generation(latest, binding)):
+                    return
+                worker = asyncio.create_task(asyncio.to_thread(renewal.resume, self._state_file, room_id, intent))
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    # Do not leave an unowned writer racing gateway shutdown.
+                    await asyncio.gather(worker, return_exceptions=True)
+                    raise
+                self._renewal_retry_after.pop(room_id, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._renewal_retry_after[room_id] = time.monotonic() + 60
+            logger.warning("Room %s renewal needs attention; exact journal retained", room_id)
+        finally:
+            if room_id in self._renewing_rooms:
+                self._renewing_rooms.discard(room_id)
+                latest = load(self._state_file).binding(room_id)
+                if latest is not None:
+                    upsert(self._state, latest)
+                    if (not self._stop.is_set() and latest.enabled and not latest.revoked
+                            and not latest.credential_rotation and room_id not in self._tasks):
+                        self._tasks[room_id] = asyncio.create_task(
+                            self._watch(latest, is_reconnect=True), name=f"synthetic-sociality:{room_id}",
+                        )
+
     async def _accept_connector_enrollments(self, source: RoomBinding) -> None:
         """Durably activate owner-approved Rooms for this exact installation."""
         lock = getattr(self, "_enrollment_lock", None)
@@ -2988,6 +3068,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._consume_locked(binding, event)
 
     async def _consume_locked(self, binding: RoomBinding, event: dict[str, Any]) -> None:
+        if binding.room_id in getattr(self, "_renewing_rooms", set()):
+            return
         seq = int(event.get("seq") or 0)
         if seq <= binding.acknowledged_cursor:
             return
@@ -4308,7 +4390,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _refresh_binding(self, binding: RoomBinding) -> bool:
         """Observe CLI lifecycle changes made by another process."""
         latest = load().binding(binding.room_id)
-        if latest is not None and latest.enabled and not latest.revoked and self._same_generation(latest, binding):
+        if latest is not None and latest.enabled and not latest.revoked and not latest.credential_rotation and self._same_generation(latest, binding):
             return True
         binding.enabled = False
         if binding.connector_session_id and not binding.revoked:
@@ -4351,17 +4433,21 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             latest is not None
             and latest.enabled
             and not latest.revoked
+            and not latest.credential_rotation
+            and binding.room_id not in getattr(self, "_renewing_rooms", set())
             and self._same_generation(latest, binding)
         )
 
     def _persist_binding(self, binding: RoomBinding) -> bool:
         """Persist runtime fields without a cross-process lost-update window."""
+        if binding.room_id in getattr(self, "_renewing_rooms", set()):
+            return False
         def merge(latest: PluginState) -> bool:
             existing = latest.binding(binding.room_id)
             if existing is None:
                 return False
             same_generation = self._same_generation(existing, binding)
-            if not same_generation or not existing.enabled or existing.revoked:
+            if not same_generation or not existing.enabled or existing.revoked or existing.credential_rotation:
                 binding.enabled = existing.enabled
                 binding.revoked = existing.revoked
                 return False
@@ -4495,7 +4581,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 raise
 
     async def _call(self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any]) -> Any:
-        return await asyncio.to_thread(operation, RoomProtocol(binding.base_url, binding.credential))
+        if binding.room_id in getattr(self, "_renewing_rooms", set()):
+            raise ProtocolError("Binding paused for credential renewal", code="credential_renewal_pending", retryable=True)
+        worker = asyncio.create_task(asyncio.to_thread(operation, RoomProtocol(binding.base_url, binding.credential)))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
 
     async def _stream_call(
         self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any],
@@ -4534,6 +4627,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if existing is not None and self._same_generation(existing, binding):
                 existing.revoked = True
                 existing.enabled = False
+                existing.disabled_reason = "credential_revoked"
                 existing.connector_session_id = ""
             return latest
 
@@ -4542,6 +4636,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _expire(self, binding: RoomBinding) -> None:
         """Stop an expired binding without turning expiry into revocation."""
         binding.enabled = False
+        binding.disabled_reason = "credential_expired"
         binding.connector_session_id = ""
         _connected_rooms.discard(binding.room_id)
 
@@ -4552,6 +4647,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # credential_revoked result for this generation. Expiry is
                 # weaker evidence and must never clear that terminal marker.
                 binding.revoked = existing.revoked
+                if existing.enabled or existing.disabled_reason == "credential_expired":
+                    existing.disabled_reason = "credential_expired"
                 existing.enabled = False
                 existing.connector_session_id = ""
             return latest

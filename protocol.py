@@ -231,12 +231,25 @@ class RoomProtocol:
 
     def request_credential_renewal(
         self, room_id: str, request_id: str, grant_secret_hash: str,
+        *, client_instance_id: str = "",
     ) -> dict[str, Any]:
         room = urllib.parse.quote(room_id, safe="")
         return self.request(
             "POST", f"/rooms/{room}/credential-renewal-requests",
-            {"requestId": request_id, "grantSecretHash": grant_secret_hash},
+            {"requestId": request_id, "grantSecretHash": grant_secret_hash,
+             **({"clientInstanceId": client_instance_id} if client_instance_id else {})},
         )
+
+    def credential_renewal_intent(self, room_id: str, client_instance_id: str) -> dict[str, Any] | None:
+        room = urllib.parse.quote(room_id, safe="")
+        query = urllib.parse.urlencode({"clientInstanceId": client_instance_id})
+        result = self.request("GET", f"/rooms/{room}/credential-renewal-intent?{query}")
+        if not isinstance(result, dict) or "request" not in result:
+            raise ProtocolError("Invalid renewal intent response", code="renewal_intent_malformed", retryable=False)
+        intent = result["request"]
+        if intent is not None and (not isinstance(intent, dict) or intent.get("state") != "owner_requested"):
+            raise ProtocolError("Invalid renewal intent state", code="renewal_intent_malformed", retryable=False)
+        return intent
 
     def credential_renewal_request(self, room_id: str, request_id: str) -> dict[str, Any]:
         room = urllib.parse.quote(room_id, safe="")

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .protocol import ProtocolError, RoomProtocol, parse_invitation_url, stable_key
-from .state import RoomBinding, load, remove, update, upsert
+from .state import RoomBinding, binding_renewal_lock, load, remove, update, upsert
 
 
 LEGACY_IDEMPOTENCY_MISMATCH_ERROR = "idempotency key payload mismatch"
@@ -200,7 +200,13 @@ def _join(args: argparse.Namespace) -> int:
         cursor=head_seq,
         acknowledged_cursor=head_seq,
     )
-    update(lambda current: upsert(current, binding))
+    def persist_join(current):
+        existing = current.binding(binding.room_id)
+        if existing is not None and existing.credential_rotation:
+            raise ValueError("cannot replace a binding with an unresolved credential-renewal journal")
+        upsert(current, binding)
+
+    update(persist_join)
     print(f"Joined {review.get('roomTitle') if review else binding.room_id} as {proposed}.")
     print("Restart the Hermes gateway to activate the Room connector.")
     return 0
@@ -262,7 +268,14 @@ def _status() -> int:
 
 
 def _leave(room_id: str) -> int:
+    with binding_renewal_lock(room_id):
+        return _leave_unlocked(room_id)
+
+
+def _leave_unlocked(room_id: str) -> int:
     binding = load().binding(room_id)
+    if binding and binding.credential_rotation:
+        raise ValueError("cannot remove a binding with an unresolved credential-renewal journal")
     if binding and binding.connector_session_id and not binding.revoked:
         try:
             RoomProtocol(binding.base_url, binding.credential).disconnect(room_id, binding.connector_session_id, False)
@@ -291,6 +304,7 @@ def _toggle(room_id: str, enabled: bool) -> int:
         if latest is None:
             raise ValueError(f"room {room_id!r} is not configured")
         latest.enabled = enabled
+        latest.disabled_reason = "" if enabled else "manual"
 
     update(set_enabled)
     if enabled:
@@ -913,7 +927,14 @@ def _reconcile_terminal_lifecycle(args: argparse.Namespace) -> int:
     return 0
 
 
-def _renew(room_id: str, *, request_owner: bool = False) -> int:
+def _renew(room_id: str, *, request_owner: bool = False, owner_intent: dict | None = None,
+           report=print) -> int:
+    with binding_renewal_lock(room_id):
+        return _renew_locked(room_id, request_owner=request_owner, owner_intent=owner_intent, report=report)
+
+
+def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: dict | None = None,
+                  report=print) -> int:
     """Crash-safely rotate one room-bound credential without rejoining.
 
     The owner creates a grant for the exact existing membership. The grant ID
@@ -926,6 +947,22 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
     initial = load().binding(room_id)
     if initial is None:
         raise ValueError(f"room {room_id!r} is not configured")
+    if owner_intent is not None:
+        if (
+            not _canonical_renewal_secret(str(owner_intent.get("requestId") or ""))
+            or owner_intent.get("roomId") != initial.room_id
+            or owner_intent.get("membershipId") != initial.membership_id
+            or owner_intent.get("state") != "owner_requested"
+            or not isinstance(owner_intent.get("displayName"), str)
+            or not owner_intent["displayName"]
+            or type(owner_intent.get("identityVersion")) is not int
+            or owner_intent["identityVersion"] < 1
+            or type(owner_intent.get("baseCredentialGeneration")) is not int
+            or owner_intent["baseCredentialGeneration"] < 1
+            or not initial.installation_id
+            or initial.revoked
+        ):
+            raise ValueError("owner renewal intent does not match this binding")
     confirmed_at_entry = str(initial.credential_rotation.get("phase") or "") == "confirmed"
     false_revoked_recovery = bool(initial.credential_rotation.get("recover_false_revoked"))
     if initial.revoked and not (false_revoked_recovery or (request_owner and not initial.credential_rotation)):
@@ -934,7 +971,7 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
         grant_id = ""
         request_id = ""
         if request_owner:
-            request_id = _new_renewal_secret()
+            request_id = str(owner_intent["requestId"]) if owner_intent else _new_renewal_secret()
             grant_secret = _new_renewal_secret()
         else:
             grant_id = getpass.getpass("Renewal grant ID (hidden): ").strip()
@@ -951,6 +988,13 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
                 raise ValueError(f"room {room_id!r} is not configured")
             if binding.credential_rotation:
                 return
+            if owner_intent and any(getattr(binding, field) != getattr(initial, field) for field in (
+                    "base_url", "membership_id", "credential", "installation_id", "display_name", "identity_version")):
+                raise ValueError("renewal target changed during intent discovery")
+            if owner_intent:
+                from .renewal import eligible, quiescent
+                if not eligible(binding) or not quiescent(binding):
+                    raise ValueError("renewal target is no longer eligible and quiescent")
             binding.credential_rotation = {
                 "phase": "requesting_owner" if request_owner else "prepared",
                 "grant_id": grant_id,
@@ -965,6 +1009,18 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
                 binding.credential_rotation["recover_false_revoked"] = True
             if request_id:
                 binding.credential_rotation["request_id"] = request_id
+            if owner_intent:
+                binding.credential_rotation["owner_initiated"] = True
+                binding.credential_rotation["client_instance_id"] = binding.installation_id
+                binding.credential_rotation["resume_after_expiry"] = (
+                    not binding.enabled and binding.disabled_reason == "credential_expired"
+                )
+                binding.credential_rotation["protected_snapshot"] = _renewal_protected_fields(binding)
+                binding.credential_rotation["owner_intent_identity"] = {
+                    field: owner_intent[field] for field in (
+                        "requestId", "roomId", "membershipId", "displayName", "identityVersion", "baseCredentialGeneration"
+                    )
+                }
 
         update(prepare)
         del grant_secret, replacement
@@ -985,7 +1041,8 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
         raise ValueError("credential-renewal journal contains malformed secret material")
 
     protocol = RoomProtocol(binding.base_url, str(journal["base_credential"]))
-    if phase in {"requesting_owner", "prepared"} and not journal.get("server_delivery_snapshot"):
+    if (phase in {"requesting_owner", "prepared"} and not journal.get("server_delivery_snapshot")
+            and not journal.get("owner_initiated")):
         # The connector's local replay cursor and the server's delivered
         # high-water are distinct. An audited evidence read may legitimately
         # make delivered greater than the still-unprocessed local cursor. Bind
@@ -999,11 +1056,22 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
         status = protocol.request_credential_renewal(
             room_id, request_id,
             hashlib.sha256(str(journal["grant_secret"]).encode("utf-8")).hexdigest(),
+            **({"client_instance_id": str(journal["client_instance_id"])} if journal.get("owner_initiated") else {}),
         )
         journal = _record_owner_identity_status(room_id, journal, status)
+        if journal.get("owner_initiated") and not journal.get("server_delivery_snapshot"):
+            # Expired credentials deliberately cannot read ordinary /state.
+            # The exact renewal-only claim returns canonical cursor metadata,
+            # captured after this connector has drained the target binding.
+            if any(type(status.get(field)) is not int or status[field] < 0
+                   for field in ("deliveredSeq", "acknowledgedSeq")):
+                raise ValueError("renewal claim omitted canonical delivery counters")
+            journal = _record_renewal_delivery_snapshot(room_id, journal, {
+                "roomId": status.get("roomId"), "roster": [status],
+            })
         state = str(status.get("state") or "")
         if state == "requested":
-            print(
+            report(
                 f"{room_id} renewal approval requested for the existing membership; "
                 "the room owner must approve it in Room settings. Rerun this command afterwards."
             )
@@ -1017,7 +1085,7 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
             journal = _record_owner_identity_status(room_id, journal, status)
             state = str(status.get("state") or "")
             if state == "requested":
-                print(
+                report(
                     f"{room_id} renewal is still awaiting owner approval; "
                     "rerun this command after approval."
                 )
@@ -1044,6 +1112,8 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
             journal = _record_owner_identity_status(room_id, journal, status)
             request_state = str(status.get("state") or "")
             if request_state in {"expired", "requested"}:
+                if journal.get("owner_initiated"):
+                    raise ValueError("owner-initiated renewal expired; retain journal for explicit owner review")
                 def await_reapproval(current):
                     latest = _same_rotation(current, room_id, journal)
                     latest.credential_rotation["phase"] = "requesting_owner"
@@ -1052,7 +1122,7 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
                     latest.credential_rotation.pop("grant_expires_at", None)
 
                 update(await_reapproval)
-                print(
+                report(
                     f"{room_id} renewal approval expired before activation; "
                     "the exact journaled request will be presented to the room owner again. Rerun this command."
                 )
@@ -1154,6 +1224,10 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
                 latest.revoked = False
                 latest.enabled = True
                 allowed.update({"revoked", "enabled"})
+            if journal.get("resume_after_expiry") and latest.disabled_reason == "credential_expired":
+                latest.enabled = True
+                latest.disabled_reason = ""
+                allowed.update({"enabled", "disabled_reason"})
             after = _binding_without_rotation_fields(latest)
             drift = {key for key in before if before[key] != after[key]}
             if not drift.issubset(allowed):
@@ -1168,8 +1242,8 @@ def _renew(room_id: str, *, request_owner: bool = False) -> int:
         if confirmed_at_entry and request_owner:
             # An explicit new owner request after a previously completed
             # rotation may start immediately against the now-active base.
-            return _renew(room_id, request_owner=True)
-        print(
+            return _renew_locked(room_id, request_owner=True, report=report)
+        report(
             f"{room_id} credential renewed for the existing membership; "
             "canonical identity and cursors are verified. Restart the Hermes gateway."
         )
@@ -1230,9 +1304,10 @@ def _owner_identity_reconciliation(binding: RoomBinding, journal: dict, response
 
 def _record_owner_identity_status(room_id: str, journal: dict, response: dict) -> dict:
     def persist(latest_state):
-        latest = latest_state.binding(room_id)
-        if latest is None:
-            raise ValueError(f"room {room_id!r} is not configured")
+        latest = _same_rotation(latest_state, room_id, journal)
+        for field, expected in (journal.get("owner_intent_identity") or {}).items():
+            if response.get(field) != expected:
+                raise ValueError("owner renewal response changed the frozen intent identity")
         for field in ("request_id", "grant_secret", "replacement_credential", "base_credential"):
             if latest.credential_rotation.get(field) != journal.get(field):
                 raise ValueError("credential-renewal journal changed concurrently")
@@ -1347,7 +1422,17 @@ def _same_rotation(current, room_id: str, journal: dict) -> RoomBinding:
     for field in ("grant_id", "grant_secret", "replacement_credential", "base_credential"):
         if latest.credential_rotation.get(field) != journal.get(field):
             raise ValueError("credential-renewal journal changed concurrently")
+    protected = journal.get("protected_snapshot")
+    if protected is not None and protected != _renewal_protected_fields(latest):
+        raise ValueError("protected binding state changed during credential renewal")
     return latest
+
+
+def _renewal_protected_fields(binding: RoomBinding) -> dict[str, object]:
+    snapshot = _binding_without_rotation_fields(binding)
+    snapshot.pop("credential", None)
+    snapshot.pop("credential_expires_at", None)
+    return snapshot
 
 
 def _binding_without_rotation_fields(binding: RoomBinding) -> dict[str, object]:
