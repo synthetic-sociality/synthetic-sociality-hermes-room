@@ -3145,6 +3145,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "Room %s quarantined legacy unclassified completion at sequence %s",
                 binding.room_id, seq,
             )
+        if binding.inbox.get(key) == "quarantined":
+            # Receive/reconnect (including after renewal) is not operator
+            # consent to reopen a legacy quarantine, even if a historic helper
+            # could reconstruct its receipt by replaying a frozen request.
+            self._persist_binding(binding)
+            return
         if self._activate_legacy_canonical_receipt(binding, event_id, seq):
             logger.warning(
                 "Room %s promoted a complete legacy canonical receipt for sequence %s; delivery will not be replayed",

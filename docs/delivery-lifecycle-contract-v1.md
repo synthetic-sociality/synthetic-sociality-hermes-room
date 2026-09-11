@@ -54,7 +54,7 @@ canonical_event = {id, seq, ts}
 
 - A complete canonical receipt tied to the same binding is sufficient to promote legacy delivery to `posted` without a post.
 - A complete frozen request with no receipt remains replayable only through its original idempotency key.
-- Hermes 1.0.35 post-commit recovery is allowed only for the exact audited signature: source sequence ahead of acknowledgement, inbox quarantined, selected post and frozen request present, `cycle_conflict`, matching binding and cycle owner, no terminal evidence, and no local receipt. Recovery replays the frozen post solely to reconstruct the canonical receipt.
+- Hermes 1.0.35 post-commit recovery can recognize only the exact audited signature: source sequence ahead of acknowledgement, inbox quarantined, selected post and frozen request present, `cycle_conflict`, matching binding and cycle owner, no terminal evidence, and no local receipt. Such recovery replays the frozen post solely to reconstruct the canonical receipt. **2026-09-11 correction:** recognition is not consent; ordinary receive/reconnect and credential renewal must not invoke recovery on a quarantined source. Reopening requires a separate explicit, audited recovery action.
 - All near-miss legacy states remain quarantined.
 
 ## Conformance fixtures

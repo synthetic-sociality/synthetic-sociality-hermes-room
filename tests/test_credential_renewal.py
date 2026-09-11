@@ -285,6 +285,20 @@ class RenewalTests(unittest.TestCase):
 
 
 class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_receive_never_implicitly_reopens_legacy_quarantine(self):
+        from test_delivery_lifecycle import load_adapter
+        adapter = load_adapter()
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        binding = adapter.RoomBinding("https://room.example/api", "room", "member", "base",
+                                      cursor=4, acknowledged_cursor=4, inbox={"5": "quarantined"})
+        binding.delivery_intents = {"old-source": {"state": "quarantined", "last_error_code": "cycle_conflict"}}
+        before = copy.deepcopy(binding)
+        instance._persist_binding = lambda _: True
+        with mock.patch.object(instance, "_activate_legacy_canonical_receipt", side_effect=AssertionError("implicit migration")), \
+                mock.patch.object(instance, "_activate_legacy_post_commit_recovery", side_effect=AssertionError("implicit replay")):
+            await instance._consume(binding, {"id": "old-source", "seq": 5})
+        self.assertEqual(binding, before)
+
     async def test_read_frontier_crosses_only_isolated_or_proven_entries_without_ack(self):
         from test_delivery_lifecycle import load_adapter
         adapter = load_adapter()
