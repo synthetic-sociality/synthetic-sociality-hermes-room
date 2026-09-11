@@ -2663,6 +2663,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         acknowledgement. Unknown/pending work still stops the scan frontier.
         """
         frontier = binding.cursor
+        # Preserve the existing lost-ack recovery path: an immediately
+        # contiguous completed source must be re-consumed to retry its ack.
+        # Only an actual quarantine gap justifies reading past held evidence.
+        if binding.inbox.get(str(frontier + 1)) != "quarantined":
+            return frontier
         while True:
             key = str(frontier + 1)
             status = binding.inbox.get(key, "")

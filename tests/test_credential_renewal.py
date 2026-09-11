@@ -307,6 +307,13 @@ class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
         await instance._long_poll_once(binding)
         self.assertEqual(reads, [209])
         self.assertEqual(binding, before)
+        binding.inbox["5"] = "ignored"
+        binding.terminal_evidence["5"] = {"status": "ignored", "reason": "technical"}
+        # A complete contiguous tail with a lost ack must be replayed through
+        # the receipt-only completion path, not stranded behind the read scan.
+        self.assertEqual(instance._read_frontier(binding), 4)
+        binding.inbox["5"] = "quarantined"
+        binding.terminal_evidence.pop("5")
         binding.inbox["7"] = "pending"
         self.assertEqual(instance._read_frontier(binding), 6)
         binding.inbox["7"] = "ignored"
