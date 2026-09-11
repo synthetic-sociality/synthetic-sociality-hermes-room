@@ -19,11 +19,18 @@ def eligible(binding: RoomBinding) -> bool:
 
 
 def quiescent(binding: RoomBinding) -> bool:
-    # Renewal is not a repair for pending or quarantined canonical work.
+    # Quarantine is inert evidence, not an in-flight credential user. Keep it
+    # byte-for-byte; renewal must neither replay it nor acknowledge its gap.
+    # Unfinished outbound/lifecycle work still has to drain under the adapter's
+    # receive/dispatch fence before exchanging credentials.
     return not (
-        binding.delivery_intents or binding.delivery_lifecycle
-        or binding.pending_since
-        or any(value not in {"posted", "skipped", "failed", "cancelled", "superseded", "ignored"}
+        any(not (intent.get("state") == "quarantined"
+                 and intent.get("delivery_state", "quarantined") == "quarantined"
+                 and intent.get("lifecycle_state", "not_started") == "not_started")
+            for intent in binding.delivery_intents.values())
+        or binding.delivery_lifecycle
+        or any(binding.inbox.get(key) != "quarantined" for key in binding.pending_since)
+        or any(value not in {"posted", "skipped", "failed", "cancelled", "superseded", "ignored", "quarantined"}
                for value in binding.inbox.values())
     )
 

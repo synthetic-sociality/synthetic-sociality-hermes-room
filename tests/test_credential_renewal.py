@@ -147,9 +147,9 @@ class RenewalTests(unittest.TestCase):
                 self.assertEqual(actual.credential_rotation, {})
                 self.assertTrue(api.confirmed)
 
-    def test_manual_legacy_disabled_revoked_and_quarantine_fail_closed(self):
+    def test_manual_legacy_disabled_revoked_and_active_work_fail_closed(self):
         for changes in ({"enabled": False}, {"enabled": False, "disabled_reason": "manual"},
-                        {"revoked": True}, {"inbox": {"12": "quarantined"}},
+                        {"revoked": True}, {"inbox": {"12": "pending"}},
                         {"delivery_intents": {"source": {"pending": True}}}):
             binding = copy.deepcopy(self.binding)
             for key, value in changes.items():
@@ -159,6 +159,33 @@ class RenewalTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.run_renewal(self.fake_api(), self.intent)
             self.assertEqual(before, self.path.read_bytes())
+
+    def test_quarantine_survives_renewal_and_lost_replies_without_replay_or_ack(self):
+        for boundary in ("", "request", "redeem", "verify", "confirm", "active_state"):
+            with self.subTest(boundary=boundary):
+                binding = copy.deepcopy(self.binding)
+                binding.inbox = {"12": "quarantined", "13": "ignored"}
+                binding.pending_retries = {"12": 4}
+                binding.pending_since = {"12": 123.0}
+                binding.turn_sequences = {"old-source": 12}
+                binding.delivery_intents = {"old-source": {
+                    "state": "quarantined", "delivery_state": "quarantined",
+                    "lifecycle_state": "not_started", "last_error": "retain evidence",
+                }}
+                state.save(state.PluginState(bindings=[binding, self.sibling]), self.path)
+                protected = cli._renewal_protected_fields(binding)
+                api = self.fake_api(boundary)
+                if boundary:
+                    with self.assertRaises(OSError):
+                        self.run_renewal(api, self.intent)
+                    self.run_renewal(api, None)
+                else:
+                    self.run_renewal(api, self.intent)
+                saved = state.load(self.path)
+                self.assertEqual(cli._renewal_protected_fields(saved.binding("room-1")), protected)
+                self.assertEqual(saved.binding("room-2"), self.sibling)
+                self.assertTrue(api.confirmed)
+                self.assertEqual(saved.binding("room-1").credential_rotation, {})
 
     def test_crash_after_each_durable_phase_resumes_exact_generation(self):
         for phase in ("requesting_owner", "prepared", "redeemed", "swapped", "confirmed"):
@@ -258,6 +285,34 @@ class RenewalTests(unittest.TestCase):
 
 
 class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_frontier_crosses_only_isolated_or_proven_entries_without_ack(self):
+        from test_delivery_lifecycle import load_adapter
+        adapter = load_adapter()
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        binding = adapter.RoomBinding("https://room.example/api", "room", "member", "base",
+                                      cursor=4, acknowledged_cursor=4, inbox={"5": "quarantined"})
+        # More than one server page of isolated/completed work must not starve
+        # a new source. The canonical cursor and every retained record stay put.
+        for seq in range(6, 210):
+            binding.inbox[str(seq)] = "ignored"
+            binding.terminal_evidence[str(seq)] = {"status": "ignored", "reason": "technical"}
+        before = copy.deepcopy(binding)
+        self.assertEqual(instance._read_frontier(binding), 209)
+        reads = []
+        class API:
+            def events(self, room, cursor, wait, **kwargs):
+                reads.append(cursor)
+                return {"events": []}
+        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+        await instance._long_poll_once(binding)
+        self.assertEqual(reads, [209])
+        self.assertEqual(binding, before)
+        binding.inbox["7"] = "pending"
+        self.assertEqual(instance._read_frontier(binding), 6)
+        binding.inbox["7"] = "ignored"
+        binding.terminal_evidence.pop("7")
+        self.assertEqual(instance._read_frontier(binding), 6)
+
     async def test_maintenance_drains_only_target_and_hot_resumes_after_durable_success(self):
         from test_delivery_lifecycle import load_adapter
         adapter = load_adapter()
@@ -265,6 +320,7 @@ class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
             target = adapter.RoomBinding("https://room.example/api", "room", "member", "base", installation_id="instance")
+            target.inbox = {"5": "quarantined", "6": "ignored"}
             sibling = adapter.RoomBinding("https://room.example/api", "sibling", "other", "other-base", installation_id="other")
             adapter_state.save(adapter.PluginState(bindings=[target, sibling]), path)
             with mock.patch.object(adapter, "load", lambda *_: adapter_state.load(path)):
@@ -323,7 +379,8 @@ class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(watcher.done())
             self.assertNotIn("private-token", " ".join(logs.output))
             resume.assert_not_called()
-            binding.inbox = {"12": "quarantined"}
+            binding.inbox = {"12": "pending"}
+            instance._renewal_retry_after.clear()
             with mock.patch.object(adapter.renewal, "discover") as discover:
                 await instance._maintain_renewal(binding)
                 discover.assert_not_called()

@@ -24,8 +24,11 @@ replacement. Ordinary authorization is not relaxed to make renewal work.
 
 Only the target binding is drained and hot-resumed. The instance ID, membership,
 identity, replay/Ack cursors, delivery journals and sibling bindings are retained;
-there is no shared gateway restart. Pending or quarantined canonical work blocks
-renewal rather than being discarded. Ambiguous network results retain the exact
+there is no shared gateway restart. Active delivery/lifecycle work must drain;
+quarantined work is inert and does not block renewal. Its journal and any
+acknowledgement gap are retained unchanged, never replayed or silently cleared.
+Transport can read beyond isolated events using per-event evidence without
+advancing the canonical acknowledgement frontier. Ambiguous network results retain the exact
 0600 journal for the next maintenance pass. Unsupported/malformed optional
 responses are isolated from the normal watcher and logged without raw errors.
 

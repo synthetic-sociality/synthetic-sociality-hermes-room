@@ -2651,10 +2651,25 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _long_poll_once(self, binding: RoomBinding) -> None:
         page = await self._call(
             binding,
-            lambda api: api.events(binding.room_id, binding.cursor, 8, all_epochs=True),
+            lambda api: api.events(binding.room_id, self._read_frontier(binding), 8, all_epochs=True),
         )
         for event in page.get("events", []):
             await self._consume(binding, event)
+
+    def _read_frontier(self, binding: RoomBinding) -> int:
+        """Scan beyond isolated work without acknowledging or deleting it.
+
+        Re-derived from durable per-event evidence, never saved as a delivery
+        acknowledgement. Unknown/pending work still stops the scan frontier.
+        """
+        frontier = binding.cursor
+        while True:
+            key = str(frontier + 1)
+            status = binding.inbox.get(key, "")
+            if status != "quarantined" and not self._terminal_evidence_valid(
+                    status, binding.terminal_evidence.get(key, {})):
+                return frontier
+            frontier += 1
 
     async def _ensure_connector(self, binding: RoomBinding) -> dict[str, Any]:
         await self._ensure_message_payload_contract(binding)
@@ -3038,7 +3053,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
         future = asyncio.create_task(self._stream_call(
             binding,
-            lambda api: api.stream_events(binding.room_id, binding.cursor, on_event),
+            lambda api: api.stream_events(binding.room_id, self._read_frontier(binding), on_event),
         ))
         try:
             while not future.done():

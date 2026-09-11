@@ -249,8 +249,10 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 asyncio.run(exercise(committed))
 
     def test_explicit_retry_in_open_and_coordinated_rooms_only_starts_target_cycle(self):
-        async def exercise(mode):
+        async def exercise(mode, quarantine):
             binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential", cursor=4, acknowledged_cursor=4)
+            if quarantine:
+                binding.inbox = {"5": "quarantined"}
             instance = object.__new__(adapter.SyntheticSocialityAdapter)
             for name, value in {
                 "_inflight_events": set(), "_event_seq": {}, "_event_epoch": {},
@@ -285,18 +287,24 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
             instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
             instance.handle_message = lambda *_args: self.fail("retry source must wait for canonical ready event")
-            event = {"id": "retry-source", "seq": 5, "type": "human.command", "actorId": "human-owner", "actorRole": "human_owner", "payload": {"command": {
+            event = {"id": "retry-source", "seq": 6 if quarantine else 5, "type": "human.command", "actorId": "human-owner", "actorRole": "human_owner", "payload": {"command": {
                 "command": "ask", "resolvedTargetMembershipIds": ["member-1"], "arguments": {"instruction": "Try once", "retryUnavailable": True},
             }}}
+            if quarantine:
+                await instance._consume(binding, {"id": "isolated-source", "seq": 5})
             await instance._consume(binding, event)
             self.assertEqual(len(starts), 1)
             self.assertEqual(starts[0]["roster"], [{"membershipId": "member-1", "displayName": "member-1"}])
             self.assertEqual(starts[0]["sourceEventId"], "retry-source")
             self.assertTrue(completed)
+            if quarantine:
+                self.assertEqual(binding.inbox["5"], "quarantined")
+                self.assertEqual((binding.cursor, binding.acknowledged_cursor), (4, 4))
 
         for mode in ("open", "coordinated"):
-            with self.subTest(mode=mode):
-                asyncio.run(exercise(mode))
+            for quarantine in (False, True):
+                with self.subTest(mode=mode, quarantine=quarantine):
+                    asyncio.run(exercise(mode, quarantine))
 
     def test_processing_failure_reports_fail_never_deliberate_pass(self):
         async def run():
