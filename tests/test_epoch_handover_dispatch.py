@@ -82,8 +82,14 @@ class EpochHandoverDispatchTests(unittest.TestCase):
 
     def test_new_discussion_prompt_carries_the_handover_and_only_a_library_catalog(self):
         calls = []
-        message = self.dispatch(START_EVENT, events_pages={40: {"events": [START_EVENT]}}, calls=calls)
+        with self.assertLogs(adapter.logger, level="INFO") as logs:
+            message = self.dispatch(START_EVENT, events_pages={40: {"events": [START_EVENT]}}, calls=calls)
         prompt = message.text
+        sizes = [line for line in logs.output if "context sizes:" in line]
+        self.assertEqual(len(sizes), 1, logs.output)
+        self.assertIn(f"prompt={len(prompt)}", sizes[0])
+        self.assertIn("documents=", sizes[0])
+        self.assertNotIn("Keep decisions", sizes[0])  # sizes only, never content
         self.assertIn("[Reviewed handover from discussion #1", prompt)
         self.assertIn("Keep decisions, drop the accumulated history.", prompt)
         self.assertIn("Fresh session per discussion. — because Prompts grew to 59k characters.", prompt)

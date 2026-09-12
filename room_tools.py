@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import fcntl
 import re
@@ -21,6 +22,9 @@ from .protocol import (
     stable_key,
 )
 from .state import RoomBinding, load, state_root
+
+
+logger = logging.getLogger(__name__)
 
 
 ROOM_CONTEXT_SCHEMA = {
@@ -787,6 +791,11 @@ def room_history(args: dict[str, Any], **_kwargs: Any) -> str:
                     scanned_through = min(ends_before - 1, max(scanned_through, int(page.get("headSeq") or head)))
                 break
         complete = scanned_through >= ends_before - 1
+        logger.info(
+            "Room %s history read: epoch=%s ordinal=%d from=%d through=%d messages=%d hidden=%d complete=%s",
+            binding.room_id, epoch["id"], epoch["ordinal"], start_after + 1, scanned_through,
+            len(messages), hidden_excluded, complete,
+        )
     except (ProtocolError, OSError, ValueError) as error:
         return _result({"success": False, "error": f"Room history is temporarily unavailable: {error}"})
     return _result({

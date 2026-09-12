@@ -96,7 +96,10 @@ class RoomHistoryToolTests(unittest.TestCase):
         return json.loads(room_tools.room_history(args))
 
     def test_default_scope_is_the_current_discussion_and_hidden_messages_are_excluded(self):
-        result = self.run_tool()
+        with self.assertLogs(room_tools.logger, level="INFO") as logs:
+            result = self.run_tool()
+        self.assertTrue(any("history read: epoch=epoch-2" in line and "messages=2" in line for line in logs.output), logs.output)
+        self.assertFalse(any("new discussion opener" in line for line in logs.output))
         self.assertTrue(result["success"], result)
         self.assertEqual(result["epoch"]["id"], "epoch-2")
         self.assertEqual([m["body"] for m in result["messages"]], ["new discussion opener", "follow-up mentioning decision"])

@@ -3923,6 +3923,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             "never claim consensus or speak for another participant. Use the shared context but do not force the room theme. "
             f"{ROOM_RESPONSE_INSTRUCTION}"
         )
+        # Bounded size telemetry for the pilot: character counts only, never
+        # prompt, transcript or document content.
+        logger.info(
+            "Room %s dispatch %s context sizes: transcript=%d handover=%d documents=%d prompt=%d",
+            binding.room_id, event_id, len(shared_context), len(handover_context),
+            len(artifact_context), len(prompt),
+        )
         dispatch_source = _dispatch_source_ref(event_id, dispatch_generation)
         source = self.build_source(
             chat_id=binding.room_id,
