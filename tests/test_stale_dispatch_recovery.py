@@ -29,9 +29,12 @@ def stale_instance(binding, *, cycle_attempts=None):
     instance.completed = []
     instance.published = []
     instance.stopped = []
+    instance.failures = []
+    instance._superseded_sources = set()
 
-    async def complete(_binding, cycle_attempt, action, event_id=""):
+    async def complete(_binding, cycle_attempt, action, event_id="", execution_failure=None):
         instance.completed.append((str(cycle_attempt["attempt"]["id"]), action))
+        instance.failures.append(execution_failure)
 
     async def stop(source_event_id):
         instance.stopped.append(source_event_id)
@@ -93,6 +96,8 @@ class StaleDispatchRecoveryTests(unittest.TestCase):
         self.assertEqual(instance.stopped, ["evt-367"])
         self.assertNotIn("evt-367", instance._cycle_attempts)
         self.assertEqual(instance.published, [("evt-367", "terminal", "failed")])
+        self.assertEqual(instance.failures, [{"layer": "infrastructure", "code": "attempt_timeout"}])
+        self.assertIn("evt-367", instance._superseded_sources)
         # The queued later event follows the ordinary bounded retry path.
         self.assertEqual(binding.inbox["384"], "failed-retryable")
         self.assertEqual(binding.pending_retries["384"], 1)
@@ -109,13 +114,15 @@ class StaleDispatchRecoveryTests(unittest.TestCase):
         self.assertEqual(instance.stopped, ["evt-384"])
         self.assertNotIn("evt-384", instance._cycle_attempts)
         self.assertNotIn("evt-384", instance._cycle_response_sources)
+        self.assertEqual(instance.failures, [{"layer": "infrastructure", "code": "attempt_timeout"}])
+        self.assertIn("evt-384", instance._superseded_sources)
 
     def test_superseded_attempt_report_is_not_an_error(self):
         binding = binding_with_pending([9], retries={9: adapter.PENDING_EVENT_MAX_RETRIES})
         instance = stale_instance(binding, cycle_attempts={"evt-9": ATTEMPT})
         instance._event_seq["room-1"]["evt-9"] = 9
 
-        async def superseded(_binding, _cycle_attempt, _action, event_id=""):
+        async def superseded(_binding, _cycle_attempt, _action, event_id="", execution_failure=None):
             raise adapter.ProtocolError("cycle superseded", code="cycle_superseded", retryable=False)
 
         instance._complete_cycle_attempt = superseded

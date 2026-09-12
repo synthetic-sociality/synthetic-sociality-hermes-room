@@ -3619,6 +3619,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         cycle_attempt: dict[str, Any],
         action: str,
         event_id: str = "",
+        execution_failure: dict[str, str] | None = None,
     ) -> None:
         cycle, attempt = cycle_attempt["cycle"], cycle_attempt["attempt"]
         payload: dict[str, Any] = {
@@ -3627,6 +3628,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         }
         if event_id:
             payload["eventId"] = event_id
+        if execution_failure:
+            payload["executionFailure"] = dict(execution_failure)
         await self._call(
             binding,
             lambda api: api.complete_discussion_attempt(
@@ -4010,6 +4013,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             active_rooms = getattr(self, "_active_dispatch_rooms", {})
             if active_rooms.get(room_id) == dispatch_generation:
                 active_rooms.pop(room_id, None)
+            getattr(self, "_dispatch_started_at", {}).pop(dispatch_generation, None)
             return
         completion_error: Exception | None = None
         terminal_completion = seq <= binding.acknowledged_cursor
@@ -4129,6 +4133,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 self._inflight_events.discard(event_id)
                 if active_rooms.get(binding.room_id) == dispatch_generation:
                     active_rooms.pop(binding.room_id, None)
+                getattr(self, "_dispatch_started_at", {}).pop(dispatch_generation, None)
                 if event_generations.get(event_id) == dispatch_generation:
                     event_generations.pop(event_id, None)
                 raise
@@ -4137,6 +4142,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 return
             if active_rooms.get(binding.room_id) == dispatch_generation:
                 active_rooms.pop(binding.room_id, None)
+            getattr(self, "_dispatch_started_at", {}).pop(dispatch_generation, None)
             if event_generations.get(event_id) == dispatch_generation:
                 event_generations.pop(event_id, None)
         queued_events.pop(binding.room_id, None)
@@ -4412,8 +4418,21 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         getattr(self, "_cycle_response_sources", {}).pop(event_id, None)
         if not cycle_attempt:
             return
+        # Any late model result for this event is fenced as superseded: it must
+        # never surface as a standalone turn once the cycle moved on.
+        superseded = getattr(self, "_superseded_sources", None)
+        if superseded is None:
+            superseded = set()
+            self._superseded_sources = superseded
+        superseded.add(event_id)
         try:
-            await self._complete_cycle_attempt(binding, cycle_attempt, "fail")
+            # The transient infrastructure code lets the server restore readiness
+            # on the agent's next canonical contribution (ADR 0017); a bare fail
+            # would bench the agent until an explicit health report.
+            await self._complete_cycle_attempt(
+                binding, cycle_attempt, "fail",
+                execution_failure={"layer": "infrastructure", "code": "attempt_timeout"},
+            )
         except ProtocolError as error:
             if error.code != "cycle_superseded":
                 logger.warning(
@@ -4506,6 +4525,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             generation = getattr(self, "_event_dispatch_generation", {}).get(event_id, "")
             if active_rooms.get(binding.room_id) == generation:
                 active_rooms.pop(binding.room_id, None)
+                getattr(self, "_dispatch_started_at", {}).pop(generation, None)
             if getattr(self, "_event_dispatch_generation", {}).get(event_id) == generation:
                 getattr(self, "_event_dispatch_generation", {}).pop(event_id, None)
             self._persist_binding(binding)
