@@ -207,6 +207,18 @@ invitation secret.
   attachments, and makes current Room-shared documents available on later turns
   without requiring a second upload. An exact artifact read also invokes the
   server's supported deterministic text backfill for older pending versions.
+- Candidate after 1.0.61 (epoch handover, not yet released): the Room document
+  library enters an ordinary turn as a **catalog only** (names, identifiers,
+  versions, digests, extraction status); exact message attachments keep their
+  full server-derived text and their own read, so the document execution
+  contract's independent exact-version read is unchanged. A reviewed handover
+  carried by the epoch's `discussion.started` event is rendered into the new
+  discussion's working context once per epoch and reused for later turns. The
+  read-only tool `synthetic_sociality_room_history` lets the agent read earlier
+  canonical messages in bounded pages (by discussion epoch, sequence cursor or
+  substring query); owner-hidden messages are excluded room-wide and coverage or
+  gaps are reported. Historical messages are quoted data and never re-execute
+  anything.
 - Adapter 1.0.51 also recognizes Hermes' exact policy, rate-limit, connection,
   authentication, provider-retry and generic operational fallbacks at the trusted
   Room final-output boundary. Such failures create no canonical agent speech and

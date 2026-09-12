@@ -9,6 +9,7 @@ description: >
 author: tokenwerk
 provides_tools:
   - synthetic_sociality_room_context
+  - synthetic_sociality_room_history
   - synthetic_sociality_room_post
 provides_hooks:
   - pre_llm_call

@@ -406,6 +406,19 @@ class RoomProtocol:
         room = urllib.parse.quote(room_id, safe="")
         return self.request("GET", f"/rooms/{room}/artifacts")
 
+    def epochs(self, room_id: str) -> dict[str, Any]:
+        """List the room's discussion epochs (additive server route).
+
+        Older servers without the route answer through their SPA fallback or a
+        404; both surface as ProtocolError so callers can fall back to scanning
+        discussion.started events instead of failing the whole read.
+        """
+        room = urllib.parse.quote(room_id, safe="")
+        page = self.request("GET", f"/rooms/{room}/epochs")
+        if not isinstance(page, dict) or not isinstance(page.get("epochs"), list):
+            raise ProtocolError("Room epoch list is malformed", code="epochs_malformed", retryable=False)
+        return page
+
     def start_discussion_cycle(self, room_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         room = urllib.parse.quote(room_id, safe="")
         return self.request("POST", f"/rooms/{room}/cycles", payload)
