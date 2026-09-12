@@ -207,7 +207,7 @@ invitation secret.
   attachments, and makes current Room-shared documents available on later turns
   without requiring a second upload. An exact artifact read also invokes the
   server's supported deterministic text backfill for older pending versions.
-- Candidate after 1.0.61 (epoch handover, not yet released): the Room document
+- Adapter 1.0.62 (epoch handover): the Room document
   library enters an ordinary turn as a **catalog only** (names, identifiers,
   versions, digests, extraction status); exact message attachments keep their
   full server-derived text and their own read, so the document execution
