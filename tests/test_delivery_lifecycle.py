@@ -188,6 +188,76 @@ def configured_instance(binding, cycle_attempt, snapshots):
 
 
 class DeliveryLifecycleContractTests(unittest.TestCase):
+    def test_human_roles_seed_cycles_without_peer_follow_up_permissions(self):
+        async def exercise(role, mode, follow_ups, recipients):
+            binding = adapter.RoomBinding(
+                "https://room.example/api", "room-1", "member-1", "credential",
+                cursor=4, acknowledged_cursor=4,
+            )
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            for name, value in {
+                "_inflight_events": set(), "_event_seq": {}, "_event_epoch": {},
+                "_latest_source": {}, "_run_for_event": {}, "_activity_seq": {},
+                "_context_acknowledged_sources": set(), "_cycle_attempts": {},
+                "_cycle_response_sources": {}, "_source_coordination_modes": {},
+                "_open_reply_recipients": {}, "_queued_events": {},
+                "_active_dispatch_rooms": {}, "_event_dispatch_generation": {},
+                "_receive_locks": {}, "_ledger_locks": {}, "_terminal_sources": {},
+                "_terminal_results": {}, "_attempt_renewal_tasks": {},
+            }.items():
+                setattr(instance, name, value)
+            instance._persist_binding = lambda _binding: True
+            instance._state = types.SimpleNamespace(binding=lambda _room: binding)
+            starts, completed = [], []
+
+            class API:
+                def room_state(self, _room):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}, "roster": [
+                        {"membershipId": member, "displayName": member, "role": "participant_agent", "status": "active"}
+                        for member in ("member-1", "member-2")
+                    ]}
+
+                def room_policy(self, _room):
+                    return {"coordinationMode": mode, "agentFollowUpEnabled": follow_ups}
+
+                def start_discussion_cycle(self, _room, request):
+                    starts.append(request)
+                    return {"id": "cycle-1"}
+
+                def activity(self, *_args):
+                    return {"accepted": True}
+
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+            instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
+            instance.handle_message = lambda *_args: self.fail("source must wait for server-owned attempt-ready event")
+            event = {"id": "human-source", "seq": 5, "type": "message.posted", "actorId": "human-member", "actorRole": role,
+                     "payload": {"body": "Reply briefly", "resolvedRecipientMembershipIds": recipients, "followUpDepth": 0}}
+            await instance._consume(binding, event)
+            is_human = role in ("human", "human_owner", "agent_owner")
+            expected = is_human and (not recipients or "member-1" in recipients)
+            self.assertEqual(len(starts), int(expected))
+            if expected:
+                self.assertEqual(starts[0]["sourceEventId"], "human-source")
+                self.assertEqual([r["membershipId"] for r in starts[0]["roster"]], recipients or ["member-1", "member-2"])
+                self.assertEqual(completed[-1]["reason"], "cycle_source_context_only")
+            self.assertNotIn("human-source", instance._open_reply_recipients)
+            if not is_human:
+                self.assertIn(completed[-1]["reason"], ("not_addressed_to_membership", "agent_cycle_policy_ineligible"))
+
+        for role in ("human", "human_owner", "agent_owner"):
+            for mode in ("open", "coordinated"):
+                for follow_ups in (False, True):
+                    for recipients in ([], ["member-1"], ["member-2"]):
+                        with self.subTest(role=role, mode=mode, follow_ups=follow_ups, recipients=recipients):
+                            asyncio.run(exercise(role, mode, follow_ups, recipients))
+        # Fixing human admission must not enable autonomous agent loops when
+        # peer follow-ups are disabled, even for explicitly addressed peers.
+        for role in ("participant_agent", "room_master"):
+            for mode in ("open", "coordinated"):
+                for recipients in ([], ["member-1"], ["member-2"]):
+                    with self.subTest(peer_role=role, mode=mode, recipients=recipients):
+                        asyncio.run(exercise(role, mode, False, recipients))
+
     def test_failure_disposition_survives_restart_before_and_after_completion_commit(self):
         async def exercise(committed):
             binding = lifecycle_binding()

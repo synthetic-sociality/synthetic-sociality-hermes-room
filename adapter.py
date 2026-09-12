@@ -3377,8 +3377,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
 
         if coordination_mode == "open" and event_type == "message.posted":
-            role = str(event.get("actorRole") or "")
-            if role == "human" or role.startswith("human_"):
+            # Use the same human-source classification as cycle admission.
+            # agent_owner is a human participant, not an agent peer; peer
+            # follow-up limits must not silently suppress their messages.
+            if human_source:
                 resolved = payload.get("resolvedRecipientMembershipIds")
                 if isinstance(resolved, list) and resolved and binding.membership_id not in {str(value) for value in resolved}:
                     await self._complete_event(
