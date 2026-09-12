@@ -64,7 +64,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.62"
+CONNECTOR_VERSION = "1.0.63"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -117,6 +117,11 @@ _GATEWAY_NONRETRYABLE_OPERATIONAL_ERRORS = frozenset({_GATEWAY_AUTHENTICATION_ER
 # never terminal evidence and therefore can never advance acknowledgement.
 PENDING_EVENT_TTL_SECONDS = 180.0
 PENDING_EVENT_MAX_RETRIES = 2
+# A dispatch that never reports completion (2026-09-12: a duplicate run the
+# gateway never accepted held the Room marker for 33 minutes) is released after
+# this bound so later events can proceed; the server-side attempt cap has
+# already timed the attempt out well before.
+DISPATCH_INFLIGHT_MAX_SECONDS = 900.0
 TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "failed", "cancelled", "superseded", "ignored"})
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_HISTORY_INSTRUCTION = (
@@ -4078,6 +4083,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             active_rooms = getattr(self, "_active_dispatch_rooms", {})
             if active_rooms.get(room_id) == dispatch_generation:
                 active_rooms.pop(room_id, None)
+            getattr(self, "_dispatch_started_at", {}).pop(dispatch_generation, None)
             event_generations = getattr(self, "_event_dispatch_generation", {})
             if event_generations.get(event_id) == dispatch_generation:
                 self._inflight_events.discard(event_id)
@@ -4107,6 +4113,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             event_id = str(event.get("id") or "")
             dispatch_generation = uuid.uuid4().hex
             active_rooms[binding.room_id] = dispatch_generation
+            started_at = getattr(self, "_dispatch_started_at", None)
+            if started_at is None:
+                started_at = {}
+                self._dispatch_started_at = started_at
+            started_at[dispatch_generation] = time.time()
             event_generations = getattr(self, "_event_dispatch_generation", None)
             if event_generations is None:
                 event_generations = {}
@@ -4385,15 +4396,93 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding.turn_observed.pop(source_id, None)
         self._persist_binding(binding)
 
+    async def _release_cycle_attempt_after_failure(
+        self, binding: RoomBinding, event_id: str, reason: str,
+    ) -> None:
+        """Stop renewing and report a failed attempt so the cycle advances now.
+
+        A quarantined or wedged turn must not keep its server-side lease alive:
+        on 2026-09-12 a connector renewed an attempt it had already quarantined
+        for 23 more minutes and the remaining agents never got their turn.
+        """
+        if not event_id:
+            return
+        cycle_attempt = getattr(self, "_cycle_attempts", {}).pop(event_id, None)
+        await self._stop_attempt_renewal(event_id)
+        getattr(self, "_cycle_response_sources", {}).pop(event_id, None)
+        if not cycle_attempt:
+            return
+        try:
+            await self._complete_cycle_attempt(binding, cycle_attempt, "fail")
+        except ProtocolError as error:
+            if error.code != "cycle_superseded":
+                logger.warning(
+                    "Room %s could not report the failed attempt for event %s after %s: %s",
+                    binding.room_id, event_id, reason, error,
+                )
+        except Exception as error:  # noqa: BLE001 - release must not raise into the watch loop
+            logger.warning(
+                "Room %s could not report the failed attempt for event %s after %s: %s",
+                binding.room_id, event_id, reason, error,
+            )
+        else:
+            logger.warning(
+                "Room %s released cycle attempt for event %s after %s; the cycle continues without this turn",
+                binding.room_id, event_id, reason,
+            )
+        publish = getattr(self, "_publish", None)
+        if publish is not None:
+            await publish(binding, event_id, "terminal", status="failed", suppress_errors=True)
+
+    async def _release_wedged_dispatch(self, binding: RoomBinding, now: float) -> None:
+        """Clear a Room dispatch marker whose run never reported completion."""
+        active_rooms = getattr(self, "_active_dispatch_rooms", None) or {}
+        generation = active_rooms.get(binding.room_id)
+        if not generation:
+            return
+        started = getattr(self, "_dispatch_started_at", {}).get(generation)
+        if started is None or now - float(started) < DISPATCH_INFLIGHT_MAX_SECONDS:
+            return
+        event_generations = getattr(self, "_event_dispatch_generation", {})
+        event_id = next((candidate for candidate, value in event_generations.items() if value == generation), "")
+        logger.error(
+            "Room %s dispatch for event %s has not completed after %.0fs; releasing the Room and failing its attempt",
+            binding.room_id, event_id or "?", DISPATCH_INFLIGHT_MAX_SECONDS,
+        )
+        active_rooms.pop(binding.room_id, None)
+        getattr(self, "_dispatch_started_at", {}).pop(generation, None)
+        if event_id:
+            event_generations.pop(event_id, None)
+            getattr(self, "_inflight_events", set()).discard(event_id)
+        await self._release_cycle_attempt_after_failure(binding, event_id, "dispatch_wedged")
+
     async def _expire_stale_pending(self, binding: RoomBinding) -> None:
         """Retry stale work and quarantine it fail-closed after exhaustion."""
         now = time.time()
+        await self._release_wedged_dispatch(binding, now)
         stale = [
             int(key) for key, status in binding.inbox.items()
             if status == "pending" and now - float(binding.pending_since.get(key, 0.0)) >= PENDING_EVENT_TTL_SECONDS
         ]
+        active_rooms = getattr(self, "_active_dispatch_rooms", None) or {}
+        event_generations = getattr(self, "_event_dispatch_generation", None) or {}
+        inflight = getattr(self, "_inflight_events", None) or set()
         for seq in sorted(stale):
             key = str(seq)
+            running_event = next((event_id for event_id, event_seq in self._event_seq.get(binding.room_id, {}).items() if event_seq == seq), "")
+            running_generation = event_generations.get(running_event, "") if running_event else ""
+            if running_event and running_event in inflight and running_generation and active_rooms.get(binding.room_id) == running_generation:
+                # Model work for exactly this event is still running. A second
+                # dispatch beside it produced the 2026-09-12 duplicate whose
+                # marker then blocked the Room; wait instead. The wait is
+                # bounded by the server-side attempt cap and by
+                # _release_wedged_dispatch.
+                binding.pending_since[key] = now
+                logger.info(
+                    "Room %s event sequence %s still executing after %.0fs; waiting instead of re-dispatching",
+                    binding.room_id, seq, PENDING_EVENT_TTL_SECONDS,
+                )
+                continue
             retries = int(binding.pending_retries.get(key, 0)) + 1
             binding.pending_retries[key] = retries
             binding.pending_since.pop(key, None)
@@ -4420,6 +4509,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if getattr(self, "_event_dispatch_generation", {}).get(event_id) == generation:
                 getattr(self, "_event_dispatch_generation", {}).pop(event_id, None)
             self._persist_binding(binding)
+            if binding.inbox.get(key) == "quarantined":
+                await self._release_cycle_attempt_after_failure(binding, event_id, "quarantined_unprocessed")
 
     def _record_delivery_failure(
         self,
