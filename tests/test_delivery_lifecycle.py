@@ -379,6 +379,8 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
     def test_processing_failure_reports_fail_never_deliberate_pass(self):
         async def run():
             binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
             instance = configured_instance(binding, {"cycle": {"id": "cycle-1", "generation": 3}, "attempt": {"id": "attempt-1"}}, [])
             instance._state = types.SimpleNamespace(binding=lambda _room_id: binding)
             instance._inflight_events = {"evt-5"}
@@ -392,6 +394,86 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertEqual(actions, ["fail"])
             self.assertEqual(terminals[0]["terminal_status"], "failed")
         asyncio.run(run())
+
+    def test_definitive_size_rejection_keeps_its_reason_through_completion(self):
+        async def run(outcome):
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            instance = configured_instance(binding, {"cycle": {"id": "cycle-1", "generation": 3}, "attempt": {"id": "attempt-1"}}, [])
+            instance._state = types.SimpleNamespace(binding=lambda _room_id: binding)
+            instance._inflight_events = {"evt-5"}
+            actions, terminals = [], []
+            instance._complete_cycle_attempt = lambda _b, _a, action, **kw: asyncio.sleep(0, result=actions.append((action, kw)))
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            instance._complete_event = lambda *_args, **kw: asyncio.sleep(0, result=terminals.append(kw))
+            instance._dispatch_next_queued = lambda *_args: asyncio.sleep(0)
+            instance._record_delivery_failure(binding, "evt-5", "contribution exceeds budget", False, "message_too_large")
+            event = adapter.MessageEvent(message_id=adapter._dispatch_source_ref("evt-5", "g1"), source=types.SimpleNamespace(chat_id=binding.room_id), raw_message={"id": "evt-5", "seq": 5, "_dispatchGeneration": "g1"})
+            await instance.on_processing_complete(event, outcome)
+            await instance.on_processing_complete(event, outcome)
+            self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0][0], "fail")
+            self.assertEqual(actions[0][1]["execution_failure"]["code"], "response_too_large")
+            self.assertEqual(terminals[0]["terminal_status"], "failed")
+        for outcome in ("success", "failure"):
+            asyncio.run(run(outcome))
+
+    def test_size_rejection_completion_cannot_fail_a_successor_or_posted_receipt(self):
+        async def run(posted):
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            if not posted:
+                binding.delivery_lifecycle.clear()
+            attempt = {"cycle": {"id": "cycle-1", "generation": 3}, "attempt": {"id": "successor"}}
+            instance = configured_instance(binding, attempt, [])
+            instance._state = types.SimpleNamespace(binding=lambda _room_id: binding)
+            instance._inflight_events = {"evt-5"}
+            instance._event_dispatch_generation = {"evt-5": "g1" if posted else "g2"}
+            instance._complete_cycle_attempt = lambda *_a, **_kw: self.fail("must preserve successor/receipt owner")
+            instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+            instance._dispatch_next_queued = lambda *_args: asyncio.sleep(0)
+            instance._record_delivery_failure(binding, "evt-5", "size limit", False, "message_too_large")
+            event = adapter.MessageEvent(message_id=adapter._dispatch_source_ref("evt-5", "g1"), source=types.SimpleNamespace(chat_id=binding.room_id), raw_message={"id": "evt-5", "seq": 5, "_dispatchGeneration": "g1"})
+            await instance.on_processing_complete(event, "failure")
+            self.assertEqual(instance._cycle_attempts["evt-5"], attempt)
+            if posted:
+                self.assertEqual(binding.delivery_lifecycle["evt-5"]["delivery_state"], "posted")
+            else:
+                self.assertEqual(instance._event_dispatch_generation["evt-5"], "g2")
+        for posted in (True, False):
+            asyncio.run(run(posted))
+
+    def test_completion_answer_cannot_terminalize_a_newer_dispatch(self):
+        async def run(boundary):
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            old = {"cycle": {"id": "cycle-1", "generation": 3}, "attempt": {"id": "old"}}
+            new = {"cycle": {"id": "cycle-1", "generation": 4}, "attempt": {"id": "new"}}
+            instance = configured_instance(binding, old, [])
+            instance._state = types.SimpleNamespace(binding=lambda _room_id: binding)
+            instance._inflight_events = {"evt-5"}
+            instance._event_dispatch_generation = {"evt-5": "g1"}
+            instance._active_dispatch_rooms = {binding.room_id: "g1"}
+            def replace_generation():
+                instance._event_dispatch_generation["evt-5"] = "g2"
+                instance._active_dispatch_rooms[binding.room_id] = "g2"
+                instance._cycle_attempts["evt-5"] = new
+            async def complete(*_a, **_kw):
+                if boundary == "complete": replace_generation()
+            async def publish(*_a, **_kw):
+                if boundary == "publish": replace_generation()
+            instance._complete_cycle_attempt = complete
+            instance._complete_event = lambda *_a, **_kw: self.fail("old callback must not terminalize successor")
+            instance._publish = publish
+            instance._dispatch_next_queued = lambda *_a: self.fail("successor still owns dispatch")
+            event = adapter.MessageEvent(message_id=adapter._dispatch_source_ref("evt-5", "g1"), source=types.SimpleNamespace(chat_id=binding.room_id), raw_message={"id": "evt-5", "seq": 5, "_dispatchGeneration": "g1"})
+            await instance.on_processing_complete(event, "failure")
+            self.assertEqual(instance._cycle_attempts["evt-5"], new)
+            self.assertIn("evt-5", instance._inflight_events)
+        for boundary in ("complete", "publish"):
+            asyncio.run(run(boundary))
 
     def test_cycle_attempt_promotes_canonical_source_message_to_current_turn(self):
         ready = {
@@ -1890,7 +1972,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.64")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.66")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -1946,7 +2028,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.64"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.66"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())

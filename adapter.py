@@ -64,7 +64,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.64"
+CONNECTOR_VERSION = "1.0.66"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -4017,6 +4017,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         source = getattr(event, "source", None)
         room_id = str(getattr(source, "chat_id", "") or "")
         binding = self._state.binding(room_id)
+        current_generation = getattr(self, "_event_dispatch_generation", {}).get(event_id)
+        if current_generation is not None and current_generation != dispatch_generation:
+            # A late native callback owns neither the successor's attempt nor
+            # its selected output, even when the canonical source is the same.
+            return
         if binding is None or not seq:
             event_generations = getattr(self, "_event_dispatch_generation", {})
             if event_generations.get(event_id) == dispatch_generation:
@@ -4072,19 +4077,41 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     reason=str(terminal_result.get("reason") or ""),
                 )
             elif (
-                outcome_name != "success"
+                (outcome_name != "success" or (binding.delivery_intents.get(event_id) or {}).get("last_error_code") == "message_too_large")
+                and getattr(self, "_event_dispatch_generation", {}).get(event_id, dispatch_generation) == dispatch_generation
+                and (binding.delivery_intents.get(event_id) or {}).get("delivery_state") != "posted"
+                and (binding.delivery_lifecycle.get(event_id) or {}).get("delivery_state") != "posted"
                 and (cycle_attempt := getattr(self, "_cycle_attempts", {}).get(event_id))
             ):
+                # A definitive Room rejection is not evidence that the model
+                # failed. Preserve the authenticated delivery outcome through
+                # the existing single completion owner. Unknown/ambiguous
+                # delivery stays on the existing reconciliation path.
+                intent = binding.delivery_intents.get(event_id) or {}
+                failure = None
+                if intent.get("last_error_code") == "message_too_large":
+                    failure = {
+                        "layer": "runtime", "code": "response_too_large",
+                        "remediationHint": "The response exceeded the Room's contribution limit. Retry with a shorter response.",
+                    }
                 try:
-                    await self._complete_cycle_attempt(binding, cycle_attempt, "fail")
+                    if failure is None:
+                        await self._complete_cycle_attempt(binding, cycle_attempt, "fail")
+                    else:
+                        await self._complete_cycle_attempt(binding, cycle_attempt, "fail", execution_failure=failure)
                 except ProtocolError as error:
                     if error.code != "cycle_superseded":
                         raise
-                getattr(self, "_cycle_attempts", {}).pop(event_id, None)
-                getattr(self, "_cycle_response_sources", {}).pop(event_id, None)
+                if getattr(self, "_event_dispatch_generation", {}).get(event_id, dispatch_generation) != dispatch_generation:
+                    return
+                if getattr(self, "_cycle_attempts", {}).get(event_id) is cycle_attempt:
+                    getattr(self, "_cycle_attempts", {}).pop(event_id, None)
+                    getattr(self, "_cycle_response_sources", {}).pop(event_id, None)
                 await self._publish(
                     binding, event_id, "terminal", status="failed", suppress_errors=True,
                 )
+                if getattr(self, "_event_dispatch_generation", {}).get(event_id, dispatch_generation) != dispatch_generation:
+                    return
                 terminal_completion = True
                 await self._complete_event(
                     binding,

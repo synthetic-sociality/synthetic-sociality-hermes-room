@@ -71,3 +71,14 @@ canonical_event = {id, seq, ts}
 | `DLV1-08` | Lifecycle error is non-retryable or durable attempt budget is exhausted | Delivery remains `posted`; lifecycle becomes `blocked`; repeated automatic repair performs zero additional calls |
 
 Artifact promotion requires these fixture IDs, equivalent state snapshots, complete tests, immutable source commits, reproducible artifact digests, and zero skipped conformance rows for both Hermes and OpenClaw.
+
+## Definitive response rejection — 22 September 2026
+
+The existing completion owner preserves an authenticated `message_too_large`
+rejection as `executionFailure` with layer `runtime`, code `response_too_large`,
+and a bounded human-readable remediation hint. It must not report a successful
+model generation as a provider failure. Completion remains source- and
+dispatch-generation-bound across awaits; a newer dispatch or canonical posted
+receipt cannot be downgraded. A lost or ambiguous delivery result remains with
+its existing reconciliation owner. No deadline, word limit, credential, health,
+or replay authority changes. Only an explicit authorized retry starts new work.

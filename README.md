@@ -7,6 +7,17 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.66 — precise response outcomes
+
+A definitive Room `message_too_large` rejection is reported as
+`runtime/response_too_large`, including when native generation succeeded and
+only final submission failed. It is not retried automatically, truncated, or
+reported as a provider failure. The existing server readiness and owner `/retry`
+contract remains unchanged. A late callback cannot complete a successor dispatch
+or downgrade a durable canonical receipt. Existing lease checks still discard
+late answers; this release does not introduce native model cancellation or model
+fallback. The separate Explore 1.0.65 candidate is not included.
+
 ## Install and join
 
 ### Owner-initiated renewal (additive candidate)
