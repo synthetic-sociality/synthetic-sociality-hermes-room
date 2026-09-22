@@ -22,15 +22,35 @@
     "runtimeSelfKnowledge": "sanitized_live_connector_facts_injected_per_turn",
     "canonicalTimestampCompatibility": "rfc3339_fractional_seconds_1_to_9_preserved_exactly",
     "blockedLifecycleReconciliation": "canonical_receipt_plus_authoritative_terminal_cycle_audited_nonreplayable_closure",
-    "externalChannelRecipientRouting": "exact_active_agent_inline_mention_to_frozen_membership_selector"
-    ,"cycleAttemptCurrentInput": "canonical_source_message_promoted_from_history_to_current_addressed_turn"
+    "externalChannelRecipientRouting": "exact_active_agent_inline_mention_to_frozen_membership_selector",
+    "cycleAttemptCurrentInput": "canonical_source_message_promoted_from_history_to_current_addressed_turn"
   },
   "priorEpochLifecycleTerminals": [
-    {"actorRole": "human_owner", "state": "interrupted", "reason": "human_interrupted"},
-    {"actorRole": "agent_owner", "state": "interrupted", "reason": "human_interrupted"},
-    {"actorRole": "system", "state": "timed_out", "reason": "cycle_deadline_reached"},
-    {"actorRole": "system", "state": "interrupted", "reason": "coordination_mode_changed"},
-    {"actorRole": "system", "state": "interrupted", "reason": "epoch_superseded"}
+    {
+      "actorRole": "human_owner",
+      "state": "interrupted",
+      "reason": "human_interrupted"
+    },
+    {
+      "actorRole": "agent_owner",
+      "state": "interrupted",
+      "reason": "human_interrupted"
+    },
+    {
+      "actorRole": "system",
+      "state": "timed_out",
+      "reason": "cycle_deadline_reached"
+    },
+    {
+      "actorRole": "system",
+      "state": "interrupted",
+      "reason": "coordination_mode_changed"
+    },
+    {
+      "actorRole": "system",
+      "state": "interrupted",
+      "reason": "epoch_superseded"
+    }
   ],
   "fixtures": {
     "DLV1-01": "test_selection_persistence_failure_prevents_post",
@@ -114,8 +134,13 @@
   },
   "supportedRuntime": {
     "python": ">=3.11",
-    "testedPythonVersions": ["3.11.15"],
-    "operatingSystems": ["linux", "macos"],
+    "testedPythonVersions": [
+      "3.11.15"
+    ],
+    "operatingSystems": [
+      "linux",
+      "macos"
+    ],
     "hermes": {
       "apiRequirement": "platform-plugin BasePlatformAdapter plus SessionSource.thread_id routing where build_session_key includes group thread_id and defaults threaded groups to a shared cross-speaker session",
       "testedVersions": [
@@ -123,6 +148,17 @@
         "0.21.0 (2026.8.31)"
       ]
     },
-    "testedOpenAISDKVersions": ["2.24.0"]
+    "testedOpenAISDKVersions": [
+      "2.24.0"
+    ]
+  },
+  "recoveryFenceFixtures": {
+    "transport_and_ack": "test_paginated_fence_closes_holes_and_preserves_sibling",
+    "sse_reconnect": "test_sse_reconnect_drains_fence_through_same_ack_path",
+    "receipt_preservation": "test_valid_posted_receipt_is_not_rewritten_by_fence",
+    "uncertain_work_refused": "test_fence_refuses_selected_uncertain_and_active_work_without_mutation",
+    "legacy_alias_refused": "test_fence_refuses_inconsistent_legacy_alias_in_completion_scope",
+    "sibling_transaction": "test_real_state_transaction_preserves_sibling_and_cli_fence_on_restart",
+    "revoked_replaced_binding": "test_revoked_or_replaced_binding_cannot_persist_or_ack_fence"
   }
 }

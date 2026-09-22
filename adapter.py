@@ -2682,6 +2682,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         Re-derived from durable per-event evidence, never saved as a delivery
         acknowledgement. Unknown/pending work still stops the scan frontier.
         """
+        # An explicitly fenced acknowledgement gap must be re-delivered, even
+        # if a previous transport scan ran ahead. The existing consume/complete
+        # path records the authorized skip and performs the contiguous ack walk.
+        if binding.recovery_fence_cutoff > binding.acknowledged_cursor:
+            return binding.acknowledged_cursor
         frontier = binding.cursor
         # Preserve the existing lost-ack recovery path: an immediately
         # contiguous completed source must be re-consumed to retry its ack.
@@ -3125,24 +3130,31 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # authorized audited-skip mechanism; it never produces a post.
         if binding.recovery_fence_cutoff > 0 and seq <= binding.recovery_fence_cutoff:
             status = str(binding.inbox.get(key) or "")
-            if status not in TERMINAL_EVENT_STATES:
-                binding.inbox[key] = "ignored"
-                binding.pending_since.pop(key, None)
-                binding.pending_retries.pop(key, None)
-                binding.terminal_evidence[key] = {
-                    "status": "ignored",
-                    "sourceEventId": str(event.get("id") or ""),
-                    "canonicalEventId": str(event.get("id") or ""),
-                    "reason": "recovery_fence",
+            if self._terminal_evidence_valid(status, binding.terminal_evidence.get(key, {})):
+                # Replay the acknowledgement only. A fence must never rewrite
+                # a canonical posted receipt or an already-proven disposition.
+                await self._complete_event(binding, seq)
+            else:
+                # A cutoff authorizes skipping an unexecuted source, not
+                # discarding selected output, uncertain delivery or live work.
+                # These must first use the existing reconciliation paths.
+                owners = set(binding.cycle_attempt_owners.values())
+                sources = {event_id} | {
+                    source for source, source_seq in binding.turn_sequences.items()
+                    if source_seq == seq
                 }
-                self._persist_binding(binding)
-                logger.info(
-                    "Room %s recovery fence marked sequence %s ignored (cutoff=%s)",
-                    binding.room_id, seq, binding.recovery_fence_cutoff,
-                )
-            await self._complete_event(binding, seq, terminal_status="ignored",
-                                       source_id=str(event.get("id") or ""),
-                                       reason="recovery_fence")
+                if any(source in binding.delivery_intents
+                       or source in binding.delivery_lifecycle
+                       or source in owners
+                       or source in getattr(self, "_inflight_events", set())
+                       or source in getattr(self, "_cycle_attempts", {})
+                       for source in sources):
+                    raise ProtocolError(
+                        "Recovery fence requires source reconciliation before acknowledgement",
+                        code="recovery_fence_unresolved_work", retryable=False,
+                    )
+                await self._complete_event(binding, seq, terminal_status="ignored",
+                                           source_id=event_id, reason="recovery_fence")
             return
         if key not in binding.inbox:
             binding.inbox[key] = "pending"
