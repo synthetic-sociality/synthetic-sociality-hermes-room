@@ -5602,6 +5602,42 @@ class ExploreOpenBaselineTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_duplicate_open_delivery_reuses_the_canonical_receipt(self):
+        """ADR 0089: a second delivery of the same open-Room source posts once."""
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            instance = configured_instance(binding, None, [])
+            instance._cycle_attempts = {}
+            instance._cycle_response_sources = {}
+            posts, published = [], []
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}, "roster": []}
+
+                def room_policy(self, _room_id):
+                    return {"coordinationMode": "open"}
+
+                def post_message(self, *_args, **_kwargs):
+                    posts.append(1)
+                    return {"id": "canonical-1", "seq": 6, "ts": "2026-09-22T10:00:00Z"}
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(0, result=published.append(kwargs))
+            instance._stop_attempt_renewal = lambda _source_id: asyncio.sleep(0)
+            source_ref = adapter._dispatch_source_ref("evt-5", "generation-1")
+            first = await instance._send_final_owned(binding.room_id, source_ref, "one open reply")
+            second = await instance._send_final_owned(binding.room_id, source_ref, "one open reply")
+            self.assertTrue(first.success and second.success)
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(binding.delivery_intents["evt-5"]["delivery_state"], "posted")
+            self.assertNotEqual(binding.inbox.get("5"), "quarantined")
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()
