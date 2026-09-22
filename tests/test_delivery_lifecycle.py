@@ -1895,11 +1895,10 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
     def test_conformance_fixture_references_resolve_to_tests(self):
-        source_path = ROOT / "tests" / "test_delivery_lifecycle.py"
-        tree = ast.parse(source_path.read_text())
         defined_tests = {
             node.name
-            for node in ast.walk(tree)
+            for source_path in (ROOT / "tests").glob("test_*.py")
+            for node in ast.walk(ast.parse(source_path.read_text()))
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name.startswith("test_")
         }
