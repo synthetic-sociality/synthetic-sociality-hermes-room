@@ -229,20 +229,40 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
             instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
-            instance.handle_message = lambda *_args: self.fail("source must wait for server-owned attempt-ready event")
+            dispatched = []
+            instance.handle_message = lambda *args: asyncio.sleep(0, result=dispatched.append(args))
+            # Unit boundary: prove the event reaches the dispatch queue without
+            # driving the gateway session machinery.
+            instance._dispatch_next_queued = lambda _binding: asyncio.sleep(0)
             event = {"id": "human-source", "seq": 5, "type": "message.posted", "actorId": "human-member", "actorRole": role,
                      "payload": {"body": "Reply briefly", "resolvedRecipientMembershipIds": recipients, "followUpDepth": 0}}
             await instance._consume(binding, event)
             is_human = role in ("human", "human_owner", "agent_owner")
-            expected = is_human and (not recipients or "member-1" in recipients)
+            addressed = not recipients or "member-1" in recipients
+            # ADR 0089: only coordinated Rooms seed a server-owned cycle; an
+            # open Room gives every addressed agent a direct, turn-free reply.
+            expected = is_human and addressed and mode == "coordinated"
             self.assertEqual(len(starts), int(expected))
+            if not expected:
+                self.assertEqual(dispatched, [])
+            if is_human and mode == "open":
+                if addressed:
+                    # Accepted for a direct model run: neither ignored nor
+                    # superseded, and queued for the ordinary dispatch path.
+                    self.assertFalse(any(item.get("terminal_status") in ("ignored", "superseded") for item in completed), completed)
+                    self.assertIn(5, instance._queued_events.get("room-1", {}))
+                else:
+                    self.assertEqual(completed[-1]["reason"], "resolved_recipients_exclude_membership")
             if expected:
                 self.assertEqual(starts[0]["sourceEventId"], "human-source")
                 self.assertEqual([r["membershipId"] for r in starts[0]["roster"]], recipients or ["member-1", "member-2"])
                 self.assertEqual(completed[-1]["reason"], "cycle_source_context_only")
             self.assertNotIn("human-source", instance._open_reply_recipients)
             if not is_human:
-                self.assertIn(completed[-1]["reason"], ("not_addressed_to_membership", "agent_cycle_policy_ineligible"))
+                self.assertIn(completed[-1]["reason"], (
+                    "not_addressed_to_membership", "agent_cycle_policy_ineligible",
+                    "agent_follow_up_policy_ineligible", "agent_general_post_in_coordinated_room",
+                ))
 
         for role in ("human", "human_owner", "agent_owner"):
             for mode in ("open", "coordinated"):
@@ -1972,7 +1992,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.66")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.67")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
 
@@ -2028,7 +2048,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.66"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.67"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -5461,6 +5481,124 @@ class ConnectorEnrollmentTests(unittest.TestCase):
                     ("claim", "invite-2", "installation-1"),
                 ])
                 self.assertEqual(watcher_observations, [("room-2", False, "credential-2")])
+
+        asyncio.run(run())
+
+
+
+class ExploreOpenBaselineTests(unittest.TestCase):
+    """ADR 0089: open Rooms give agents equal access without a server-chosen order."""
+
+    def _consume(self, event, *, mode="open", follow_ups=True, command_roster=None):
+        binding = adapter.RoomBinding(
+            "https://room.example/api", "room-1", "member-1", "credential",
+            cursor=4, acknowledged_cursor=4,
+        )
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        for name, value in {
+            "_inflight_events": set(), "_event_seq": {}, "_event_epoch": {},
+            "_latest_source": {}, "_run_for_event": {}, "_activity_seq": {},
+            "_context_acknowledged_sources": set(), "_cycle_attempts": {},
+            "_cycle_response_sources": {}, "_source_coordination_modes": {},
+            "_open_reply_recipients": {}, "_queued_events": {},
+            "_active_dispatch_rooms": {}, "_event_dispatch_generation": {},
+            "_receive_locks": {}, "_ledger_locks": {}, "_terminal_sources": {},
+            "_terminal_results": {}, "_attempt_renewal_tasks": {},
+        }.items():
+            setattr(instance, name, value)
+        instance._persist_binding = lambda _binding: True
+        instance._state = types.SimpleNamespace(binding=lambda _room: binding)
+        starts, completed = [], []
+
+        class API:
+            def room_state(self, _room):
+                return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}, "roster": [
+                    {"membershipId": member, "displayName": member, "role": "participant_agent", "status": "active"}
+                    for member in ("member-1", "member-2")
+                ]}
+
+            def room_policy(self, _room):
+                return {"coordinationMode": mode, "agentFollowUpEnabled": follow_ups,
+                        "summaryCoordinatorMembershipId": "member-1"}
+
+            def start_discussion_cycle(self, _room, request):
+                starts.append(request)
+                return {"id": "cycle-1"}
+
+            def activity(self, *_args):
+                return {"accepted": True}
+
+            def acknowledge_peer_contribution(self, *_args):
+                return {"accepted": True}
+
+        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+        instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
+        instance._dispatch_next_queued = lambda _binding: asyncio.sleep(0)
+        asyncio.run(instance._consume(binding, event))
+        return instance, starts, completed
+
+    def test_general_agent_post_reaches_every_agent_and_replies_directly(self):
+        event = {"id": "peer-general", "seq": 5, "type": "message.posted", "actorId": "member-2",
+                 "actorRole": "participant_agent",
+                 "payload": {"body": "My view for everyone", "resolvedRecipientMembershipIds": [], "followUpDepth": 3}}
+        instance, starts, completed = self._consume(event)
+        self.assertEqual(starts, [])
+        self.assertFalse(any(item.get("terminal_status") in ("ignored", "superseded") for item in completed), completed)
+        self.assertIn(5, instance._queued_events.get("room-1", {}))
+        # A reply is a general post (counted by the reply cap), not addressed to the author.
+        self.assertNotIn("peer-general", instance._open_reply_recipients)
+
+    def test_general_agent_post_is_ignored_in_coordinated_rooms(self):
+        event = {"id": "peer-general", "seq": 5, "type": "message.posted", "actorId": "member-2",
+                 "actorRole": "participant_agent",
+                 "payload": {"body": "My view", "resolvedRecipientMembershipIds": []}}
+        instance, starts, completed = self._consume(event, mode="coordinated")
+        self.assertEqual(starts, [])
+        self.assertEqual(completed[-1]["reason"], "agent_general_post_in_coordinated_room")
+        self.assertNotIn(5, instance._queued_events.get("room-1", {}))
+
+    def test_summarize_now_starts_one_coordinator_cycle_in_open_rooms(self):
+        event = {"id": "summarize", "seq": 5, "type": "human.command", "actorId": "owner",
+                 "actorRole": "human_owner",
+                 "payload": {"command": {"command": "summarize", "idempotencyKey": "sum-1"}}}
+        _instance, starts, completed = self._consume(event)
+        self.assertEqual(len(starts), 1)
+        self.assertEqual([r["membershipId"] for r in starts[0]["roster"]], ["member-1"])
+        self.assertEqual(completed[-1]["reason"], "cycle_source_context_only")
+
+    def test_reply_cap_refusal_is_a_successful_skipped_terminal(self):
+        async def run():
+            binding = lifecycle_binding()
+            binding.delivery_intents.clear()
+            binding.delivery_lifecycle.clear()
+            instance = configured_instance(binding, None, [])
+            instance._cycle_attempts = {}
+            instance._cycle_response_sources = {}
+            published, posts = [], []
+
+            class API:
+                def room_state(self, _room_id):
+                    return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}, "roster": []}
+
+                def room_policy(self, _room_id):
+                    return {"coordinationMode": "open"}
+
+                def post_message(self, *_args, **_kwargs):
+                    posts.append(1)
+                    raise adapter.ProtocolError("cap", status=409, code="reply_cap_reached", retryable=False)
+
+            api = API()
+            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._publish = lambda *_args, **kwargs: asyncio.sleep(0, result=published.append(kwargs))
+            instance._stop_attempt_renewal = lambda _source_id: asyncio.sleep(0)
+            source_ref = adapter._dispatch_source_ref("evt-5", "generation-1")
+            result = await instance._send_final_owned(binding.room_id, source_ref, "one more reply")
+            self.assertTrue(result.success)
+            self.assertEqual(instance._terminal_results[source_ref]["reason"], "reply_cap_reached")
+            self.assertEqual(published[-1]["status"], "skipped")
+            self.assertNotEqual((binding.delivery_intents.get("evt-5") or {}).get("delivery_state"), "quarantined")
+            self.assertNotEqual(binding.inbox.get("5"), "quarantined")
+            self.assertEqual(len(posts), 1)
 
         asyncio.run(run())
 

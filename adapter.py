@@ -64,7 +64,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.66"
+CONNECTOR_VERSION = "1.0.67"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -388,9 +388,18 @@ def _is_peer_contribution(event: dict[str, Any], membership_id: str) -> bool:
     )
 
 
+def _is_general_agent_post(payload: dict[str, Any]) -> bool:
+    """An agent post without recipients or cycle is addressed to the whole Room (ADR 0089)."""
+    return not str(payload.get("cycleId") or "").strip() and not (payload.get("recipientSelectors") or [])
+
+
 def _agent_event_addresses(payload: dict[str, Any], membership_id: str) -> bool:
     resolved = payload.get("resolvedRecipientMembershipIds")
     if isinstance(resolved, list):
+        if not resolved:
+            # Whether a general post may start a reply is decided against the
+            # Room policy downstream; coordinated rooms keep explicit routing.
+            return _is_general_agent_post(payload)
         return membership_id in {str(value) for value in resolved}
     for selector in payload.get("recipientSelectors") or []:
         if selector.get("kind") == "everyone" or str(selector.get("membershipId") or "") == membership_id:
@@ -2074,6 +2083,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     source_ref, dispatch_generation, f"cancelled:{source_id}",
                     terminal_status="cancelled", reason=error.code,
                 )
+            if error.code == "reply_cap_reached":
+                # The Room refused this counted open-mode post (ADR 0089): a
+                # legitimate terminal outcome without a post, never a
+                # quarantine, retry or execution failure.
+                await self._publish(binding, source_id, "terminal", status="skipped", suppress_errors=True)
+                return self._successful_terminal(
+                    source_ref, dispatch_generation, f"skipped:{source_id}",
+                    terminal_status="skipped", reason="reply_cap_reached",
+                )
             if error.code == "stale_epoch":
                 await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
                 return self._successful_terminal(
@@ -3389,9 +3407,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             and retry_targets == [binding.membership_id]
             and not command.get("targetSelectors")
         )
-        if coordination_mode == "open" and event_type == "human.command" and not explicit_retry:
+        summarize_command = human_source and event_type == "human.command" and command.get("command") == "summarize"
+        if coordination_mode == "open" and event_type == "human.command" and not explicit_retry and not summarize_command:
             # Structured bounded-discussion commands belong to coordinated
-            # rooms. Ordinary open-room prose follows the earlier free path.
+            # rooms. Ordinary open-room prose follows the free path; a human
+            # "summarize now" is the open Room's synthesis (ADR 0089).
             await self._complete_event(
                 binding, seq, terminal_status="ignored", source_id=event_id,
                 reason="coordinated_command_in_open_room",
@@ -3405,6 +3425,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._complete_event(
                 binding, seq, terminal_status="ignored", source_id=event_id,
                 reason="agent_cycle_policy_ineligible",
+            )
+            return
+
+        if (
+            coordination_mode != "open" and event_type == "message.posted" and not human_source
+            and not agent_seed and not payload.get("cycleId") and not legacy_untyped_message
+        ):
+            await self._complete_event(
+                binding, seq, terminal_status="ignored", source_id=event_id,
+                reason="agent_general_post_in_coordinated_room",
             )
             return
 
@@ -3424,29 +3454,19 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # open-exchange cycle. No transcript parsing or visible slash
                 # command is involved; Room policy/guidance controls behavior.
             else:
-                # The one-hop cap protects only casual peer replies. A
-                # canonical cycleId is server-owned routing and remains
-                # bounded by the persisted cycle budget, so it must reach
-                # Claim even at deeper follow-up depths.
-                if not payload.get("cycleId"):
-                    if not agent_seed and (
-                        not bool(policy_view.get("agentFollowUpEnabled", True))
-                        or int(payload.get("followUpDepth") or 0) >= 1
-                    ):
-                        await self._complete_event(
-                            binding, seq, terminal_status="ignored", source_id=event_id,
-                            reason="agent_follow_up_policy_ineligible",
-                        )
-                        return
-                    actor_id = str(event.get("actorId") or "")
-                    if actor_id:
-                        recipients = getattr(self, "_open_reply_recipients", None)
-                        if recipients is None:
-                            recipients = {}
-                            self._open_reply_recipients = recipients
-                        recipients[event_id] = [actor_id]
+                # Open Rooms: agents may reply to one another at any depth;
+                # the server enforces the per-agent reply cap (ADR 0089). A
+                # reply is a general post linked by respondsTo, so it counts
+                # toward that cap; it is not addressed to the author.
+                if not payload.get("cycleId") and not bool(policy_view.get("agentFollowUpEnabled", True)):
+                    await self._complete_event(
+                        binding, seq, terminal_status="ignored", source_id=event_id,
+                        reason="agent_follow_up_policy_ineligible",
+                    )
+                    return
         cycle_attempt: dict[str, Any] | None = None
-        if human_source or agent_seed:
+        open_message = coordination_mode == "open" and event_type == "message.posted"
+        if (human_source or agent_seed) and not open_message:
             state = receive_state
             active_epoch = state.get("activeEpoch") or {}
             starts_at = int(active_epoch.get("startsAtSeq") or 0)
@@ -3480,7 +3500,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         elif payload.get("cycleId") and not summary_for_self:
             cycle_attempt = await self._claim_discussion_attempt(binding, str(payload.get("cycleId")))
-        if (human_source or agent_seed or ready_for_self or (payload.get("cycleId") and not summary_for_self)) and not cycle_attempt:
+        if (((human_source or agent_seed) and not open_message) or ready_for_self or (payload.get("cycleId") and not summary_for_self)) and not cycle_attempt:
             await self._complete_event(
                 binding, seq, terminal_status="superseded", source_id=event_id,
                 reason="discussion_attempt_unavailable",
