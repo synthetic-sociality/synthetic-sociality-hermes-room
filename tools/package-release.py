@@ -40,6 +40,7 @@ PAYLOAD = (
     "tests/test_delivery_lifecycle.py",
     "tests/test_protocol_artifacts.py",
     "tests/test_credential_renewal.py",
+    "tests/test_recovery_fence_transport.py",
 )
 
 
