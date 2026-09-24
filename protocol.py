@@ -471,6 +471,7 @@ class RoomProtocol:
         idempotency_key: str = "",
         logical_contribution_id: str = "",
         payload_dialect: str = "",
+        addresses: str = "",
     ) -> dict[str, Any]:
         payload_dialect = payload_dialect or self._message_payload_dialect_override
         if payload_dialect not in MESSAGE_PAYLOAD_DIALECTS:
@@ -485,6 +486,8 @@ class RoomProtocol:
             "contributionType": "question" if recipient_membership_ids else "claim",
             "body": body,
         }
+        if addresses:
+            payload["addresses"] = addresses
         if payload_dialect == "v2":
             payload["logicalContributionId"] = (
                 logical_contribution_id

@@ -22,6 +22,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 
 from . import cli, renewal
 from .context import canonical_room_context as _canonical_room_context
+from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
 from .context import epoch_start_event as _epoch_start_event
 from .context import recent_room_messages as _recent_room_messages
@@ -832,6 +833,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._renewal_task: asyncio.Task | None = None
         self._renewing_rooms: set[str] = set()
         self._renewal_retry_after: dict[str, float] = {}
+        # Post numbers the agent has been shown, per Room, so a reply marker
+        # resolves only to an event this connector actually read from that Room.
+        self._room_post_ids: dict[str, dict[int, str]] = {}
         self._state_file = state_path()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -2205,6 +2209,32 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 code="attempt_authority_superseded", retryable=False,
             )
 
+    def _post_number_index(self) -> dict[str, dict[int, str]]:
+        # Created lazily as well as in __init__: like other optional adapter
+        # state here, it must not assume every construction path ran __init__.
+        index = getattr(self, "_room_post_ids", None)
+        if index is None:
+            index = self._room_post_ids = {}
+        return index
+
+    def _remember_post_numbers(self, room_id: str, events: list[dict[str, Any]]) -> None:
+        known = self._post_number_index().setdefault(room_id, {})
+        for item in events:
+            seq, event_id = int(item.get("seq") or 0), str(item.get("id") or "")
+            if seq > 0 and event_id:
+                known[seq] = event_id
+        # Numbers are canonical and never reassigned; keep the window bounded.
+        if len(known) > 2000:
+            for seq in sorted(known)[: len(known) - 2000]:
+                del known[seq]
+
+    def _reply_target(self, room_id: str, body: str) -> tuple[str, str]:
+        """Return (addresses, body without the marker)."""
+        number, stripped = _parse_reply_marker(body)
+        if number is None:
+            return "", body
+        return self._post_number_index().get(room_id, {}).get(number, ""), stripped
+
     async def _post_with_fresh_context(
         self,
         binding: RoomBinding,
@@ -2231,6 +2261,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             observed = int(persisted["observed_seq"])
             observed_epoch = str(persisted["observed_epoch_id"])
             body = str(persisted["body"])
+            addresses = str(persisted.get("addresses") or "")
             cycle_payload = dict(persisted.get("cycle") or {})
             authority_attempt = _post_cycle_authority_attempt(
                 cycle_payload, dict(selected.get("cycle") or {}), cycle_attempt,
@@ -2279,12 +2310,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if recipient_membership_ids:
                 cycle_payload["recipients"] = list(recipient_membership_ids)
             recipients = list(cycle_payload.get("recipients") or [])
+            # Read the marker once, here, where the request is frozen: retries
+            # replay this record, and the Room refuses a changed payload.
+            addresses, body = self._reply_target(binding.room_id, body)
             intent["post"] = {
                 "coordination_mode": coordination_mode,
                 "turn_id": turn_id,
                 "observed_seq": observed,
                 "observed_epoch_id": observed_epoch,
                 "body": body,
+                "addresses": addresses,
                 "responds_to": str(cycle_payload.get("responds_to") or source_id),
                 "recipient_membership_ids": recipients,
                 "contribution_type": "question" if recipients else "claim",
@@ -2341,6 +2376,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             cycle_generation=int(cycle_payload.get("generation") or 0),
                             recipient_membership_ids=list(cycle_payload.get("recipients") or []),
                             responds_to_id=str(cycle_payload.get("responds_to") or source_id),
+                            addresses=addresses,
                         )
                     return _with_message_payload_dialect(
                         _with_logical_contribution_id(
@@ -2348,6 +2384,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         ), payload_dialect,
                     ).post_message(
                         chat_id, turn_id, observed, source_id, body, observed_epoch,
+                        addresses=addresses,
                     )
                 event = await self._call(
                     binding,
@@ -3916,6 +3953,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # Canonical delivery remains available if the bounded enrichment
             # read fails; the next Room event gets another chance to refresh.
             logger.warning("Room %s context refresh unavailable: %s", binding.room_id, error)
+        self._remember_post_numbers(binding.room_id, [*context_events, event])
         prompt_event = _cycle_prompt_event(event, payload, context_events)
         prompt_payload = prompt_event.get("payload") or {}
         prompt_event_id = str(prompt_event.get("id") or event_id)
