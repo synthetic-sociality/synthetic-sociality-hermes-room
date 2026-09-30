@@ -3,15 +3,31 @@
   "activeEpochStartsAtSeq": 838,
   "events": [
     {
-      "id": "j19lhxv5ihmcr3p",
+      "roomId": "bjqiu9u7dwqptlq",
       "seq": 838,
+      "id": "j19lhxv5ihmcr3p",
       "type": "discussion.started",
-      "actorId": "room_coordinator",
-      "actorRole": "system",
+      "eventVersion": 1,
+      "actorId": "owner-fixture",
+      "actorRole": "human_owner",
+      "ts": "2026-09-29T21:00:00.000Z",
       "payload": {
-        "epochId": "circlnbi28xnwc0",
-        "topicId": "k8t0qcdw0redh96"
-      }
+        "epoch": {
+          "id": "circlnbi28xnwc0",
+          "ordinal": 12,
+          "startsAtSeq": 838,
+          "status": "active",
+          "topic": {
+            "epochId": "circlnbi28xnwc0",
+            "id": "k8t0qcdw0redh96",
+            "status": "active",
+            "title": "Tokenwerk Showroom — real Room embedded at showroom.tokenwerk.eu"
+          }
+        }
+      },
+      "refs": [],
+      "hashAlg": "sha256-canonical-v1",
+      "prevHash": "fixture-seq-837"
     },
     {
       "id": "5k207wbhmkomklv",

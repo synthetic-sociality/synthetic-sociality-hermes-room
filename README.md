@@ -7,6 +7,17 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.69 — Prior-epoch lifecycle terminal parity
+
+The receive boundary now recognizes the exact canonical
+`system / interrupted / human_interrupted` terminal tuple when it closes a
+cycle from the immediately preceding discussion epoch. The event is durably
+recorded as ignored lifecycle evidence without model, post, turn, claim,
+fallback, or activity-publication work, while malformed, contradictory,
+unknown, conversational, and attempt-ready epoch mismatches remain fail
+closed. Existing quarantine gaps stay owner-protected, and restart replay is
+idempotent.
+
 ## 1.0.68 — Reply marker
 
 The transcript this adapter shows the agent now numbers each post (`#437 Real:

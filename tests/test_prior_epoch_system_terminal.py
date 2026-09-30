@@ -15,7 +15,7 @@ from test_delivery_lifecycle import adapter, state_store
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "joined-coding-epoch-terminal" / "seq-838-840.canonical.json"
-FIXTURE_SHA256 = "f7419f81c5a63d9ac9e5c6af229143e60d14e6657fe2283ab4b117ea00ece320"
+FIXTURE_SHA256 = "af49b584618d2e25ae7ad265995a7e006aa0ba7c3f3170e6c1b90895340d2971"
 
 
 def load_fixture() -> dict:
@@ -42,7 +42,12 @@ def make_binding():
     return binding
 
 
-def make_instance(binding, path: Path | None = None):
+def make_instance(
+    binding,
+    path: Path | None = None,
+    *,
+    active_epoch_id: str | None = None,
+):
     instance = object.__new__(adapter.SyntheticSocialityAdapter)
     for name, value in {
         "_inflight_events": set(),
@@ -94,7 +99,11 @@ def make_instance(binding, path: Path | None = None):
             fixture = load_fixture()
             return {
                 "activeEpoch": {
-                    "id": fixture["activeEpochId"],
+                    "id": (
+                        fixture["activeEpochId"]
+                        if active_epoch_id is None
+                        else active_epoch_id
+                    ),
                     "startsAtSeq": fixture["activeEpochStartsAtSeq"],
                 }
             }
@@ -102,6 +111,9 @@ def make_instance(binding, path: Path | None = None):
         def acknowledge(self, _room_id, seq):
             calls["acknowledge"] += 1
             return {"acknowledgedSeq": seq}
+
+        def room_policy(self, _room_id):
+            return {"coordinationMode": "coordinated"}
 
         def __getattr__(self, name):
             if "activity" in name:
@@ -130,7 +142,10 @@ def make_instance(binding, path: Path | None = None):
     instance._call = call
     instance.handle_message = forbidden("model")
     instance.send = forbidden("fallback")
-    instance._publish = forbidden("activity")
+    async def publish(*_args, **_kwargs):
+        effects["activity"] += 1
+
+    instance._publish = publish
     instance._dispatch_next_queued = forbidden("dispatch")
     if path is None:
         instance._persist_binding = lambda _binding: True
@@ -153,6 +168,19 @@ class PriorEpochSystemTerminalTests(unittest.TestCase):
         async def run():
             fixture = load_fixture()
             self.assertEqual([event["seq"] for event in fixture["events"]], [838, 839, 840])
+            epoch_start = fixture["events"][0]
+            self.assertEqual(epoch_start["actorRole"], "human_owner")
+            self.assertEqual(epoch_start["actorId"], "owner-fixture")
+            self.assertEqual(
+                epoch_start["payload"]["epoch"]["id"],
+                fixture["activeEpochId"],
+            )
+            self.assertEqual(
+                epoch_start["payload"]["epoch"]["topic"]["id"],
+                "k8t0qcdw0redh96",
+            )
+            self.assertNotIn("epochId", epoch_start["payload"])
+            self.assertNotIn("topicId", epoch_start["payload"])
             old_terminal = fixture["events"][1]
             self.assertEqual(
                 (
@@ -170,8 +198,13 @@ class PriorEpochSystemTerminalTests(unittest.TestCase):
                 state_store.save(adapter.PluginState(bindings=[binding]), path)
                 instance, effects, calls, update_patch = make_instance(binding, path)
                 with update_patch:
-                    await instance._consume(binding, copy.deepcopy(fixture["events"][0]))
+                    await instance._consume(binding, copy.deepcopy(epoch_start))
+                    self.assertEqual(effects["activity"], 1)
+                    effects_before_terminal = copy.deepcopy(effects)
+                    calls_before_terminal = copy.deepcopy(calls)
                     await instance._consume(binding, copy.deepcopy(old_terminal))
+                    self.assertEqual(effects, effects_before_terminal)
+                    self.assertEqual(calls["acknowledge"], calls_before_terminal["acknowledge"])
 
                 durable = state_store.load(path).binding(binding.room_id)
                 self.assertIsNotNone(durable)
@@ -192,7 +225,9 @@ class PriorEpochSystemTerminalTests(unittest.TestCase):
 
                 restarted, restart_effects, restart_calls, restart_patch = make_instance(durable, path)
                 with restart_patch:
+                    restart_effects_before_duplicate = copy.deepcopy(restart_effects)
                     await restarted._consume(durable, copy.deepcopy(old_terminal))
+                    self.assertEqual(restart_effects, restart_effects_before_duplicate)
                     await restarted._consume(durable, copy.deepcopy(fixture["events"][2]))
 
                 reloaded = state_store.load(path).binding(binding.room_id)
@@ -207,7 +242,7 @@ class PriorEpochSystemTerminalTests(unittest.TestCase):
                 )
                 self.assertEqual(reloaded.terminal_evidence["840"]["reason"], "ineligible_event_type")
                 self.assertEqual(calls["acknowledge"] + restart_calls["acknowledge"], 0)
-                self.assertEqual(effects, {key: 0 for key in effects})
+                self.assertEqual(effects, {**{key: 0 for key in effects}, "activity": 1})
                 self.assertEqual(restart_effects, {key: 0 for key in restart_effects})
                 self.assertEqual(old_terminal["payload"]["epochId"], "ssftrri7y8uioxl")
 
@@ -265,6 +300,12 @@ class PriorEpochSystemTerminalTests(unittest.TestCase):
                 "id": "malformed-epoch",
                 "payload": {**terminal["payload"], "epochId": " \t"},
             },
+            "empty_active_epoch": terminal,
+            "non_string_epoch": {
+                **terminal,
+                "id": "non-string-epoch",
+                "payload": {**terminal["payload"], "epochId": 17},
+            },
             "future_conversational_epoch": {
                 "id": "future-message",
                 "seq": 839,
@@ -273,6 +314,18 @@ class PriorEpochSystemTerminalTests(unittest.TestCase):
                 "actorRole": "participant_agent",
                 "payload": {"epochId": "future-epoch", "body": "must not dispatch"},
             },
+        }
+        expected_codes = {
+            "conversational_message": "epoch_boundary_contradiction",
+            "attempt_ready": "epoch_boundary_contradiction",
+            "missing_cycle_id": "epoch_boundary_contradiction",
+            "unknown_tuple": "epoch_boundary_contradiction",
+            "unreviewed_actor": "epoch_boundary_contradiction",
+            "contradictory_epoch": "epoch_evidence_contradictory",
+            "malformed_epoch": "epoch_evidence_malformed",
+            "empty_active_epoch": "active_epoch_unavailable",
+            "non_string_epoch": "epoch_evidence_malformed",
+            "future_conversational_epoch": "epoch_boundary_contradiction",
         }
 
         for name, event in controls.items():
@@ -286,14 +339,18 @@ class PriorEpochSystemTerminalTests(unittest.TestCase):
                     cursor=839,
                     acknowledged_cursor=837,
                 )
-                instance, effects, calls, update_patch = make_instance(binding)
+                instance, effects, calls, update_patch = make_instance(
+                    binding,
+                    active_epoch_id="" if name == "empty_active_epoch" else None,
+                )
                 with update_patch, self.assertRaises(adapter.ProtocolError) as raised:
                     asyncio.run(instance._consume(binding, copy.deepcopy(event)))
-                self.assertIn(
-                    raised.exception.code,
-                    {"epoch_boundary_contradiction", "epoch_evidence_contradictory", "epoch_evidence_malformed"},
-                )
+                self.assertEqual(raised.exception.code, expected_codes[name])
                 self.assertEqual(binding.acknowledged_cursor, 837)
+                self.assertEqual(binding.inbox, {"839": "pending"})
+                self.assertEqual(binding.terminal_evidence, {})
+                self.assertEqual(binding.delivery_intents, {})
+                self.assertEqual(binding.delivery_lifecycle, {})
                 self.assertEqual(calls["acknowledge"], 0)
                 self.assertEqual(effects, {key: 0 for key in effects})
 
