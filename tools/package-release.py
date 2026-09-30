@@ -32,6 +32,7 @@ PAYLOAD = (
     "tests/__init__.py",
     "tests/fixtures/berlin-huawei-malformed-redacted.json",
     "tests/fixtures/berlin-seq120-redacted-offline.json",
+    "tests/fixtures/joined-coding-epoch-terminal/seq-838-840.canonical.json",
     "tests/fixtures/zurie-epoch-boundary/seq-132.canonical.json",
     "tests/fixtures/zurie-epoch-boundary/seq-133.canonical.json",
     "tests/fixtures/zurie-epoch-boundary/seq-134.canonical.json",
@@ -39,6 +40,7 @@ PAYLOAD = (
     "tests/test_context.py",
     "tests/test_delivery_lifecycle.py",
     "tests/test_protocol_artifacts.py",
+    "tests/test_prior_epoch_system_terminal.py",
     "tests/test_credential_renewal.py",
     "tests/test_recovery_fence_transport.py",
 )

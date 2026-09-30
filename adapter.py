@@ -140,6 +140,7 @@ ROOM_RESPONSE_INSTRUCTION = (
 _PRIOR_EPOCH_LIFECYCLE_TERMINALS = frozenset({
     ("human_owner", "interrupted", "human_interrupted"),
     ("agent_owner", "interrupted", "human_interrupted"),
+    ("system", "interrupted", "human_interrupted"),
     ("system", "timed_out", "cycle_deadline_reached"),
     ("system", "interrupted", "coordination_mode_changed"),
     ("system", "interrupted", "epoch_superseded"),

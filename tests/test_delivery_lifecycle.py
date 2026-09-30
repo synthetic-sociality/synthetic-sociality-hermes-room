@@ -3020,6 +3020,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         accepted = [
             terminal,
             {**terminal, "actorRole": "agent_owner"},
+            {**terminal, "actorRole": "system"},
             {**terminal, "actorRole": "system", "payload": {
                 **terminal["payload"], "state": "timed_out",
                 "reason": "cycle_deadline_reached",
@@ -3036,7 +3037,6 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 self.assertTrue(adapter._is_lifecycle_only_cycle_terminal(event))
 
         rejected = [
-            {**terminal, "actorRole": "system"},
             {**terminal, "type": "message.posted"},
             {**terminal, "payload": {**terminal["payload"], "cycleId": ""}},
             {**terminal, "payload": {**terminal["payload"], "state": "completed"}},

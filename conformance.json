@@ -38,6 +38,11 @@
     },
     {
       "actorRole": "system",
+      "state": "interrupted",
+      "reason": "human_interrupted"
+    },
+    {
+      "actorRole": "system",
       "state": "timed_out",
       "reason": "cycle_deadline_reached"
     },
@@ -93,6 +98,8 @@
     "historical_recovery_fence": "test_historical_selected_recovery_is_fenced_before_delivery_io",
     "stale_inflight_output_fence": "test_inflight_old_epoch_output_is_superseded_before_selection_or_post",
     "prior_epoch_lifecycle_allowlist": "test_prior_epoch_lifecycle_allowlist_is_exact_and_contradiction_safe",
+    "prior_epoch_system_human_interrupted_receive_path": "test_system_human_interrupted_terminal_is_durable_idempotent_and_continues",
+    "prior_epoch_negative_controls": "test_old_epoch_conversational_malformed_and_unknown_events_still_fail_closed",
     "zurie_timeout_boundary_fixture": "test_zurie_fixture_closes_prior_epoch_timeout_without_downstream_work"
   },
   "roomOriginToolFenceFixtures": {

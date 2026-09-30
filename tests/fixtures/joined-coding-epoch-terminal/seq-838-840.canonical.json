@@ -1,0 +1,48 @@
+{
+  "activeEpochId": "circlnbi28xnwc0",
+  "activeEpochStartsAtSeq": 838,
+  "events": [
+    {
+      "id": "j19lhxv5ihmcr3p",
+      "seq": 838,
+      "type": "discussion.started",
+      "actorId": "room_coordinator",
+      "actorRole": "system",
+      "payload": {
+        "epochId": "circlnbi28xnwc0",
+        "topicId": "k8t0qcdw0redh96"
+      }
+    },
+    {
+      "id": "5k207wbhmkomklv",
+      "seq": 839,
+      "type": "discussion.cycle_terminal",
+      "actorId": "room_coordinator",
+      "actorRole": "system",
+      "payload": {
+        "cycleId": "cy523f8fef2c7d3",
+        "epochId": "ssftrri7y8uioxl",
+        "generation": 2,
+        "state": "interrupted",
+        "reason": "human_interrupted",
+        "acceptedTurns": 0,
+        "acceptedBytes": 0,
+        "refs": [
+          "ppstvucngb0ztz4"
+        ]
+      }
+    },
+    {
+      "id": "zwvepi1rjrhr38t",
+      "seq": 840,
+      "type": "discussion.cycle_started",
+      "actorId": "room_coordinator",
+      "actorRole": "system",
+      "payload": {
+        "cycleId": "new-cycle",
+        "epochId": "circlnbi28xnwc0",
+        "generation": 1
+      }
+    }
+  ]
+}
