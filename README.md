@@ -7,6 +7,16 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.70 — Queued events wait for a busy Room
+
+The stale-pending sweep no longer ages an event that is queued behind another
+event's in-flight dispatch: while the Room is held, the queued event's pending
+clock is refreshed instead of spending its retry budget toward quarantine. A
+wedged holder is still released by the dispatch bound, after which the queue is
+dispatched. A queued event that does reach quarantine releases its cycle
+attempt, and quarantined events are dropped from the queue rather than
+dispatched. Agent behaviour is unchanged; Room policy still decides who speaks.
+
 ## 1.0.69 — Prior-epoch lifecycle terminal parity
 
 The receive boundary now recognizes the exact canonical
