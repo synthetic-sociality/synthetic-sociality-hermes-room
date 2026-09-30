@@ -4209,7 +4209,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         while queued:
             seq = min(queued)
             event = queued[seq]
-            if seq <= binding.acknowledged_cursor or binding.inbox.get(str(seq)) in TERMINAL_EVENT_STATES:
+            if (
+                seq <= binding.acknowledged_cursor
+                or binding.inbox.get(str(seq)) in TERMINAL_EVENT_STATES
+                or binding.inbox.get(str(seq)) == "quarantined"
+            ):
                 queued.pop(seq)
                 continue
             event_id = str(event.get("id") or "")
@@ -4584,6 +4588,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         active_rooms = getattr(self, "_active_dispatch_rooms", None) or {}
         event_generations = getattr(self, "_event_dispatch_generation", None) or {}
         inflight = getattr(self, "_inflight_events", None) or set()
+        queued = (getattr(self, "_queued_events", None) or {}).get(binding.room_id, {})
+        holder = active_rooms.get(binding.room_id)
         for seq in sorted(stale):
             key = str(seq)
             running_event = next((event_id for event_id, event_seq in self._event_seq.get(binding.room_id, {}).items() if event_seq == seq), "")
@@ -4598,6 +4604,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 logger.info(
                     "Room %s event sequence %s still executing after %.0fs; waiting instead of re-dispatching",
                     binding.room_id, seq, PENDING_EVENT_TTL_SECONDS,
+                )
+                continue
+            if holder and seq in queued and running_generation != holder:
+                # Queued behind another event's dispatch: the Room is busy, not
+                # this event stalled. Its wait is bounded by the holder's own
+                # completion and by _release_wedged_dispatch.
+                binding.pending_since[key] = now
+                logger.info(
+                    "Room %s event sequence %s queued behind an in-flight dispatch; waiting",
+                    binding.room_id, seq,
                 )
                 continue
             retries = int(binding.pending_retries.get(key, 0)) + 1
@@ -4618,6 +4634,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     binding.acknowledged_cursor,
                 )
             event_id = next((event_id for event_id, event_seq in self._event_seq.get(binding.room_id, {}).items() if event_seq == seq), "")
+            if not event_id and seq in queued:
+                event_id = str(queued[seq].get("id") or "")
             self._inflight_events.discard(event_id)
             active_rooms = getattr(self, "_active_dispatch_rooms", {})
             generation = getattr(self, "_event_dispatch_generation", {}).get(event_id, "")
@@ -4629,6 +4647,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._persist_binding(binding)
             if binding.inbox.get(key) == "quarantined":
                 await self._release_cycle_attempt_after_failure(binding, event_id, "quarantined_unprocessed")
+        if queued and binding.room_id not in (getattr(self, "_active_dispatch_rooms", None) or {}):
+            await self._dispatch_next_queued(binding)
 
     def _record_delivery_failure(
         self,

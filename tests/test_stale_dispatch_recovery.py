@@ -131,5 +131,111 @@ class StaleDispatchRecoveryTests(unittest.TestCase):
         self.assertEqual(instance.stopped, ["evt-9"])
 
 
+def queue_behind(instance, binding, holder_seq=None, *, holder_generation="gen-a", started_age=10.0):
+    """Hold the Room with a running dispatch and record dispatches of queued events."""
+    instance._queued_events = {binding.room_id: {}}
+    instance.dispatched = []
+
+    async def dispatch(_binding, event, generation):
+        instance.dispatched.append((str(event.get("id")), generation))
+        return True
+
+    instance._dispatch_room_event = dispatch
+    if holder_seq is not None:
+        holder = f"evt-{holder_seq}"
+        instance._event_seq[binding.room_id][holder] = holder_seq
+        instance._inflight_events.add(holder)
+        instance._event_dispatch_generation[holder] = holder_generation
+        instance._active_dispatch_rooms[binding.room_id] = holder_generation
+        instance._dispatch_started_at[holder_generation] = time.time() - started_age
+    return instance
+
+
+def enqueue(instance, binding, seq, *, event_id=None, index=True):
+    event_id = event_id or f"evt-{seq}"
+    instance._queued_events[binding.room_id][seq] = {"id": event_id, "sequence": seq}
+    if index:
+        instance._event_seq[binding.room_id][event_id] = seq
+
+
+class QueuedBehindDispatchTests(unittest.TestCase):
+    def _assert_waits(self, retries):
+        binding = binding_with_pending([2], retries={2: retries})
+        instance = queue_behind(stale_instance(binding, cycle_attempts={"evt-2": ATTEMPT}), binding, holder_seq=1)
+        enqueue(instance, binding, 2)
+        before = time.time()
+        asyncio.run(instance._expire_stale_pending(binding))
+        self.assertEqual(binding.inbox["2"], "pending")
+        self.assertEqual(binding.pending_retries["2"], retries)
+        self.assertGreaterEqual(binding.pending_since["2"], before)
+        self.assertEqual(instance._active_dispatch_rooms, {"room-1": "gen-a"})
+        self.assertIn(2, instance._queued_events["room-1"])
+        self.assertIn("evt-2", instance._cycle_attempts)
+        self.assertEqual(instance.completed, [])
+        self.assertEqual(instance.stopped, [])
+        self.assertEqual(instance.dispatched, [])
+
+    def test_queued_event_waits_while_another_dispatch_holds_the_room(self):
+        self._assert_waits(0)
+
+    def test_queued_event_at_retry_cap_is_not_quarantined_while_room_is_held(self):
+        self._assert_waits(adapter.PENDING_EVENT_MAX_RETRIES)
+
+    def test_wedged_holder_is_released_and_the_queue_is_dispatched(self):
+        binding = binding_with_pending([2], age=1.0)
+        instance = queue_behind(
+            stale_instance(binding, cycle_attempts={"evt-1": ATTEMPT}), binding, holder_seq=1,
+            started_age=adapter.DISPATCH_INFLIGHT_MAX_SECONDS + 5,
+        )
+        enqueue(instance, binding, 2)
+        asyncio.run(instance._expire_stale_pending(binding))
+        self.assertEqual(instance.completed, [("attempt-1", "fail")])
+        self.assertEqual(instance.stopped, ["evt-1"])
+        self.assertEqual([event_id for event_id, _ in instance.dispatched], ["evt-2"])
+        self.assertEqual(instance._active_dispatch_rooms["room-1"], instance.dispatched[0][1])
+        self.assertEqual(binding.inbox["2"], "pending")
+
+    def test_quarantined_queued_event_is_never_dispatched(self):
+        binding = binding_with_pending([3], age=1.0)
+        binding.inbox["2"] = "quarantined"
+        instance = queue_behind(stale_instance(binding), binding)
+        enqueue(instance, binding, 2)
+        enqueue(instance, binding, 3)
+        asyncio.run(instance._dispatch_next_queued(binding))
+        self.assertEqual([event_id for event_id, _ in instance.dispatched], ["evt-3"])
+        self.assertNotIn(2, instance._queued_events.get("room-1", {}))
+
+    def test_queued_event_quarantined_without_holder_releases_its_attempt(self):
+        binding = binding_with_pending([2], retries={2: adapter.PENDING_EVENT_MAX_RETRIES})
+        instance = queue_behind(stale_instance(binding, cycle_attempts={"evt-2": ATTEMPT}), binding)
+        # The sequence index can be gone; the queued event still names its id.
+        enqueue(instance, binding, 2, index=False)
+        asyncio.run(instance._expire_stale_pending(binding))
+        self.assertEqual(binding.inbox["2"], "quarantined")
+        self.assertEqual(instance.completed, [("attempt-1", "fail")])
+        self.assertEqual(instance.stopped, ["evt-2"])
+        self.assertNotIn("evt-2", instance._cycle_attempts)
+        self.assertEqual(instance.dispatched, [])
+
+    def test_queued_event_without_holder_still_retries(self):
+        binding = binding_with_pending([2])
+        instance = queue_behind(stale_instance(binding), binding)
+        enqueue(instance, binding, 2)
+        asyncio.run(instance._expire_stale_pending(binding))
+        self.assertEqual(binding.pending_retries["2"], 1)
+        self.assertNotEqual(binding.inbox["2"], "quarantined")
+        self.assertEqual(instance.completed, [])
+
+    def test_pending_event_outside_the_queue_still_retries_while_room_is_held(self):
+        binding = binding_with_pending([5])
+        instance = queue_behind(stale_instance(binding), binding, holder_seq=1)
+        instance._event_seq["room-1"]["evt-5"] = 5
+        asyncio.run(instance._expire_stale_pending(binding))
+        self.assertEqual(binding.inbox["5"], "failed-retryable")
+        self.assertEqual(binding.pending_retries["5"], 1)
+        self.assertEqual(instance._active_dispatch_rooms, {"room-1": "gen-a"})
+        self.assertEqual(instance.dispatched, [])
+
+
 if __name__ == "__main__":
     unittest.main()
