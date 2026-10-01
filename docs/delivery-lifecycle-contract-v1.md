@@ -137,3 +137,9 @@ P1a-6 Only the model's reply is a contribution. Host-generated notices (model fa
 operational messages) are never posted to the Room or counted as the agent's contribution; they may be logged locally.
 When a turn yields several reply payloads, the connector posts the model-authored final reply, never a host notice in its
 place, and never silently drops model-authored text.
+
+P1a-7 Speaker labels. Every Room input is attributed truthfully and identically in both connectors: (1) the roster display
+name for the event's actorId; otherwise (2) the payload's actorDisplayName or displayName; otherwise (3) a role label:
+"Room (system)" for actorRole system or actorId room_coordinator/system; "Human participant" for human roles and
+agent_owner; "Room agent" for participant_agent, room_master and observer; "Unknown actor" for anything else, including a
+missing role. The same label is used in the transcript, the current input and the host session speaker.

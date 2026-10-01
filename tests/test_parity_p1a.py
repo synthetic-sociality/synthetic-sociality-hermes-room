@@ -276,14 +276,14 @@ class ParityP1aTests(unittest.TestCase):
         names = {name: message.source.user_name for name, message in speakers.items()}
         self.assertEqual(names, {
             "autonomous_fallback": "Room (system)", "summary_for_self": "Room (system)",
-            "human_reply": "Owner", "peer_follow_up": "Peer", "unknown_role": "Room member stranger-9",
+            "human_reply": "Owner", "peer_follow_up": "Peer", "unknown_role": "Unknown actor",
         })
         for name, message in speakers.items():
             self.assertNotIn("Room participant", message.source.user_name, name)
             self.assertNotIn("Room participant", message.text, name)  # transcript and current input
         prompt = speakers["unknown_role"].text
-        self.assertIn("#45 Room member stranger-9: An earlier note from an unlisted member.", prompt)
-        self.assertIn("\n\nRoom member stranger-9: Should the doctor disclose the diagnosis?", prompt)
+        self.assertIn("#45 Unknown actor: An earlier note from an unlisted member.", prompt)
+        self.assertIn("\n\nUnknown actor: Should the doctor disclose the diagnosis?", prompt)
 
     def test_p1a_04_pass_envelope_documented_technically_without_usage_advice(self):
         instruction = adapter.ROOM_RESPONSE_INSTRUCTION
@@ -315,6 +315,39 @@ class ParityP1aTests(unittest.TestCase):
         for unset in ({}, {"maxContributionWords": 0}, {"maxContributionWords": True}, {"maxContributionWords": "90"}):
             with self.subTest(policy=unset):
                 self.assertNotIn("Word limit", build_prompt({**HUMAN, "id": "m-58", "seq": 58}, policy=unset))
+
+
+class SpeakerLabelTests(unittest.TestCase):
+    def test_p1a_08_speaker_labels_follow_one_precedence_and_four_role_labels(self):
+        context = importlib_context()
+        state = {"roster": [{"membershipId": "owner-1", "displayName": "Owner"},
+                            {"membershipId": "peer-1", "displayName": "Peer"}]}
+        cases = {
+            # (1) the roster name wins over a payload name.
+            "roster name": ({"actorId": "peer-1", "actorRole": "participant_agent",
+                             "payload": {"actorDisplayName": "Spoofed"}}, "Peer"),
+            # (2) payload name only, when the roster does not name the actor.
+            "payload name only": ({"actorId": "visitor-7", "actorRole": "guest",
+                                   "payload": {"displayName": "Visitor"}}, "Visitor"),
+            # (3) role labels.
+            "system role": ({"actorId": "x", "actorRole": "system", "payload": {}}, "Room (system)"),
+            "room_coordinator": ({"actorId": "room_coordinator", "actorRole": "", "payload": {}}, "Room (system)"),
+            "human": ({"actorId": "h-9", "actorRole": "human_owner", "payload": {}}, "Human participant"),
+            "agent_owner": ({"actorId": "h-8", "actorRole": "agent_owner", "payload": {}}, "Human participant"),
+            "agent": ({"actorId": "a-9", "actorRole": "participant_agent", "payload": {}}, "Room agent"),
+            "unknown role guest": ({"actorId": "stranger-9", "actorRole": "guest", "payload": {}}, "Unknown actor"),
+            "missing role and actorId": ({"payload": {}}, "Unknown actor"),
+        }
+        for name, (event, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(context.room_actor_name(state, event), expected)
+        # The same label in the transcript, the current input and the session speaker.
+        guest = {"id": "m-46", "seq": 46, "type": "message.posted", "actorRole": "guest",
+                 "actorId": "visitor-7", "payload": {"body": "A visitor's question.", "displayName": "Visitor"}}
+        message = build_message({**guest, "id": "m-61", "seq": 61}, context=(START, HUMAN, guest))
+        self.assertIn("#46 Visitor: A visitor's question.", message.text)
+        self.assertIn("\n\nVisitor: A visitor's question.", message.text)
+        self.assertEqual(message.source.user_name, "Visitor")
 
 
 class DiscussionStartTests(unittest.TestCase):

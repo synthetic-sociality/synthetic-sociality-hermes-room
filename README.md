@@ -34,9 +34,10 @@ the human who started the discussion, instead of the connector's fallback
 text; the canonical context renders the topic description under "Current
 discussion". When the source cannot be resolved, the turn says so in a
 scheduler fact that names the missing source event, instead of standing in
-for it. System-originated inputs are attributed to `Room (system)`, never to
-an invented participant, both in the prompt and as the Hermes session
-speaker.
+for it. Speakers are labelled by one scheme shared with OpenClaw (P1a-7): the
+roster name, else the payload's display name, else `Room (system)`, `Human
+participant`, `Room agent` or `Unknown actor` by role; the same label is used
+in the transcript, the current input and as the Hermes session speaker.
 
 Host notices never become Room contributions (P1a-6). Hermes core delivers
 its status lines, including the model-fallback notice, and its platform

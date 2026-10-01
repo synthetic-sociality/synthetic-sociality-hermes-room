@@ -12,6 +12,8 @@ CONTEXT_MESSAGE_LIMIT = 16
 # Truthful label for inputs the Room itself originates (scheduler, cycle
 # terminals); never presented as a participant (contract P1a-5).
 ROOM_SYSTEM_ACTOR = "Room (system)"
+# Any other or missing role (contract P1a-7).
+UNKNOWN_ACTOR = "Unknown actor"
 # A reply may begin with the number of the one post it answers. The connector
 # reads the marker, removes it, and records the post as `addresses`; the Room
 # then shows the reply as answering that post rather than what woke the agent.
@@ -59,27 +61,29 @@ OPEN_EXCHANGE_PREAMBLE_SHA256 = "04291ee8dd2582aec3f86c52458bb1f1e9c7af10af35d27
 
 
 def room_actor_name(state: dict[str, Any], event: dict[str, Any]) -> str:
-    """Resolve a canonical event actor through the authenticated room roster."""
-    payload = event.get("payload") or {}
-    projected = str(payload.get("actorDisplayName") or payload.get("displayName") or "").strip()
-    if projected:
-        return projected
+    """Attribute a Room input truthfully (contract P1a-7, same in OpenClaw).
+
+    Precedence: the roster display name for the event's actorId; otherwise the
+    payload's actorDisplayName or displayName; otherwise a role label.
+    """
     actor_id = str(event.get("actorId") or "").strip()
     for member in state.get("roster") or []:
         if actor_id and str(member.get("membershipId") or "").strip() == actor_id:
             display_name = str(member.get("displayName") or "").strip()
             if display_name:
                 return display_name
+    payload = event.get("payload") or {}
+    projected = str(payload.get("actorDisplayName") or payload.get("displayName") or "").strip()
+    if projected:
+        return projected
     role = str(event.get("actorRole") or "").strip()
+    if role == "system" or actor_id in {"system", "room_coordinator"}:
+        return ROOM_SYSTEM_ACTOR
     if role == "human" or role.startswith("human_") or role == "agent_owner":
         return "Human participant"
     if role in {"participant_agent", "room_master", "observer"}:
         return "Room agent"
-    actor_id = str(event.get("actorId") or "").strip()
-    if role == "system" or actor_id in {"system", "room_coordinator"} or not actor_id:
-        return ROOM_SYSTEM_ACTOR
-    # An actor the roster does not name is identified, never invented (P1a-5).
-    return f"Room member {actor_id}"
+    return UNKNOWN_ACTOR
 
 
 def canonical_room_context(
