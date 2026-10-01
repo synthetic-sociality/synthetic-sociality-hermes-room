@@ -137,7 +137,12 @@ POST_REFUSAL_SUPERSEDED_CODES = frozenset({
 # (application/executionhealth). Hermes host layers map onto them.
 _EXECUTION_FAILURE_LAYERS = frozenset({"provider", "runtime", "infrastructure"})
 _PROVIDER_HOST_LAYERS = frozenset({"provider", "endpoint", "streaming", "auth", "billing"})
-_EXECUTION_FAILURE_CODE_MAX = 128
+_EXECUTION_FAILURE_CODE_MAX = 128  # UTF-8 bytes (server CodeMaxLength)
+# While Hermes core still holds a Room session that has no owner task, the next
+# queued Room event waits in short steps (R1); the watch-loop sweep is the
+# backstop beyond this bound.
+SESSION_RELEASE_POLL_SECONDS = 0.25
+SESSION_RELEASE_POLL_LIMIT = 40
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_HISTORY_INSTRUCTION = (
     "Earlier discussions and the library text are not preloaded. If your task needs an exact "
@@ -293,7 +298,8 @@ def typed_execution_failure(layer: str, code: str) -> dict[str, str]:
     layer = str(layer or "").strip().lower()
     if layer not in _EXECUTION_FAILURE_LAYERS:
         layer = "provider" if layer in _PROVIDER_HOST_LAYERS else "runtime"
-    code = str(code or "").strip().lower()[:_EXECUTION_FAILURE_CODE_MAX]
+    code = str(code or "").strip().lower()
+    code = code.encode("utf-8")[:_EXECUTION_FAILURE_CODE_MAX].decode("utf-8", "ignore").strip()
     return {"layer": layer, "code": code or "execution_failed"}
 
 
@@ -950,6 +956,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._inflight_events.clear()
         self._queued_events.clear()
         self._active_dispatch_rooms.clear()
+        getattr(self, "_session_release_waiters", set()).clear()
         self._event_dispatch_generation.clear()
         getattr(self, "_receive_locks", {}).clear()
         self._terminal_sources.clear()
@@ -4107,13 +4114,20 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             user_name=str(actor),
             message_id=dispatch_source,
         )
-        await self.handle_message(MessageEvent(
+        message_event = MessageEvent(
             text=prompt,
             message_type=MessageType.TEXT,
             source=source,
             message_id=dispatch_source,
             raw_message={**event, "_dispatchGeneration": dispatch_generation},
-        ))
+        )
+        session_key = self._core_session_key(message_event)
+        if session_key:
+            room_keys = getattr(self, "_room_session_keys", None)
+            if room_keys is None:
+                room_keys = self._room_session_keys = {}
+            room_keys[binding.room_id] = session_key
+        await self.handle_message(message_event)
         return True
 
     async def _epoch_handover_context(
@@ -4300,6 +4314,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             ):
                 queued.pop(seq)
                 continue
+            if self._room_session_busy(binding.room_id):
+                # Hermes core still owns this Room's session: a handoff now
+                # would be steered, interrupted, merged or dropped by its
+                # busy-session path and never get its own completion (R1).
+                self._dispatch_when_session_released(binding)
+                return
             event_id = str(event.get("id") or "")
             dispatch_generation = uuid.uuid4().hex
             active_rooms[binding.room_id] = dispatch_generation
@@ -4698,26 +4718,101 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         getattr(self, "_source_coordination_modes", {}).pop(source_id, None)
         getattr(self, "_open_reply_recipients", {}).pop(source_id, None)
 
+    def _core_session_key(self, message_event: Any) -> str:
+        """The Hermes core session key this Room event will run under."""
+        derive = getattr(self, "_event_session_key", None)
+        if not callable(derive):
+            return ""
+        try:
+            return str(derive(message_event) or "")
+        except Exception:  # noqa: BLE001 - absent key only disables the gate
+            logger.debug("Room session key could not be derived", exc_info=True)
+            return ""
+
+    def _room_session_busy(self, room_id: str) -> bool:
+        """Whether Hermes core still holds the session of this Room's last run.
+
+        Mirrors core's own gate in ``BasePlatformAdapter.handle_message``: a
+        session is busy while its key is in ``_active_sessions``, unless the
+        owner task already exited (``_session_task_is_stale``), in which case
+        core heals the lock on entry and starts the event normally.
+        """
+        key = (getattr(self, "_room_session_keys", None) or {}).get(room_id, "")
+        active = getattr(self, "_active_sessions", None)
+        if not key or not isinstance(active, dict) or key not in active:
+            return False
+        stale = getattr(self, "_session_task_is_stale", None)
+        return not (callable(stale) and stale(key))
+
+    def _dispatch_when_session_released(self, binding: RoomBinding) -> None:
+        """Resume this Room's queue once core's owner task for it has exited."""
+        waiters = getattr(self, "_session_release_waiters", None)
+        if waiters is None:
+            waiters = self._session_release_waiters = set()
+        if binding.room_id in waiters:
+            return
+        key = (getattr(self, "_room_session_keys", None) or {}).get(binding.room_id, "")
+        owner = (getattr(self, "_session_tasks", None) or {}).get(key)
+        waiters.add(binding.room_id)
+        if isinstance(owner, asyncio.Future) and not owner.done():
+            # The owner task's ``finally`` releases the guard before the task
+            # completes, so its done callback runs after the release.
+            owner.add_done_callback(lambda _task: self._schedule_queue_resume(binding))
+            return
+        # A guard without an owner task (an inline command) is short-lived;
+        # poll briefly. The watch loop's sweep also re-runs the queue.
+        self._schedule_queue_resume(binding, poll=True)
+
+    def _schedule_queue_resume(self, binding: RoomBinding, *, poll: bool = False) -> None:
+        try:
+            asyncio.ensure_future(self._resume_queue_after_session(binding, poll=poll))
+        except RuntimeError:  # no running loop (shutdown): the reconnect replays the queue
+            (getattr(self, "_session_release_waiters", None) or set()).discard(binding.room_id)
+
+    async def _resume_queue_after_session(self, binding: RoomBinding, *, poll: bool = False) -> None:
+        try:
+            if poll:
+                for _ in range(SESSION_RELEASE_POLL_LIMIT):
+                    if not self._room_session_busy(binding.room_id):
+                        break
+                    await asyncio.sleep(SESSION_RELEASE_POLL_SECONDS)
+            else:
+                await asyncio.sleep(0)
+        finally:
+            (getattr(self, "_session_release_waiters", None) or set()).discard(binding.room_id)
+        stop = getattr(self, "_stop", None)
+        if stop is not None and stop.is_set():
+            return
+        try:
+            await self._dispatch_next_queued(binding)
+        except Exception:  # noqa: BLE001 - the stale sweep retries the queue
+            logger.warning(
+                "Room %s could not dispatch the next queued event after its session was released",
+                binding.room_id, exc_info=True,
+            )
+
     async def _release_dispatch_at_record(
         self, chat_id: str, source_id: str, dispatch_generation: str,
     ) -> None:
-        """Free the Room as soon as this dispatch's outcome is recorded (P1-6).
+        """Free the Room slot as soon as this dispatch's outcome is recorded (P1-6).
 
-        The host's completion callback may come much later or, for a run it
-        drained as a follow-up, not at all (2026-10-01 D1). It stays an
-        idempotent co-owner: the generation fence below makes its own release
-        a no-op once a successor holds the Room.
+        Only the slot this exact dispatch generation still holds is cleared,
+        and it is cleared before any await, so a successor that takes the Room
+        meanwhile is never released by this call. Hermes' completion callback
+        remains an idempotent co-owner of the same release. The next queued
+        event is handed to Hermes only after core has released the Room's
+        session (``_dispatch_next_queued``).
         """
         active_rooms = getattr(self, "_active_dispatch_rooms", None)
         if not dispatch_generation or not active_rooms or active_rooms.get(chat_id) != dispatch_generation:
             return
-        await self._stop_attempt_renewal(source_id)
         active_rooms.pop(chat_id, None)
         getattr(self, "_dispatch_started_at", {}).pop(dispatch_generation, None)
         event_generations = getattr(self, "_event_dispatch_generation", {})
         if event_generations.get(source_id) == dispatch_generation:
             getattr(self, "_inflight_events", set()).discard(source_id)
             event_generations.pop(source_id, None)
+        await self._stop_attempt_renewal(source_id)
         state = getattr(self, "_state", None)
         binding = state.binding(chat_id) if state is not None else None
         if binding is None:

@@ -21,7 +21,33 @@ including after a send-path quarantine, without waiting for Hermes' completion
 callback or the watchdog. Every `fail` now carries `executionFailure` with a
 layer the server accepts. Skip, supersede, quarantine and settle each write one
 log line with code, sequence and attempt ID only. The release archive now ships
-every test file. Agent behaviour and persisted state formats are unchanged.
+every test file and its packager. Agent behaviour and persisted state formats
+are unchanged.
+
+The next queued Room event is handed to Hermes only after core has released the
+Room's session: while `_active_sessions` still holds the key and its owner task
+is alive (`gateway/platforms/base.py:4021-4024`, `3879-3882`), the queue waits
+for that task to exit, whose `finally` releases the guard
+(`base.py:4602-4614`, `4467-4485`, `4684-4701`). Handing it over earlier sent it
+into core's busy-session path, where it is steered, interrupted, merged or
+dropped and never gets its own completion callback.
+
+Answers recorded for this release (read at Room server `44aae14` and Hermes
+core `7cadfaa66`):
+
+- Q1, attempt lease: the claim lease is `TURN_LEASE_SECONDS`, default 120 s
+  (`application/config/config.go:50,359`; `api/discussion_cycles.go:110`),
+  capped by the attempt bound and the cycle deadline
+  (`infrastructure/pocketbase/cycleservice/planned.go:42-49,86-96`). Re-claim
+  renews it up to the attempt hard cap, created + `MaxDuration / TotalTurns`
+  (`cycleservice/service.go:594-614,685-695`).
+- Q10, completion callback: core always calls `on_processing_complete` for its
+  own run, on success, cancellation and error (`base.py:4573-4596`), but only
+  after the whole run returns. A busy-session event that is steered, merged or
+  dropped gets none: drained follow-ups fire hooks only for adapters that
+  override `on_processing_start` (`gateway/run_turn.py:3886-3913`,
+  `gateway/run_turn_followup_ack.py:29-30`), and merged events
+  (`base.py:1751`, `4104`, `4115`) have no callback of their own.
 
 ## 1.0.70 — Queued events wait for a busy Room
 

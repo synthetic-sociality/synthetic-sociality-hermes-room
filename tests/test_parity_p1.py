@@ -9,9 +9,11 @@ reply; D1 — a refused dispatch held the agent's Room until the watchdog.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import io
 import json
 import logging
+import sys
 import types
 import unittest
 import urllib.error
@@ -23,6 +25,27 @@ from test_delivery_lifecycle import ROOT, adapter, configured_instance
 
 ACCEPTED_LAYERS = {"provider", "runtime", "infrastructure"}
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
+
+
+def real_core_base():
+    """Hermes core's real BasePlatformAdapter, loaded beside the suite's stub."""
+    stubbed = {name: module for name, module in sys.modules.items() if name == "gateway" or name.startswith("gateway.")}
+    for name in stubbed:
+        del sys.modules[name]
+    try:
+        return importlib.import_module("gateway.platforms.base").BasePlatformAdapter
+    finally:
+        for name in [name for name in sys.modules if name == "gateway" or name.startswith("gateway.")]:
+            del sys.modules[name]
+        sys.modules.update(stubbed)
+
+
+CoreBase = real_core_base()
+CORE_SESSION_METHODS = (
+    "handle_message", "_heal_stale_session_lock", "_session_task_is_stale",
+    "_start_session_processing", "_track_session_task", "_release_session_guard",
+    "_cleanup_finished_session_task",
+)
 
 
 def lease_in(seconds: float) -> str:
@@ -243,21 +266,31 @@ class ParityP1Tests(unittest.TestCase):
         self.assertNotEqual(instance._active_dispatch_rooms.get("room-1"), "g5")
 
     def test_p1_04_post_refused_stale_epoch_turn_not_active_turn_expired_is_superseded(self):
-        for code in ("stale_epoch", "turn_not_active", "turn_expired"):
+        for code in ("stale_epoch", "turn_not_active", "turn_expired", "cycle_superseded"):
             with self.subTest(code=code):
                 async def run():
-                    instance, binding, api, _published, _dispatched = room_instance(cycle_attempt())
+                    attempt = cycle_attempt()
+                    instance, binding, api, _published, _dispatched = room_instance(attempt)
                     api.post_error = lambda _n: refusal(code)
                     result = await instance._send_final("room-1", source_ref(), "A produced reply.")
-                    return instance, binding, api, result
+                    return instance, binding, api, result, attempt
 
-                instance, binding, api, result = asyncio.run(run())
+                instance, binding, api, result, attempt = asyncio.run(run())
                 self.assertTrue(result.success)
                 terminal = instance._terminal_results[source_ref()]
                 self.assertEqual((terminal["status"], terminal["reason"]), ("superseded", code))
                 self.assertEqual(len(api.posts), 1)
                 self.assertNotIn("5", binding.inbox)
                 self.assertEqual(binding.acknowledged_cursor, 5)
+                # Durable fence: a restart cannot replay the frozen post.
+                key = adapter._attempt_authority_key(binding, "evt-5", attempt)
+                self.assertEqual(binding.delivery_authority[key]["state"], "superseded")
+                # Typed settle, never pass and never a bare fail.
+                self.assertEqual(
+                    [payload for _id, payload in api.completions],
+                    [{"generation": 3, "action": "fail",
+                      "executionFailure": {"layer": "infrastructure", "code": "attempt_timeout"}}],
+                )
 
     def test_p1_05_post_refused_stale_context_refreshes_and_rekeys_once_then_posts(self):
         async def run(head_moves):
@@ -387,6 +420,10 @@ class ParityP1Tests(unittest.TestCase):
         self.assertEqual(by_name["ttl_quarantine_and_wedge"], {"layer": "infrastructure", "code": "attempt_timeout"})
         self.assertEqual(adapter.typed_execution_failure("future_layer", " "), {"layer": "runtime", "code": "execution_failed"})
         self.assertEqual(len(adapter.typed_execution_failure("runtime", "x" * 300)["code"]), 128)
+        # The server limit is 128 bytes; a multi-byte code never splits a character.
+        wide = adapter.typed_execution_failure("runtime", "ü" * 100)["code"]
+        self.assertLessEqual(len(wide.encode("utf-8")), 128)
+        self.assertEqual(wide, "ü" * 64)
 
     def test_p1_08_send_path_quarantine_releases_attempt_stops_renewal_and_dispatches_next(self):
         async def run(with_attempt):
@@ -514,6 +551,158 @@ class ParityP1Tests(unittest.TestCase):
                 self.assertNotIn("evt-5", instance._inflight_events)
                 self.assertNotEqual(instance._active_dispatch_rooms.get("room-1"), "g5")
                 self.assertEqual([payload["action"] for _id, payload in api.completions], ["fail"])
+
+
+
+class SessionReleaseTests(unittest.TestCase):
+    """OP-12 R1/R2: the next Room event waits for Hermes core's session release."""
+
+    KEY = "agent:main:synthetic_sociality:group:room-1"
+
+    def core_instance(self, attempt, queued=(6,)):
+        instance, binding, api, published, _dispatched = room_instance(attempt, queued=queued)
+        for name in CORE_SESSION_METHODS:
+            setattr(instance, name, types.MethodType(getattr(CoreBase, name), instance))
+        instance.name = "synthetic_sociality"
+        instance._message_handler = object()
+        instance._active_sessions, instance._session_tasks = {}, {}
+        instance._pending_messages, instance._requeue_counts = {}, {}
+        instance._background_tasks, instance._expected_cancelled_tasks = set(), set()
+        instance._discard_text_debounce = lambda _key: None
+        instance._drop_unresolved = lambda _event: False
+        instance._event_session_key = lambda _event: self.KEY
+        instance._room_session_keys = {"room-1": self.KEY}  # recorded at evt-5's handoff
+        busy, delivered, hold = [], [], asyncio.Event()
+
+        async def while_active(event, session_key):
+            busy.append((event.message_id, session_key))
+
+        async def background(event, session_key):
+            """Stand-in for core's _process_message_background, keeping its guard contract."""
+            guard = instance._active_sessions.get(session_key)
+            try:
+                if event.message_id == source_ref():
+                    await instance._send_final("room-1", source_ref(), "A produced reply.")
+                    await instance.on_processing_complete(completion_event(binding), "success")
+                    await hold.wait()  # the run's tail: attachments, hooks, typing stop
+                else:
+                    delivered.append(event.message_id)
+            finally:
+                instance._cleanup_finished_session_task(session_key, guard)
+
+        async def dispatch(_binding, event, generation):
+            ref = adapter._dispatch_source_ref(str(event["id"]), generation)
+            message = adapter.MessageEvent(
+                message_id=ref, source=types.SimpleNamespace(chat_id="room-1"),
+                raw_message={**event, "_dispatchGeneration": generation},
+                allow_gateway_control=False, metadata={},
+            )
+            instance._room_session_keys["room-1"] = instance._event_session_key(message)
+            await instance.handle_message(message)
+            return True
+
+        instance._handle_message_while_active = while_active
+        instance._process_message_background = background
+        instance._dispatch_room_event = dispatch
+        return instance, binding, api, busy, delivered, hold
+
+    def test_queued_room_event_is_never_delivered_while_core_session_is_active(self):
+        async def run():
+            attempt = cycle_attempt(lease=lease_in(600))
+            instance, binding, api, busy, delivered, hold = self.core_instance(attempt)
+            instance._start_attempt_renewal(binding, "evt-5", attempt)
+            current = adapter.MessageEvent(
+                message_id=source_ref(), source=types.SimpleNamespace(chat_id="room-1"),
+                raw_message={"id": "evt-5", "seq": 5}, allow_gateway_control=False, metadata={},
+            )
+            api.post_error = lambda _n: refusal("cycle_superseded")
+            self.assertTrue(instance._start_session_processing(current, self.KEY))
+            owner = instance._session_tasks[self.KEY]
+            for _ in range(50):
+                if api.acks:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            during = {
+                "delivered": list(delivered), "busy": list(busy),
+                "slot": instance._active_dispatch_rooms.get("room-1"),
+                "renewing": "evt-5" in instance._attempt_renewal_tasks,
+                "session_active": self.KEY in instance._active_sessions,
+                "acks": list(api.acks),
+            }
+            hold.set()
+            await owner
+            for _ in range(50):
+                if delivered:
+                    break
+                await asyncio.sleep(0.01)
+            return during, delivered, busy, instance
+
+        during, delivered, busy, instance = asyncio.run(run())
+        # Kept at record: terminal recorded, attempt freed, renewal stopped.
+        self.assertEqual(during["acks"], [5])
+        self.assertFalse(during["renewing"])
+        self.assertNotEqual(during["slot"], "g5")
+        # Never handed to core while its session for the Room is active.
+        self.assertTrue(during["session_active"])
+        self.assertEqual(during["delivered"], [])
+        self.assertEqual(during["busy"], [])
+        # After core released the session, the next event starts normally.
+        self.assertEqual(busy, [])
+        self.assertEqual(len(delivered), 1)
+        self.assertTrue(delivered[0].endswith(":evt-6"))
+        self.assertNotIn("room-1", instance._session_release_waiters)
+
+    def test_stale_or_ownerless_core_guard_is_handled_like_core(self):
+        async def stale_owner():
+            instance, _binding, _api, busy, delivered, _hold = self.core_instance(None)
+            instance._active_dispatch_rooms = {}
+            finished = asyncio.ensure_future(asyncio.sleep(0))
+            await finished
+            instance._active_sessions[self.KEY] = asyncio.Event()
+            instance._session_tasks[self.KEY] = finished  # core heals this on entry
+            await instance._dispatch_next_queued(_binding)
+            await asyncio.sleep(0.02)
+            return busy, delivered
+
+        busy, delivered = asyncio.run(stale_owner())
+        self.assertEqual(busy, [])
+        self.assertEqual(len(delivered), 1)
+
+        async def ownerless_guard():
+            instance, binding, _api, busy, delivered, _hold = self.core_instance(None)
+            instance._active_dispatch_rooms = {}
+            instance._active_sessions[self.KEY] = asyncio.Event()  # e.g. an inline command
+            await instance._dispatch_next_queued(binding)
+            await asyncio.sleep(0.3)
+            before_release = list(delivered)
+            del instance._active_sessions[self.KEY]
+            for _ in range(100):
+                if delivered:
+                    break
+                await asyncio.sleep(0.02)
+            return busy, before_release, delivered
+
+        busy, before_release, delivered = asyncio.run(ownerless_guard())
+        self.assertEqual(before_release, [])
+        self.assertEqual(busy, [])
+        self.assertEqual(len(delivered), 1)
+
+    def test_release_at_record_never_frees_a_successor_slot(self):
+        async def run():
+            instance, _binding, _api, _published, dispatched = room_instance(cycle_attempt(), queued=(6,))
+
+            async def successor_takes_room(_source_id):
+                await asyncio.sleep(0)
+                instance._active_dispatch_rooms["room-1"] = "successor"
+
+            instance._stop_attempt_renewal = successor_takes_room
+            await instance._release_dispatch_at_record("room-1", "evt-5", "g5")
+            return instance, dispatched
+
+        instance, dispatched = asyncio.run(run())
+        self.assertEqual(instance._active_dispatch_rooms, {"room-1": "successor"})
+        self.assertEqual(dispatched, [])
 
 
 if __name__ == "__main__":
