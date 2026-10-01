@@ -65,7 +65,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.70"
+CONNECTOR_VERSION = "1.0.71"
 logger = logging.getLogger(__name__)
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -124,6 +124,20 @@ PENDING_EVENT_MAX_RETRIES = 2
 # already timed the attempt out well before.
 DISPATCH_INFLIGHT_MAX_SECONDS = 900.0
 TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "failed", "cancelled", "superseded", "ignored"})
+# Contract P1-2: a POST /messages refusal without a canonical receipt that
+# proves the attempt, turn or epoch is no longer ours. The reply cannot
+# succeed by retrying, so it is a terminal superseded outcome with evidence,
+# never a quarantine. ``attempt_authority_superseded`` is the connector's own
+# durable fence for the same fact (P1-1).
+POST_REFUSAL_SUPERSEDED_CODES = frozenset({
+    "cycle_superseded", "cycle_no_attempt", "stale_epoch",
+    "turn_not_active", "turn_expired", "attempt_authority_superseded",
+})
+# Contract P1-4: layers the Room server accepts in ``executionFailure``
+# (application/executionhealth). Hermes host layers map onto them.
+_EXECUTION_FAILURE_LAYERS = frozenset({"provider", "runtime", "infrastructure"})
+_PROVIDER_HOST_LAYERS = frozenset({"provider", "endpoint", "streaming", "auth", "billing"})
+_EXECUTION_FAILURE_CODE_MAX = 128
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_HISTORY_INSTRUCTION = (
     "Earlier discussions and the library text are not preloaded. If your task needs an exact "
@@ -272,6 +286,44 @@ def host_operational_outcome(metadata: Any) -> dict[str, Any] | None:
         "model": value.get("model", "") if isinstance(value.get("model", ""), str) else "",
         "attempt_action": action,
     }
+
+
+def typed_execution_failure(layer: str, code: str) -> dict[str, str]:
+    """Return an ``executionFailure`` the Room server accepts (contract P1-4)."""
+    layer = str(layer or "").strip().lower()
+    if layer not in _EXECUTION_FAILURE_LAYERS:
+        layer = "provider" if layer in _PROVIDER_HOST_LAYERS else "runtime"
+    code = str(code or "").strip().lower()[:_EXECUTION_FAILURE_CODE_MAX]
+    return {"layer": layer, "code": code or "execution_failed"}
+
+
+def post_refusal_outcome(code: str, retryable: bool) -> str:
+    """Classify a POST /messages refusal without a receipt (contract P1-2).
+
+    ``refresh`` is resolved inside the post retry loop (re-key once per newer
+    head); a ``stale_context`` that reaches the send boundary had no newer head
+    and is classified like any other unresolvable refusal.
+    """
+    if code == "reply_cap_reached":
+        return "skipped"
+    if code in POST_REFUSAL_SUPERSEDED_CODES:
+        return "superseded"
+    if retryable:
+        return "retryable"
+    return "quarantined"
+
+
+def _terminal_reason_execution_failure(reason: str) -> dict[str, str]:
+    """Derive the typed failure from a frozen ``terminal_reason``.
+
+    The reason is frozen with the selection, so a replay after a restart sends
+    the same ``executionFailure`` without a new persisted field.
+    """
+    prefix = "host_operational_outcome:"
+    if reason.startswith(prefix):
+        layer, _, code = reason[len(prefix):].partition(":")
+        return typed_execution_failure(layer, code)
+    return typed_execution_failure("runtime", reason)
 
 
 def _on_pre_llm_call(**kwargs: Any) -> None:
@@ -1018,6 +1070,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         cached = getattr(self, "_terminal_results", {}).get(source_ref)
         if cached and cached.get("generation") == dispatch_generation:
             await self._complete_terminal_send(chat_id, source_id, cached)
+            await self._release_dispatch_at_record(chat_id, source_id, dispatch_generation)
             return SendResult(success=True, message_id=cached.get("message_id") or None)
         tasks = getattr(self, "_submission_tasks", None)
         if tasks is None:
@@ -1035,10 +1088,19 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             tasks[source_ref] = task
         try:
             result = await task
+            if not result.success:
+                try:
+                    await self._settle_quarantined_send(chat_id, source_id, dispatch_generation)
+                except Exception:  # noqa: BLE001 - the send result itself is unchanged
+                    logger.warning(
+                        "Room %s could not release the quarantined dispatch for source %s",
+                        chat_id, source_id, exc_info=True,
+                    )
             if result.success:
                 terminal = getattr(self, "_terminal_results", {}).get(source_ref) or {}
                 if terminal.get("generation") == dispatch_generation:
                     await self._complete_terminal_send(chat_id, source_id, terminal)
+                    await self._release_dispatch_at_record(chat_id, source_id, dispatch_generation)
                 buffered_sources = getattr(self, "_buffered_source", {})
                 buffered_output = getattr(self, "_buffered_output", {})
                 for message_id in [
@@ -1688,6 +1750,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 await self._publish(
                     binding, source_id, "terminal", status="superseded", suppress_errors=True,
                 )
+                self._log_outcome(binding, "superseded", source_id, "stale_epoch", cycle_attempt)
                 return self._successful_terminal(
                     source_ref, dispatch_generation, f"superseded:{source_id}",
                     terminal_status="superseded", reason="stale_epoch",
@@ -1708,6 +1771,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._publish(
                 binding, source_id, "terminal", status="superseded", suppress_errors=True,
             )
+            self._log_outcome(binding, "superseded", source_id, "attempt_lease_lost", cycle_attempt)
             return self._successful_terminal(
                 source_ref, dispatch_generation, f"superseded:{source_id}",
                 terminal_status="superseded", reason="attempt_lease_lost",
@@ -1750,8 +1814,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if attempt_action not in {"pass", "fail", "decline"}:
                 raise ProtocolError("Invalid persisted attempt disposition", code="invalid_intent", retryable=False)
             terminal_status = "skipped" if attempt_action == "pass" else "failed"
+            terminal_reason = str(selected.get("terminal_reason") or "model_skip")
             if cycle_attempt:
-                await self._complete_cycle_attempt(binding, cycle_attempt, attempt_action)
+                if attempt_action == "fail":
+                    await self._complete_cycle_attempt(
+                        binding, cycle_attempt, attempt_action,
+                        execution_failure=_terminal_reason_execution_failure(terminal_reason),
+                    )
+                else:
+                    await self._complete_cycle_attempt(binding, cycle_attempt, attempt_action)
                 await self._stop_attempt_renewal(source_id)
                 self._cycle_attempts.pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
@@ -1764,10 +1835,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
             getattr(self, "_source_coordination_modes", {}).pop(source_id, None)
             getattr(self, "_open_reply_recipients", {}).pop(source_id, None)
+            self._log_outcome(binding, terminal_status, source_id, terminal_reason, cycle_attempt)
             return self._successful_terminal(
                 source_ref, dispatch_generation, f"skipped:{source_id}",
                 terminal_status=terminal_status,
-                reason=str(selected.get("terminal_reason") or "model_skip"),
+                reason=terminal_reason,
             )
         event: dict[str, Any] | None = None
         canonical_recorded = False
@@ -1824,6 +1896,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         await self._stop_attempt_renewal(source_id)
                         getattr(self, "_cycle_attempts", {}).pop(source_id, None)
                         await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
+                        self._log_outcome(binding, "superseded", source_id, "coordination_mode_changed", cycle_attempt)
                         return self._successful_terminal(
                             source_ref, dispatch_generation, f"superseded:{source_id}",
                             terminal_status="superseded", reason="coordination_mode_changed",
@@ -1951,6 +2024,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         status="superseded",
                         suppress_errors=True,
                     )
+                    self._log_outcome(binding, "superseded", source_id, "attempt_superseded", cycle_attempt)
                     return self._successful_terminal(
                         source_ref, dispatch_generation, f"superseded:{source_id}",
                         terminal_status="superseded", reason="attempt_superseded",
@@ -2063,7 +2137,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # successful platform outcome so Hermes does not attempt its
                 # plain-text fallback with the same source and pin the ordered
                 # receive ledger until timeout. If the message committed before
-                # the turn became inactive, preserve that canonical success.
+                # the turn became inactive, preserve that canonical success;
+                # otherwise the reply is superseded (contract P1-2, below).
                 if event is not None:
                     await self._publish(
                         binding,
@@ -2077,31 +2152,29 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         source_ref, dispatch_generation, event.get("id"),
                         terminal_status="posted", canonical_event_id=str(event.get("id") or ""),
                     )
-                await self._publish(
-                    binding,
-                    source_id,
-                    "terminal",
-                    status="cancelled",
-                    suppress_errors=True,
-                )
-                return self._successful_terminal(
-                    source_ref, dispatch_generation, f"cancelled:{source_id}",
-                    terminal_status="cancelled", reason=error.code,
-                )
-            if error.code == "reply_cap_reached":
+            refusal = post_refusal_outcome(error.code, error.retryable)
+            if refusal == "skipped":
                 # The Room refused this counted open-mode post (ADR 0089): a
                 # legitimate terminal outcome without a post, never a
                 # quarantine, retry or execution failure.
                 await self._publish(binding, source_id, "terminal", status="skipped", suppress_errors=True)
+                self._log_outcome(binding, "skipped", source_id, error.code, cycle_attempt)
                 return self._successful_terminal(
                     source_ref, dispatch_generation, f"skipped:{source_id}",
                     terminal_status="skipped", reason="reply_cap_reached",
                 )
-            if error.code == "stale_epoch":
+            if refusal == "superseded":
+                # Contract P1-2: the attempt, turn or epoch this reply belonged
+                # to is gone (2026-10-01 D4a: a post after lease expiry). The
+                # refusal is terminal evidence; no retry can succeed and no
+                # quarantine is needed. Fence the attempt durably first, so a
+                # restart cannot replay the frozen post, then free it.
+                await self._supersede_refused_post(binding, source_id, cycle_attempt)
                 await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
+                self._log_outcome(binding, "superseded", source_id, error.code, cycle_attempt)
                 return self._successful_terminal(
                     source_ref, dispatch_generation, f"superseded:{source_id}",
-                    terminal_status="superseded", reason="stale_epoch",
+                    terminal_status="superseded", reason=error.code,
                 )
             self._record_delivery_failure(
                 binding, source_id, str(error), error.retryable, error_code=error.code,
@@ -3698,13 +3771,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         }
         if event_id:
             payload["eventId"] = event_id
-        if execution_failure:
+        if action == "fail":
+            # Contract P1-4: a bare fail is never sent. Without a more specific
+            # cause this is the server's own default for a bare fail, so its
+            # readiness consequence is unchanged.
+            payload["executionFailure"] = dict(execution_failure or typed_execution_failure("runtime", ""))
+        elif execution_failure:
             payload["executionFailure"] = dict(execution_failure)
         await self._call(
             binding,
             lambda api: api.complete_discussion_attempt(
                 binding.room_id, str(cycle["id"]), str(attempt["id"]), payload,
             ),
+        )
+        failure = payload.get("executionFailure") or {}
+        logger.info(
+            "Room %s settled attempt %s action %s code %s",
+            binding.room_id, attempt["id"], action,
+            f"{failure.get('layer')}/{failure.get('code')}" if failure else "-",
         )
 
     def _start_attempt_renewal(
@@ -4555,6 +4639,162 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if publish is not None:
             await publish(binding, event_id, "terminal", status="failed", suppress_errors=True)
 
+    def _log_outcome(
+        self,
+        binding: RoomBinding,
+        outcome: str,
+        source_id: str,
+        code: str,
+        cycle_attempt: dict[str, Any] | None = None,
+    ) -> None:
+        """One log line per terminal refusal outcome (contract P1-5).
+
+        Carries the code, source sequence and attempt ID only: never the body,
+        the request, or anything from the credential.
+        """
+        seq = int(
+            binding.turn_sequences.get(source_id)
+            or getattr(self, "_event_seq", {}).get(binding.room_id, {}).get(source_id, 0)
+        )
+        attempt_id = str(((cycle_attempt or {}).get("attempt") or {}).get("id") or "-")
+        logger.info(
+            "Room %s %s source seq %s attempt %s code %s",
+            binding.room_id, outcome, seq or "?", attempt_id, code or "-",
+        )
+
+    async def _supersede_refused_post(
+        self,
+        binding: RoomBinding,
+        source_id: str,
+        cycle_attempt: dict[str, Any] | None,
+    ) -> None:
+        """Fence, settle and free an attempt whose post the Room refused."""
+        await self._stop_attempt_renewal(source_id)
+        if cycle_attempt:
+            key = _attempt_authority_key(binding, source_id, cycle_attempt)
+            record = binding.delivery_authority.get(key)
+            if isinstance(record, dict) and record.get("state") != "superseded":
+                # Monotonic: superseded is never reactivated (state merge).
+                record["state"] = "superseded"
+                binding.delivery_authority[key] = record
+                self._persist_binding(binding)
+            # The claim passed moments ago, so the attempt may still be live
+            # (an expired turn, a stale epoch). Release it with the transient
+            # code instead of letting it hold the cycle to its hard cap; an
+            # attempt the server already moved past answers cycle_superseded.
+            try:
+                await self._complete_cycle_attempt(
+                    binding, cycle_attempt, "fail",
+                    execution_failure=typed_execution_failure("infrastructure", "attempt_timeout"),
+                )
+            except ProtocolError as error:
+                if error.code not in {"cycle_superseded", "cycle_no_attempt"}:
+                    logger.warning(
+                        "Room %s could not settle the superseded attempt for source %s: %s",
+                        binding.room_id, source_id, error.code or "error",
+                    )
+        getattr(self, "_cycle_attempts", {}).pop(source_id, None)
+        getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+        getattr(self, "_source_coordination_modes", {}).pop(source_id, None)
+        getattr(self, "_open_reply_recipients", {}).pop(source_id, None)
+
+    async def _release_dispatch_at_record(
+        self, chat_id: str, source_id: str, dispatch_generation: str,
+    ) -> None:
+        """Free the Room as soon as this dispatch's outcome is recorded (P1-6).
+
+        The host's completion callback may come much later or, for a run it
+        drained as a follow-up, not at all (2026-10-01 D1). It stays an
+        idempotent co-owner: the generation fence below makes its own release
+        a no-op once a successor holds the Room.
+        """
+        active_rooms = getattr(self, "_active_dispatch_rooms", None)
+        if not dispatch_generation or not active_rooms or active_rooms.get(chat_id) != dispatch_generation:
+            return
+        await self._stop_attempt_renewal(source_id)
+        active_rooms.pop(chat_id, None)
+        getattr(self, "_dispatch_started_at", {}).pop(dispatch_generation, None)
+        event_generations = getattr(self, "_event_dispatch_generation", {})
+        if event_generations.get(source_id) == dispatch_generation:
+            getattr(self, "_inflight_events", set()).discard(source_id)
+            event_generations.pop(source_id, None)
+        state = getattr(self, "_state", None)
+        binding = state.binding(chat_id) if state is not None else None
+        if binding is None:
+            return
+        try:
+            await self._dispatch_next_queued(binding)
+        except Exception:  # noqa: BLE001 - the recorded outcome must reach Hermes
+            # The queued event stays queued; the stale sweep dispatches it.
+            logger.warning(
+                "Room %s could not dispatch the next queued event after recording source %s",
+                chat_id, source_id, exc_info=True,
+            )
+
+    async def _settle_quarantined_send(
+        self, chat_id: str, source_id: str, dispatch_generation: str,
+    ) -> None:
+        """Release a dispatch whose send-path refusal was quarantined (G5).
+
+        Without a cycle attempt the entry stays quarantined for the operator.
+        With one, the completion owner's failure branch runs now instead of
+        waiting for Hermes: the attempt is reported ``fail`` with a typed
+        cause and the refused reply is recorded ``failed``, never as a pass.
+        """
+        state = getattr(self, "_state", None)
+        binding = state.binding(chat_id) if state is not None else None
+        if binding is None:
+            return
+        if getattr(self, "_event_dispatch_generation", {}).get(source_id, dispatch_generation) != dispatch_generation:
+            return
+        intent = binding.delivery_intents.get(source_id) or {}
+        seq = int(
+            (intent.get("selected") or {}).get("source_seq")
+            or binding.turn_sequences.get(source_id)
+            or getattr(self, "_event_seq", {}).get(chat_id, {}).get(source_id, 0)
+        )
+        if seq < 1 or binding.inbox.get(str(seq)) != "quarantined":
+            return
+        if intent.get("delivery_state") == "posted" or (
+            (binding.delivery_lifecycle.get(source_id) or {}).get("delivery_state") == "posted"
+        ):
+            return
+        code = str(intent.get("last_error_code") or "")
+        cycle_attempt = getattr(self, "_cycle_attempts", {}).pop(source_id, None)
+        await self._stop_attempt_renewal(source_id)
+        getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+        if cycle_attempt:
+            superseded = getattr(self, "_superseded_sources", None)
+            if superseded is None:
+                superseded = set()
+                self._superseded_sources = superseded
+            # A late callback for this source must never post after release.
+            superseded.add(source_id)
+            failure = (
+                typed_execution_failure("runtime", "response_too_large")
+                if code == "message_too_large"
+                # Transient: the server restores readiness on the agent's next
+                # contribution (ADR 0017), as for the TTL quarantine release.
+                else typed_execution_failure("infrastructure", "attempt_timeout")
+            )
+            if code == "message_too_large":
+                failure["remediationHint"] = (
+                    "The response exceeded the Room's contribution limit. Retry with a shorter response."
+                )
+            try:
+                await self._complete_cycle_attempt(binding, cycle_attempt, "fail", execution_failure=failure)
+            except ProtocolError as error:
+                if error.code != "cycle_superseded":
+                    logger.warning(
+                        "Room %s could not report the refused attempt for sequence %s: %s",
+                        chat_id, seq, error.code or "error",
+                    )
+            await self._complete_event(
+                binding, seq, terminal_status="failed", source_id=source_id,
+                reason=f"delivery_refused:{code or 'unknown'}",
+            )
+        await self._release_dispatch_at_record(chat_id, source_id, dispatch_generation)
+
     async def _release_wedged_dispatch(self, binding: RoomBinding, now: float) -> None:
         """Clear a Room dispatch marker whose run never reported completion."""
         active_rooms = getattr(self, "_active_dispatch_rooms", None) or {}
@@ -4681,9 +4921,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding.inbox[key] = "failed-retryable"
             else:
                 binding.inbox[key] = "quarantined"
+                attempt_id = str((
+                    (getattr(self, "_cycle_attempts", {}).get(source_id) or {}).get("attempt") or {}
+                ).get("id") or "-")
                 logger.error(
-                    "Room %s quarantined failed delivery for sequence %s; acknowledgement remains at %s",
-                    binding.room_id, seq, binding.acknowledged_cursor,
+                    "Room %s quarantined failed delivery for sequence %s attempt %s code %s; acknowledgement remains at %s",
+                    binding.room_id, seq, attempt_id, intent["last_error_code"] or "-", binding.acknowledged_cursor,
                 )
         self._persist_binding(binding)
 

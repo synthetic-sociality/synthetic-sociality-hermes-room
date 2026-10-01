@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.70",
+  "adapterVersion": "1.0.71",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -167,5 +167,45 @@
     "legacy_alias_refused": "test_fence_refuses_inconsistent_legacy_alias_in_completion_scope",
     "sibling_transaction": "test_real_state_transaction_preserves_sibling_and_cli_fence_on_restart",
     "revoked_replaced_binding": "test_revoked_or_replaced_binding_cannot_persist_or_ack_fence"
+  },
+  "errorCodes": [
+    "busy",
+    "connector_not_active",
+    "credential_expired",
+    "credential_revoked",
+    "cycle_conflict",
+    "cycle_no_attempt",
+    "cycle_superseded",
+    "idempotency_mismatch",
+    "invalid_contribution",
+    "invitation_consumed",
+    "invitation_expired",
+    "invitation_invalid",
+    "message_too_large",
+    "reply_cap_reached",
+    "request_validation_failed",
+    "stale_context",
+    "stale_epoch",
+    "turn_expired",
+    "turn_not_active",
+    "turn_required",
+    "turns_not_used",
+    "validation_error"
+  ],
+  "parityP1Contract": "docs/delivery-lifecycle-contract-v1.md#p1--refusal-attempt-authority-and-failure-reporting-2026-10-01",
+  "parityP1Cases": {
+    "P1-01 lease renewed while model runs; post after re-claim": "test_p1_01_lease_renewed_while_model_runs_and_post_follows_reclaim",
+    "P1-02 re-claim failure supersedes without post": "test_p1_02_reclaim_failure_supersedes_without_post",
+    "P1-03 post refused cycle_superseded → superseded, not pass, not model_no_visible_reply": "test_p1_03_post_refused_cycle_superseded_is_superseded_not_pass",
+    "P1-04 post refused stale_epoch / turn_not_active / turn_expired → superseded": "test_p1_04_post_refused_stale_epoch_turn_not_active_turn_expired_is_superseded",
+    "P1-05 post refused stale_context → refresh and re-key once, then post": "test_p1_05_post_refused_stale_context_refreshes_and_rekeys_once_then_posts",
+    "P1-06 error-code vocabulary keeps every listed code": "test_p1_06_error_code_vocabulary_keeps_every_listed_code",
+    "P1-07 every fail carries executionFailure": "test_p1_07_every_fail_carries_execution_failure",
+    "P1-08 send-path quarantine releases the attempt, stops renewal, dispatches next": "test_p1_08_send_path_quarantine_releases_attempt_stops_renewal_and_dispatches_next",
+    "P1-09 refusal outcomes are logged without body or secrets": "test_p1_09_refusal_outcomes_are_logged_without_body_or_secrets",
+    "P1-10 D4a replay: Zurie events 949–957 produce superseded and a typed settle": "test_p1_10_d4a_replay_produces_superseded_and_a_typed_settle"
+  },
+  "parityP1Replays": {
+    "D1 events 960-965: refused dispatch releases the Room without host completion": "test_d1_replay_refused_dispatch_releases_room_without_host_completion"
   }
 }

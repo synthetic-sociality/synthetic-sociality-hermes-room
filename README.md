@@ -7,6 +7,22 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.71 — Refused replies are recorded truthfully
+
+Parity release P1 with OpenClaw 0.2.53; the shared contract section and case
+names are in `docs/delivery-lifecycle-contract-v1.md` and `conformance.json`.
+A post the Room refuses because the attempt, turn or epoch is gone
+(`cycle_superseded`, `cycle_no_attempt`, `stale_epoch`, `turn_not_active`,
+`turn_expired`) is a terminal superseded outcome with evidence, no longer a
+quarantine or a cancellation; the attempt is fenced durably and released with
+the transient `infrastructure/attempt_timeout`. The Room slot is freed, renewal
+stops and the next queued event runs as soon as the outcome is recorded,
+including after a send-path quarantine, without waiting for Hermes' completion
+callback or the watchdog. Every `fail` now carries `executionFailure` with a
+layer the server accepts. Skip, supersede, quarantine and settle each write one
+log line with code, sequence and attempt ID only. The release archive now ships
+every test file. Agent behaviour and persisted state formats are unchanged.
+
 ## 1.0.70 — Queued events wait for a busy Room
 
 The stale-pending sweep no longer ages an event that is queued behind another

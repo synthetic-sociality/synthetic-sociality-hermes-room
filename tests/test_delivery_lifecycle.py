@@ -587,7 +587,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 "2026-08-30T04:59:19.721933435Z",
             )
 
-    def test_hermes_operational_outcome_retryable_provider_passes_attempt_without_posting(self):
+    def test_hermes_operational_outcome_retryable_provider_fails_attempt_without_posting(self):
         async def run():
             binding = lifecycle_binding()
             binding.delivery_intents.clear()
@@ -638,7 +638,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertTrue(result.success, getattr(result, "error", None))
             self.assertEqual(result.message_id, "skipped:evt-5")
             self.assertEqual(calls["post"], 0)
-            self.assertEqual(calls["complete"], [{"generation": 3, "action": "fail"}])
+            self.assertEqual(calls["complete"], [{"generation": 3, "action": "fail", "executionFailure": {"layer": "provider", "code": "server_error"}}])
 
         asyncio.run(run())
 
@@ -684,7 +684,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             self.assertTrue(result.success, getattr(result, "error", None))
             self.assertEqual(result.message_id, "skipped:evt-5")
-            self.assertEqual(completions, [{"generation": 3, "action": "fail"}])
+            self.assertEqual(completions, [{"generation": 3, "action": "fail", "executionFailure": {"layer": "provider", "code": "auth_permanent"}}])
 
         asyncio.run(run())
 
@@ -728,7 +728,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             self.assertTrue(result.success, getattr(result, "error", None))
             self.assertEqual(result.message_id, "skipped:evt-5")
-            self.assertEqual(completions, [{"generation": 3, "action": "fail"}])
+            self.assertEqual(completions, [{"generation": 3, "action": "fail", "executionFailure": {"layer": "runtime", "code": "new_subtype"}}])
 
         asyncio.run(run())
 
@@ -783,7 +783,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             self.assertTrue(result.success, getattr(result, "error", None))
             self.assertEqual(result.message_id, "skipped:evt-5")
-            self.assertEqual(calls, {"post": 0, "complete": [{"generation": 3, "action": "fail"}]})
+            self.assertEqual(calls, {"post": 0, "complete": [{"generation": 3, "action": "fail", "executionFailure": {"layer": "runtime", "code": "invalid_operational_outcome"}}]})
 
         asyncio.run(run())
 
@@ -1927,6 +1927,19 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         copy_line = next(line for line in installer.splitlines() if line.startswith("for file in "))
         self.assertIn("origin_context.py", copy_line.split())
 
+    def test_release_archive_payload_includes_every_test_and_fixture(self):
+        # G36: 1.0.70 archives omitted four suites, so a release could not be
+        # re-verified from its own bytes.
+        spec = importlib.util.spec_from_file_location("package_release", ROOT / "tools" / "package-release.py")
+        packager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(packager)
+        shipped = {
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "tests").rglob("*")
+            if path.is_file() and path.suffix in {".py", ".json"} and "__pycache__" not in path.parts
+        }
+        self.assertEqual(sorted(shipped - set(packager.PAYLOAD)), [])
+
     def test_extract_visible_body_recovers_escaped_layout_outside_json_strings(self):
         response = (
             r'{\n  "action": "contribute",\n  "body": '
@@ -1992,11 +2005,11 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.70")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.71")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Queued events wait for a busy Room",
+            f"## {adapter.CONNECTOR_VERSION} — Refused replies are recorded truthfully",
             (ROOT / "README.md").read_text(),
         )
 
@@ -2052,7 +2065,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.70"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.71"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -2468,7 +2481,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertEqual(calls, {"room_state": 1, "complete": 1, "post": 0})
             self.assertEqual(
                 completions,
-                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail"})],
+                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail", "executionFailure": {"layer": "runtime", "code": "legacy_gateway_operational_error"}})],
             )
             self.assertEqual(activity[-1]["status"], "failed")
             self.assertEqual(
@@ -2578,7 +2591,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertEqual(calls, {"room_state": 1, "complete": 1, "post": 0})
             self.assertEqual(
                 completions,
-                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail"})],
+                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail", "executionFailure": {"layer": "runtime", "code": "legacy_gateway_operational_error"}})],
             )
             self.assertNotIn("evt-5", instance._cycle_attempts)
 
@@ -2639,7 +2652,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertEqual(calls, {"room_state": 1, "complete": 1, "post": 0})
             self.assertEqual(
                 completions,
-                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail"})],
+                [("room-1", "cycle-1", "attempt-1", {"generation": 3, "action": "fail", "executionFailure": {"layer": "runtime", "code": "legacy_gateway_operational_error"}})],
             )
             self.assertNotIn("evt-5", instance._cycle_attempts)
 

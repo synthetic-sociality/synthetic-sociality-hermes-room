@@ -38,11 +38,16 @@ PAYLOAD = (
     "tests/fixtures/zurie-epoch-boundary/seq-134.canonical.json",
     "tests/support.py",
     "tests/test_context.py",
-    "tests/test_delivery_lifecycle.py",
-    "tests/test_protocol_artifacts.py",
-    "tests/test_prior_epoch_system_terminal.py",
     "tests/test_credential_renewal.py",
+    "tests/test_delivery_lifecycle.py",
+    "tests/test_epoch_handover_dispatch.py",
+    "tests/test_parity_p1.py",
+    "tests/test_prior_epoch_system_terminal.py",
+    "tests/test_protocol_artifacts.py",
     "tests/test_recovery_fence_transport.py",
+    "tests/test_reply_marker.py",
+    "tests/test_room_history_tool.py",
+    "tests/test_stale_dispatch_recovery.py",
 )
 
 

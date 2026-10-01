@@ -82,3 +82,30 @@ dispatch-generation-bound across awaits; a newer dispatch or canonical posted
 receipt cannot be downgraded. A lost or ambiguous delivery result remains with
 its existing reconciliation owner. No deadline, word limit, credential, health,
 or replay authority changes. Only an explicit authorized retry starts new work.
+
+## P1 — Refusal, attempt authority and failure reporting (2026-10-01)
+
+P1-1 Attempt authority. A connector that claims a cycle attempt keeps the lease alive while the model runs
+(renew by re-claim at max(1, min(30, remaining/3)) seconds) and re-claims once immediately before posting.
+A failed renewal or re-claim marks the attempt superseded, durably and monotonically; no post follows.
+
+P1-2 Post-time refusal classification. A refusal of POST /messages without a canonical receipt maps to exactly one outcome:
+- reply_cap_reached → skipped (unchanged);
+- cycle_superseded, cycle_no_attempt, stale_epoch, turn_not_active, turn_expired → superseded;
+- stale_context → refresh: re-read the head, re-key once per newer head, bounded retries;
+- HTTP 429, ≥500, or a retryable flag → retryable (delivery_pending);
+- anything else → quarantined.
+Superseded and skipped are terminal outcomes with evidence. They never become `pass`.
+
+P1-3 Shared error-code vocabulary. Both connectors keep the server code verbatim for every code listed in
+conformance.json `errorCodes`; unlisted codes map to "" and are quarantined.
+
+P1-4 Typed failure. Every `complete` with action `fail` carries `executionFailure{layer, code}` from the values the server accepts.
+A bare `fail` is never sent.
+
+P1-5 Truthful outcome. A produced reply that was refused is recorded as superseded/skipped/failed, never as "no visible reply".
+Every quarantine, skip, supersede and settle writes one log line (code, source seq, attempt id; never the body or credentials).
+
+P1-6 Release at record. A connector frees its per-Room dispatch slot, stops attempt renewal and lets the next queued event run
+as soon as the terminal outcome of the in-flight dispatch is recorded, including a send-path quarantine. Waiting for the
+host's completion callback or a watchdog is not required.
