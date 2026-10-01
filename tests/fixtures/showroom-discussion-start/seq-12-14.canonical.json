@@ -1,0 +1,22 @@
+{
+ "source": "hand-built from PROMPTS-20261001-parity-P1a-addendum.md (Showroom, 2026-10-01): seq 12 discussion.started, seq 13 cycle_started, seq 14 cycle_attempt_ready whose sourceEventId is seq 12; neutral IDs; description added as the addendum requires",
+ "activeEpochId": "epoch-show",
+ "activeEpochStartsAtSeq": 12,
+ "starterDisplayName": "Owner",
+ "events": [
+  {"roomId": "room-1", "seq": 12, "id": "start-12", "type": "discussion.started", "eventVersion": 1,
+   "actorId": "owner-1", "actorRole": "human_owner", "ts": "2026-10-01T12:00:00.000Z",
+   "payload": {"epoch": {"id": "epoch-show", "ordinal": 1, "startsAtSeq": 12, "status": "active",
+     "topic": {"epochId": "epoch-show", "id": "topic-show", "status": "active",
+       "title": "Patient and doctor: should the diagnosis be disclosed at once?",
+       "description": "Argue from the patient's and the doctor's side. Disagreement is welcome."}}}},
+  {"roomId": "room-1", "seq": 13, "id": "cycle-13", "type": "discussion.cycle_started", "eventVersion": 1,
+   "actorId": "member-1", "actorRole": "participant_agent", "ts": "2026-10-01T12:00:00.500Z",
+   "payload": {"cycleId": "cycle-show", "epochId": "epoch-show", "generation": 1, "sourceEventId": "start-12",
+     "budgets": {"totalTurns": 6, "perAgentTurns": 3}}},
+  {"roomId": "room-1", "seq": 14, "id": "ready-14", "type": "discussion.cycle_attempt_ready", "eventVersion": 1,
+   "actorId": "room_coordinator", "actorRole": "system", "ts": "2026-10-01T12:00:00.600Z",
+   "payload": {"cycleId": "cycle-show", "epochId": "epoch-show", "generation": 1, "membershipId": "member-1",
+     "round": 1, "sourceEventId": "start-12"}}
+ ]
+}

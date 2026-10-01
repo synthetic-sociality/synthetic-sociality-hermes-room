@@ -9,6 +9,7 @@ Every prompt below is built by the real ``_dispatch_room_event``.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import types
 import unittest
@@ -50,7 +51,8 @@ def cycle(total_turns=6, used=1, **budgets):
             "attempt": {"id": "attempt-1", "round": 1}}
 
 
-def build_prompt(event, *, attempt=None, policy=None, rules=None, context=(START, HUMAN, PEER)):
+def build_prompt(event, *, attempt=None, policy=None, rules=None, context=(START, HUMAN, PEER),
+                 epoch_id="epoch-2", starts_at=41, topic=None):
     """Return the exact prompt text the adapter hands to Hermes for ``event``."""
     captured = []
     instance = object.__new__(adapter.SyntheticSocialityAdapter)
@@ -60,7 +62,8 @@ def build_prompt(event, *, attempt=None, policy=None, rules=None, context=(START
     instance._cycle_attempts = {event["id"]: attempt} if attempt else {}
     state = {
         "title": "Showroom", "purpose": "Patient and doctor use case", "headSeq": 60,
-        "activeEpoch": {"id": "epoch-2", "startsAtSeq": 41}, "rules": list(rules or []),
+        "activeEpoch": {"id": epoch_id, "startsAtSeq": starts_at}, "rules": list(rules or []),
+        **({"activeTopic": topic} if topic else {}),
         "roster": [{"membershipId": "owner-1", "displayName": "Owner"},
                    {"membershipId": "peer-1", "displayName": "Peer"},
                    {"membershipId": "member-1", "displayName": "Agent"}],
@@ -82,6 +85,7 @@ def build_prompt(event, *, attempt=None, policy=None, rules=None, context=(START
                                   installation_id="inst-1", display_name="Agent")
     binding.epoch_session_routing_initialized = True
     binding.legacy_session_epoch_id = "epoch-1"
+    instance._event_epoch[event["id"]] = epoch_id
     assert asyncio.run(instance._dispatch_room_event(binding, event, "generation"))
     return captured[0].text
 
@@ -184,8 +188,11 @@ class ParityP1aTests(unittest.TestCase):
         self.assertIn("[Autonomous discussion phase summary, round 1, turn 2/6]\n\n", prompts["summary"])
         self.assertIn("[Autonomous discussion phase initial_greeting, round 1, turn 2/6]\n\n", prompts["initial_greeting"])
         self.assertIn("Owner: /summarize\n", prompts["wrap_up"])
-        self.assertIn("[Room scheduler: your attempt in the current discussion cycle is ready]",
+        self.assertIn("\n\n[Room scheduler: your attempt in the current discussion cycle is ready; "
+                      "its source event not-in-context is not available to the connector]\n\n",
                       prompts["autonomous_fallback"])
+        for name in ("autonomous_fallback", "summary_for_self"):
+            self.assertNotIn("Room participant:", prompts[name])
         self.assertIn("[Room policy summaryBehavior=on_cycle_complete names you summary coordinator; "
                       "discussion cycle cycle-1 ended: completed]", prompts["summary_for_self"])
 
@@ -213,6 +220,26 @@ class ParityP1aTests(unittest.TestCase):
         for unset in ({}, {"maxContributionWords": 0}, {"maxContributionWords": True}, {"maxContributionWords": "90"}):
             with self.subTest(policy=unset):
                 self.assertNotIn("Word limit", build_prompt({**HUMAN, "id": "m-58", "seq": 58}, policy=unset))
+
+
+class DiscussionStartTests(unittest.TestCase):
+    def test_p1a_06_discussion_start_title_and_description_presented_verbatim_and_attributed_to_the_starting_human(self):
+        fixture = json.loads((ROOT / "tests" / "fixtures" / "showroom-discussion-start" / "seq-12-14.canonical.json").read_text())
+        start, _cycle_started, ready = fixture["events"]
+        topic = start["payload"]["epoch"]["topic"]
+        attempt = {"cycle": {"id": "cycle-show", "generation": 1, "totalTurns": 0,
+                             "budgets": {"totalTurns": 6, "perAgentTurns": 3}},
+                   "attempt": {"id": "attempt-14", "round": 1}}
+        prompt = build_prompt(ready, attempt=attempt, context=tuple(fixture["events"][:2]),
+                              epoch_id="epoch-show", starts_at=12,
+                              topic={"id": topic["id"], "title": topic["title"], "description": topic["description"]})
+        # Current-turn input: the topic itself, verbatim, from the starting human.
+        self.assertIn(f"\n\n{fixture['starterDisplayName']}: {topic['title']}\n\n{topic['description']}\n\n[Autonomous discussion phase opening",
+                      prompt)
+        for invented in ("Room participant", "system:", "Room scheduler", "Continue the autonomous"):
+            self.assertNotIn(invented, prompt)
+        # Context: the description under "Current discussion".
+        self.assertIn(f"Current discussion: {topic['title']}\n{topic['description']}\n", prompt)
 
 
 def importlib_room_tools():

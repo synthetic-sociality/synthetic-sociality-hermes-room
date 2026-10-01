@@ -27,6 +27,14 @@ open and coordinated modes. Delivery, refusal, lease, queue and
 acknowledgement logic are unchanged. The full prompt inventory is in
 `docs/p1a-prompt-inventory.md`.
 
+A cycle seeded by the epoch's `discussion.started` (P1a-5) now presents the
+topic title and description verbatim as the current-turn input, attributed to
+the human who started the discussion, instead of the connector's fallback
+text; the canonical context renders the topic description under "Current
+discussion". An unresolvable source is stated as such, never replaced by
+connector text, and connector-stated scheduling facts carry no invented
+speaker.
+
 ## 1.0.71 — Refused replies are recorded truthfully
 
 Parity release P1 with OpenClaw 0.2.53; the shared contract section and case

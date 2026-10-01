@@ -110,6 +110,10 @@ def canonical_room_context(
         lines.append(f"Purpose: {str(state['purpose']).strip()}")
     if str(topic.get("title") or "").strip():
         lines.append(f"Current discussion: {str(topic['title']).strip()}")
+        # Contract P1a-5: the owner's topic description, verbatim.
+        description = str(topic.get("description") or "").strip()
+        if description:
+            lines.append(description)
     guidance: list[str] = []
     preamble = ""
     guidance_size = 0

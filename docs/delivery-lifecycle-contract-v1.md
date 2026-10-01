@@ -127,3 +127,8 @@ own identity, the remaining turn or byte budget as numbers, the reply-marker syn
 number on every turn, taken from the cycle budget or the policy.
 
 P1a-4 When the Room provides no phase instruction, the connector adds none; it states only the procedural facts.
+
+P1a-5 Discussion start. When a cycle attempt's sourceEventId is the epoch's `discussion.started` event, the connector resolves
+that event and presents the topic title and description verbatim as the current-turn input, attributed to the human who
+started the discussion (never "Room participant" or "system"). Both context builders render the topic description under
+"Current discussion". A connector never substitutes its own text for a missing source.

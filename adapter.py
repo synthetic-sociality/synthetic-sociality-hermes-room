@@ -491,9 +491,13 @@ def _acknowledge_peer(api: Any, room_id: str, source_event_id: str) -> dict[str,
 
 def _cycle_source_body(event: dict[str, Any], payload: dict[str, Any]) -> str:
     if event.get("type") == "discussion.cycle_attempt_ready":
-        # The canonical source message was not in the context window. State
-        # the scheduling fact only (contract P1a-4).
-        return "[Room scheduler: your attempt in the current discussion cycle is ready]"
+        # The canonical source could not be resolved. State that fact; never
+        # substitute connector text for the source (contract P1a-4, P1a-5).
+        source = str(payload.get("sourceEventId") or "").strip() or "unknown"
+        return (
+            "[Room scheduler: your attempt in the current discussion cycle is ready; "
+            f"its source event {source} is not available to the connector]"
+        )
     if event.get("type") == "human.command":
         command = payload.get("command") or {}
         if str(command.get("command") or "") == "summarize":
@@ -4073,6 +4077,23 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             logger.warning("Room %s context refresh unavailable: %s", binding.room_id, error)
         self._remember_post_numbers(binding.room_id, [*context_events, event])
         prompt_event = _cycle_prompt_event(event, payload, context_events)
+        if prompt_event is event and event.get("type") == "discussion.cycle_attempt_ready":
+            # Contract P1a-5: a cycle seeded by the epoch's discussion.started
+            # presents the topic itself, attributed to the human who started it.
+            source_id = str(payload.get("sourceEventId") or "").strip()
+            start_event = None
+            if source_id and starts_at:
+                try:
+                    start_event = await self._call(
+                        binding,
+                        lambda api: _epoch_start_event(
+                            lambda after: api.events(binding.room_id, after, 0), starts_at,
+                        ),
+                    )
+                except Exception as error:
+                    logger.warning("Room %s discussion start unavailable: %s", binding.room_id, error)
+            if isinstance(start_event, dict) and str(start_event.get("id") or "") == source_id:
+                prompt_event = start_event
         prompt_payload = prompt_event.get("payload") or {}
         prompt_event_id = str(prompt_event.get("id") or event_id)
         actor = _room_actor_name(state, prompt_event)
@@ -4115,6 +4136,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     "\n[Room phase instruction — server-provided, verbatim]\n"
                     f"{instruction}\n[/Room phase instruction]"
                 )
+        # Connector-stated scheduling facts carry no speaker: attributing them
+        # to "Room participant" would invent a source (contract P1a-5).
+        current_input = (
+            body if prompt_event.get("type") in {"discussion.cycle_attempt_ready", "discussion.cycle_terminal"}
+            else f"{actor}: {body}"
+        )
         word_limit, word_limit_source = _contribution_word_limit(
             _policy_view(context_policy), cycle_attempt["cycle"] if cycle_attempt else None,
         )
@@ -4124,7 +4151,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         prompt = (
             f"[Synthetic Sociality Room event {event_id}, canonical sequence {seq}]\n"
             f"{_runtime_capability_context(binding, state, transport=getattr(self, '_effective_transports', {}).get(binding.room_id) or binding.transport)}\n"
-            f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{actor}: {body}{cycle_context}\n\n"
+            f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{current_input}{cycle_context}\n\n"
             f"{ROOM_HISTORY_INSTRUCTION} "
             f"{ROOM_IDENTITY_FACT} "
             f"{word_limit_fact}"

@@ -34,6 +34,7 @@ PAYLOAD = (
     "tests/fixtures/berlin-seq120-redacted-offline.json",
     "tests/fixtures/joined-coding-epoch-terminal/seq-838-840.canonical.json",
     "tests/fixtures/open-exchange-preamble-v1.txt",
+    "tests/fixtures/showroom-discussion-start/seq-12-14.canonical.json",
     "tests/fixtures/zurie-epoch-boundary/seq-132.canonical.json",
     "tests/fixtures/zurie-epoch-boundary/seq-133.canonical.json",
     "tests/fixtures/zurie-epoch-boundary/seq-134.canonical.json",
