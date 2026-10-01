@@ -7,6 +7,19 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.73 — Reply markers address only real messages
+
+Fixes a reply-marker defect seen in the 1.0.72 canary (Joined Coding,
+2026-10-01): in a coordinated cycle a reply could address the system
+`discussion.cycle_attempt_ready` event instead of the message it answered,
+and the Room showed it as "In reply to Room agent". The prompt header named
+the attempt-ready event's sequence number while the message being answered
+was shown without its own, and the number index accepted any event type.
+The defect predates 1.0.72 (seen on 1.0.68 as well). Now only
+`message.posted` events can be reply targets, the header carries no sequence
+number, and the current message carries its own `#N`. Delivery, refusal,
+lease, queue and acknowledgement logic are unchanged.
+
 ## 1.0.72 — Prompts carry no behavioural rules
 
 Parity release P1a with OpenClaw 0.2.54 (owner decision 2026-10-01: whether
