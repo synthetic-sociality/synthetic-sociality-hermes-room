@@ -139,10 +139,13 @@ _EXECUTION_FAILURE_LAYERS = frozenset({"provider", "runtime", "infrastructure"})
 _PROVIDER_HOST_LAYERS = frozenset({"provider", "endpoint", "streaming", "auth", "billing"})
 _EXECUTION_FAILURE_CODE_MAX = 128  # UTF-8 bytes (server CodeMaxLength)
 # While Hermes core still holds a Room session that has no owner task, the next
-# queued Room event waits in short steps (R1); the watch-loop sweep is the
-# backstop beyond this bound.
+# queued Room event is re-checked in short steps (R1). After each bound the
+# queue re-checks and waits again, so the wait lasts until core releases the
+# session or the adapter stops; it never hands the event to a busy session.
 SESSION_RELEASE_POLL_SECONDS = 0.25
 SESSION_RELEASE_POLL_LIMIT = 40
+# One warning when a Room has waited this long for core's session release.
+SESSION_WAIT_WARN_SECONDS = 900.0
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_HISTORY_INSTRUCTION = (
     "Earlier discussions and the library text are not preloaded. If your task needs an exact "
@@ -957,6 +960,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._queued_events.clear()
         self._active_dispatch_rooms.clear()
         getattr(self, "_session_release_waiters", set()).clear()
+        getattr(self, "_session_wait_started", {}).clear()
+        getattr(self, "_session_wait_warned", set()).clear()
         self._event_dispatch_generation.clear()
         getattr(self, "_receive_locks", {}).clear()
         self._terminal_sources.clear()
@@ -4320,6 +4325,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # busy-session path and never get its own completion (R1).
                 self._dispatch_when_session_released(binding)
                 return
+            self._end_session_wait(binding.room_id)
             event_id = str(event.get("id") or "")
             dispatch_generation = uuid.uuid4().hex
             active_rooms[binding.room_id] = dispatch_generation
@@ -4746,6 +4752,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _dispatch_when_session_released(self, binding: RoomBinding) -> None:
         """Resume this Room's queue once core's owner task for it has exited."""
+        self._note_session_wait(binding.room_id)
         waiters = getattr(self, "_session_release_waiters", None)
         if waiters is None:
             waiters = self._session_release_waiters = set()
@@ -4762,6 +4769,32 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # A guard without an owner task (an inline command) is short-lived;
         # poll briefly. The watch loop's sweep also re-runs the queue.
         self._schedule_queue_resume(binding, poll=True)
+
+    def _note_session_wait(self, room_id: str) -> None:
+        """Start, and once past the bound warn about, one session-release wait."""
+        started = getattr(self, "_session_wait_started", None)
+        if started is None:
+            started = self._session_wait_started = {}
+        warned = getattr(self, "_session_wait_warned", None)
+        if warned is None:
+            warned = self._session_wait_warned = set()
+        now = time.time()
+        since = started.setdefault(room_id, now)
+        if now - since > SESSION_WAIT_WARN_SECONDS and room_id not in warned:
+            warned.add(room_id)
+            logger.warning(
+                "Room %s queued event has waited %.0fs for Hermes core to release the Room session",
+                room_id, now - since,
+            )
+
+    def _end_session_wait(self, room_id: str) -> None:
+        (getattr(self, "_session_wait_started", None) or {}).pop(room_id, None)
+        (getattr(self, "_session_wait_warned", None) or set()).discard(room_id)
+
+    def _room_awaits_session(self, room_id: str) -> bool:
+        """Whether this Room's queue is waiting for core's session release."""
+        waiters = getattr(self, "_session_release_waiters", None) or set()
+        return room_id in waiters or self._room_session_busy(room_id)
 
     def _schedule_queue_resume(self, binding: RoomBinding, *, poll: bool = False) -> None:
         try:
@@ -4925,6 +4958,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         inflight = getattr(self, "_inflight_events", None) or set()
         queued = (getattr(self, "_queued_events", None) or {}).get(binding.room_id, {})
         holder = active_rooms.get(binding.room_id)
+        # Since release-at-record frees our slot before core releases its
+        # session, a Room waiting on that release is held just the same (K1).
+        awaits_session = bool(queued) and self._room_awaits_session(binding.room_id)
         for seq in sorted(stale):
             key = str(seq)
             running_event = next((event_id for event_id, event_seq in self._event_seq.get(binding.room_id, {}).items() if event_seq == seq), "")
@@ -4948,6 +4984,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding.pending_since[key] = now
                 logger.info(
                     "Room %s event sequence %s queued behind an in-flight dispatch; waiting",
+                    binding.room_id, seq,
+                )
+                continue
+            if awaits_session and seq in queued and not running_generation:
+                # Queued while Hermes core still holds the Room's session: the
+                # Room is busy, not this event stalled. It is dispatched once
+                # core releases the session.
+                binding.pending_since[key] = now
+                logger.info(
+                    "Room %s event sequence %s queued until Hermes core releases the Room session; waiting",
                     binding.room_id, seq,
                 )
                 continue

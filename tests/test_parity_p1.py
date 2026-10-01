@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import sys
+import time
 import types
 import unittest
 import urllib.error
@@ -687,6 +688,67 @@ class SessionReleaseTests(unittest.TestCase):
         self.assertEqual(before_release, [])
         self.assertEqual(busy, [])
         self.assertEqual(len(delivered), 1)
+
+    def test_queued_event_does_not_age_while_room_waits_on_core_session(self):
+        async def run():
+            instance, binding, api, busy, delivered, hold = self.core_instance(cycle_attempt())
+            binding.inbox["6"] = "pending"
+            binding.pending_retries["6"] = 0
+            current = adapter.MessageEvent(
+                message_id=source_ref(), source=types.SimpleNamespace(chat_id="room-1"),
+                raw_message={"id": "evt-5", "seq": 5}, allow_gateway_control=False, metadata={},
+            )
+            api.post_error = lambda _n: refusal("cycle_superseded")
+            self.assertTrue(instance._start_session_processing(current, self.KEY))
+            owner = instance._session_tasks[self.KEY]
+            for _ in range(50):
+                if api.acks:
+                    break
+                await asyncio.sleep(0.01)
+            sweeps = []
+            for _ in range(4):  # beyond PENDING_EVENT_MAX_RETRIES expiries
+                binding.pending_since["6"] = time.time() - adapter.PENDING_EVENT_TTL_SECONDS - 5
+                await instance._expire_stale_pending(binding)
+                sweeps.append((binding.inbox.get("6"), binding.pending_retries.get("6", 0), list(delivered)))
+            hold.set()
+            await owner
+            for _ in range(50):
+                if delivered:
+                    break
+                await asyncio.sleep(0.01)
+            binding.pending_since["6"] = time.time() - adapter.PENDING_EVENT_TTL_SECONDS - 5
+            await instance._expire_stale_pending(binding)
+            await asyncio.sleep(0.05)
+            return sweeps, delivered, busy
+
+        sweeps, delivered, busy = asyncio.run(run())
+        self.assertEqual(sweeps, [("pending", 0, [])] * 4)
+        self.assertEqual(busy, [])
+        self.assertEqual(len(delivered), 1)
+        self.assertTrue(delivered[0].endswith(":evt-6"))
+
+    def test_long_session_wait_warns_once_without_content(self):
+        async def run():
+            instance, binding, _api, busy, delivered, _hold = self.core_instance(None)
+            instance._active_dispatch_rooms = {}
+            instance._active_sessions[self.KEY] = asyncio.Event()
+            instance._session_wait_started = {"room-1": time.time() - adapter.SESSION_WAIT_WARN_SECONDS - 1}
+            with self.assertLogs(adapter.logger, level="WARNING") as logs:
+                for _ in range(3):
+                    await instance._dispatch_next_queued(binding)
+                    instance._session_release_waiters.discard("room-1")
+                adapter.logger.warning("sentinel")
+            del instance._active_sessions[self.KEY]
+            await asyncio.sleep(0.3)
+            return logs.output, delivered, instance
+
+        output, delivered, instance = asyncio.run(run())
+        waits = [line for line in output if "waited" in line]
+        self.assertEqual(len(waits), 1)
+        self.assertIn("Room room-1 queued event has waited", waits[0])
+        self.assertNotIn("credential", waits[0])
+        self.assertEqual(len(delivered), 1)
+        self.assertNotIn("room-1", instance._session_wait_started)
 
     def test_release_at_record_never_frees_a_successor_slot(self):
         async def run():
