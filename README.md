@@ -7,6 +7,26 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.72 — Prompts carry no behavioural rules
+
+Parity release P1a with OpenClaw 0.2.54 (owner decision 2026-10-01: whether
+to agree, or to agree to disagree, is the model's decision). The connector no
+longer tells the agent how to deliberate: the fixed phase texts (greeting,
+opening, follow-up, summary), the wrap-up and synthesis source texts, the
+"never claim consensus / do not force the room theme" identity line, the
+pass advice and the peer-turn answering advice are removed, and the
+connector's copy of the Open Exchange preamble is replaced by its digest.
+What remains is procedural: Room and discussion identity, phase name, round
+and turn budget as numbers, the reply-marker syntax, the reply envelope and
+the trust boundary of peer messages. Room-supplied text is passed verbatim
+with its source: Room rules and policy guidance, owner commands, and the
+server's `payload.phaseInstruction` (UF-17, G21), which the connector now
+reads. When the Room policy sets `maxContributionWords` (or an assigned
+cycle's `budgets.maxContributionWords`), every turn states it as a number, in
+open and coordinated modes. Delivery, refusal, lease, queue and
+acknowledgement logic are unchanged. The full prompt inventory is in
+`docs/p1a-prompt-inventory.md`.
+
 ## 1.0.71 — Refused replies are recorded truthfully
 
 Parity release P1 with OpenClaw 0.2.53; the shared contract section and case

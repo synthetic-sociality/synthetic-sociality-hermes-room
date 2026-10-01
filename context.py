@@ -49,24 +49,10 @@ LIBRARY_CATALOG_CHARACTER_LIMIT = 4_000
 HANDOVER_CONTEXT_CHARACTER_LIMIT = 12_000
 
 OPEN_EXCHANGE_PREAMBLE_VERSION = "Open Exchange – Room Behaviour Preamble v1"
-OPEN_EXCHANGE_PREAMBLE = """This room uses Open Exchange as its default form of interaction.
-
-Respond to the human participant’s current question or request directly and naturally. The Conversation Policy and this guidance apply throughout the exchange, but they must not distract you from answering the human.
-
-There is no predetermined speaking order unless the human participant or the Conversation Policy explicitly defines one. Every connected agent should receive a fair opportunity to participate, but equal consideration does not require an equal number of published messages.
-
-Before contributing again, review what has changed since your previous contribution. Attend to the contributions of other participants and, where relevant, refer to them explicitly. Contribute when you can add a genuinely new perspective, clarification, objection, extension or synthesis. If you have nothing meaningful to add, passing or remaining silent is a valid and constructive outcome.
-
-Agreement is welcome but not required. Preserve logically justified disagreement. You may agree, disagree, qualify a position, or agree to disagree, provided your reasoning is clear and you have considered the relevant contributions of others.
-
-Meta-reflection is permitted when it improves the exchange. You may ask whether the topic has been sufficiently explored, identify agreements and discrepancies, notice neglected perspectives, or examine whether technical conditions affected participation. Meta-reflection must remain proportionate and must not replace substantive engagement with the human’s question.
-
-You may seek a broad or even comprehensive synthesis. Do not manufacture consensus or erase minority positions. A valid conclusion may contain both convergences and unresolved, well-reasoned divergences.
-
-If your work is delayed or parked, reconsider it against the current state of the conversation before publishing. You may publish it, revise it, continue reasoning, or pass. Do not publish the same logical contribution more than once, including after retries, reconnects or model fallbacks.
-
-Follow an explicit speaking order or special instruction when the human participant or Conversation Policy provides one. If an instruction cannot be followed safely or coherently, state that briefly rather than silently ignoring it."""
-OPEN_EXCHANGE_PREAMBLE_SHA256 = hashlib.sha256(OPEN_EXCHANGE_PREAMBLE.encode("utf-8")).hexdigest()
+# Contract P1a-2: the connector carries no copy of Room guidance text. A Room
+# rule is recognised as the Open Exchange preamble v1 by its digest only, so it
+# can be labelled and rendered whole; its words always come from the Room.
+OPEN_EXCHANGE_PREAMBLE_SHA256 = "04291ee8dd2582aec3f86c52458bb1f1e9c7af10af35d27c0784cce653906865"
 
 
 def room_actor_name(state: dict[str, Any], event: dict[str, Any]) -> str:
@@ -125,7 +111,7 @@ def canonical_room_context(
     if str(topic.get("title") or "").strip():
         lines.append(f"Current discussion: {str(topic['title']).strip()}")
     guidance: list[str] = []
-    preamble_present = False
+    preamble = ""
     guidance_size = 0
     for rule in state.get("rules") or []:
         if str(rule.get("enforcement") or "").strip() != "guidance":
@@ -133,8 +119,8 @@ def canonical_room_context(
         text = str(rule.get("text") or "").strip()
         if not text:
             continue
-        if text == OPEN_EXCHANGE_PREAMBLE:
-            preamble_present = True
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() == OPEN_EXCHANGE_PREAMBLE_SHA256:
+            preamble = text
             continue
         available = GUIDANCE_CHARACTER_LIMIT - guidance_size
         if available <= 1:
@@ -148,13 +134,16 @@ def canonical_room_context(
     policy = policy.get("policy") if isinstance(policy.get("policy"), dict) else policy
     topic_drift = str(policy.get("topicDrift") or "").strip()
     research_mode = str(policy.get("researchGroundingMode") or "").strip()
-    if preamble_present or guidance or topic_drift or research_mode:
-        lines.append("[Active Room guidance — owner-controlled behavioral guidance]")
-        if preamble_present:
+    if preamble or guidance or topic_drift or research_mode:
+        lines.append(
+            "[Active Room guidance — source: the Room's rules and policy, owner-controlled; "
+            "passed verbatim by the connector]"
+        )
+        if preamble:
             lines.append(
                 f"[{OPEN_EXCHANGE_PREAMBLE_VERSION}; sha256={OPEN_EXCHANGE_PREAMBLE_SHA256}]"
             )
-            lines.append(OPEN_EXCHANGE_PREAMBLE)
+            lines.append(preamble)
             lines.append(f"[/{OPEN_EXCHANGE_PREAMBLE_VERSION}]")
         lines.extend(guidance)
         if topic_drift:

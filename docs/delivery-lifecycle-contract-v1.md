@@ -109,3 +109,21 @@ Every quarantine, skip, supersede and settle writes one log line (code, source s
 P1-6 Release at record. A connector frees its per-Room dispatch slot, stops attempt renewal and lets the next queued event run
 as soon as the terminal outcome of the in-flight dispatch is recorded, including a send-path quarantine. Waiting for the
 host's completion callback or a watchdog is not required.
+
+## P1a — Connectors carry no behavioural rules (2026-10-01)
+
+P1a-1 A connector never tells an agent how to deliberate. Connector-authored text contains no instruction about whether to
+agree, disagree, seek common ground, synthesise, pass, stay silent, keep short, avoid debate, or what counts as a
+meaningful contribution. Agreeing and agreeing to disagree are equally legitimate; that is the model's decision.
+
+P1a-2 Behavioural guidance comes only from the Room: the Room policy and guidance, the owner's messages, and server-provided
+phase instructions (`phaseInstruction`). The connector passes this text verbatim and labels its source. It does not add to,
+rewrite, or summarise it.
+
+P1a-3 Connector-authored text is limited to procedural facts: the Room and discussion identity, the phase name, the agent's
+own identity, the remaining turn or byte budget as numbers, the reply-marker syntax, and how to pass technically
+(the envelope), without any suggestion of when to use it. When the Room policy sets a per-response word limit
+(maxContributionWords, owner decision 2026-10-01: applies in open and coordinated modes), the connector states it as a
+number on every turn, taken from the cycle budget or the policy.
+
+P1a-4 When the Room provides no phase instruction, the connector adds none; it states only the procedural facts.

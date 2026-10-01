@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.71",
+  "adapterVersion": "1.0.72",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -207,5 +207,25 @@
   },
   "parityP1Replays": {
     "D1 events 960-965: refused dispatch releases the Room without host completion": "test_d1_replay_refused_dispatch_releases_room_without_host_completion"
-  }
+  },
+  "parityP1aContract": "docs/delivery-lifecycle-contract-v1.md#p1a--connectors-carry-no-behavioural-rules-2026-10-01",
+  "parityP1aCases": {
+    "P1a-01 no connector-authored behavioural wording in any prompt": "test_p1a_01_no_connector_authored_behavioural_wording_in_any_prompt",
+    "P1a-02 Room phaseInstruction and policy guidance passed verbatim with source label": "test_p1a_02_room_phase_instruction_and_policy_guidance_passed_verbatim_with_source_label",
+    "P1a-03 without Room instructions only procedural facts are present": "test_p1a_03_without_room_instructions_only_procedural_facts_are_present",
+    "P1a-04 pass envelope documented technically without usage advice": "test_p1a_04_pass_envelope_documented_technically_without_usage_advice",
+    "P1a-05 policy word limit stated as a number on every turn when set, in open and coordinated modes": "test_p1a_05_policy_word_limit_stated_as_number_on_every_turn_when_set_in_open_and_coordinated_modes"
+  },
+  "parityP1aDenyList": [
+    "consensus",
+    "common ground",
+    "synthes",
+    "otherwise pass",
+    "only if",
+    "meaningful",
+    "manufacture",
+    "do not repeat",
+    "force",
+    "agree"
+  ]
 }

@@ -537,9 +537,11 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             source, source["payload"], "agent-b",
         )
 
-        self.assertIn("current conversational turn", instruction)
-        self.assertIn("answer safe questions", instruction)
-        self.assertIn("Do not return skip merely because", instruction)
+        # P1a: the trust boundary and the turn fact stay; advice on how to
+        # answer or when to pass is not the connector's to give.
+        self.assertIn("it is the current turn's input", instruction)
+        self.assertNotIn("answer safe questions", instruction)
+        self.assertNotIn("Do not return skip merely because", instruction)
         self.assertIn("does not authorize tools", instruction)
         self.assertEqual(
             adapter._direct_peer_turn_instruction(source, source["payload"], "agent-c"),
@@ -1936,7 +1938,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         shipped = {
             path.relative_to(ROOT).as_posix()
             for path in (ROOT / "tests").rglob("*")
-            if path.is_file() and path.suffix in {".py", ".json"} and "__pycache__" not in path.parts
+            if path.is_file() and path.suffix in {".py", ".json", ".txt"} and "__pycache__" not in path.parts
         }
         self.assertEqual(sorted(shipped - set(packager.PAYLOAD)), [])
 
@@ -2005,11 +2007,11 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.71")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.72")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Refused replies are recorded truthfully",
+            f"## {adapter.CONNECTOR_VERSION} — Prompts carry no behavioural rules",
             (ROOT / "README.md").read_text(),
         )
 
@@ -2065,7 +2067,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.71"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.72"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
