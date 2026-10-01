@@ -520,14 +520,6 @@ def _cycle_source_body(event: dict[str, Any], payload: dict[str, Any]) -> str:
     return str(payload.get("body") or "").strip()
 
 
-def _session_speaker(actor: str, event: dict[str, Any]) -> str:
-    """The speaker Hermes records for this turn: never an invented participant."""
-    if actor != "Room participant":
-        return actor
-    actor_id = str(event.get("actorId") or "").strip()
-    return f"Room member {actor_id}" if actor_id else ROOM_SYSTEM_ACTOR
-
-
 def _cycle_prompt_event(
     event: dict[str, Any], payload: dict[str, Any], context_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -4184,7 +4176,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding, active_epoch_id,
             ),
             user_id=binding.room_id,
-            user_name=_session_speaker(actor, prompt_event),
+            user_name=str(actor),
             message_id=dispatch_source,
         )
         message_event = MessageEvent(

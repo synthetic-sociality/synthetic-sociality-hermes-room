@@ -34,6 +34,8 @@ PEER = {"id": "m-43", "seq": 43, "type": "message.posted", "actorRole": "partici
                                          "resolvedRecipientMembershipIds": ["member-1"]}}
 
 
+GUEST = {"id": "m-45", "seq": 45, "type": "message.posted", "actorRole": "guest",
+         "actorId": "stranger-9", "payload": {"body": "An earlier note from an unlisted member."}}
 HANDOVER = {
     "sourceEpochOrdinal": 1, "coveredThroughSeq": 40, "revision": 1, "reviewStatus": "human_reviewed",
     "digest": "e" * 64, "sections": {"goal": "Decide how to disclose a diagnosis.",
@@ -119,7 +121,9 @@ def build_message(event, *, attempt=None, policy=None, rules=None, context=(STAR
 def every_prompt(**options):
     """Every prompt shape the Hermes connector can build."""
     rich = {"context": (START_WITH_HANDOVER, HUMAN, PEER, ATTACHED), "library": (LIBRARY_ITEM,),
-            "artifacts": {"artifact-1": ARTIFACT}, "policy": {"maxContributionWords": 150}}
+            "artifacts": {"artifact-1": ARTIFACT},
+            "policy": {"maxContributionWords": 150, "researchGroundingMode": "cite_sources",
+                       "researchMaxSources": 3, "researchFreshnessSeconds": 86400}}
     rich.update({key: value for key, value in options.items() if key != "policy"})
     rich["policy"] = {**rich["policy"], **(options.get("policy") or {})}
     return {
@@ -168,7 +172,8 @@ class ParityP1aTests(unittest.TestCase):
                 self.assert_no_behavioural_wording(name, prompt)
         rich = every_prompt()["rich_human_reply"]
         for block in ("[Reviewed handover from", "[Room-shared document context", "[Room document library",
-                      "Word limit per response: 150 words"):
+                      "Word limit per response: 150 words",
+                      "Research grounding policy: cite_sources; maximum sources 3; freshness window 86400 seconds."):
             self.assertIn(block, rich)  # the scan above covered each block
         # The Room-origin tool fence the model receives when it calls the post tool.
         with mock.patch.object(adapter, "is_room_context", return_value=True):
@@ -216,7 +221,9 @@ class ParityP1aTests(unittest.TestCase):
         self.assertIn(f"[{context.OPEN_EXCHANGE_PREAMBLE_VERSION}; sha256={context.OPEN_EXCHANGE_PREAMBLE_SHA256}]\n{preamble}\n", with_preamble)
 
     def test_p1a_03_without_room_instructions_only_procedural_facts_are_present(self):
-        for name, prompt in every_prompt().items():
+        # The rich scenarios carry Room research policy; clear it so only
+        # connector-authored text remains (the policy line is Room-supplied).
+        for name, prompt in every_prompt(policy={"researchGroundingMode": ""}).items():
             with self.subTest(prompt=name):
                 self.assertNotIn("[Room phase instruction", prompt)
                 self.assertNotIn("[Active Room guidance", prompt)
@@ -227,7 +234,7 @@ class ParityP1aTests(unittest.TestCase):
                     + re.escape(adapter.ROOM_RESPONSE_INSTRUCTION) + r"\Z"
                 )
                 self.assertRegex(prompt, tail, name)
-        prompts = every_prompt()
+        prompts = every_prompt(policy={"researchGroundingMode": ""})
         # Phase name and budget as numbers, nothing after them.
         self.assertIn("[Autonomous discussion phase opening, round 1, turn 2/6]\n\n", prompts["opening"])
         # A peer's directly addressed message adds only the trust-boundary fact.
@@ -263,15 +270,20 @@ class ParityP1aTests(unittest.TestCase):
             "peer_follow_up": build_message(attempt_ready(51, 2, source="m-43"),
                                             attempt={**cycle(), "attempt": {"id": "attempt-2", "round": 2}}),
             "unknown_role": build_message({**HUMAN, "id": "m-58", "seq": 58, "actorId": "stranger-9",
-                                           "actorRole": "guest"}),
+                                           "actorRole": "guest"},
+                                          context=(START, HUMAN, PEER, GUEST)),
         }
         names = {name: message.source.user_name for name, message in speakers.items()}
         self.assertEqual(names, {
             "autonomous_fallback": "Room (system)", "summary_for_self": "Room (system)",
             "human_reply": "Owner", "peer_follow_up": "Peer", "unknown_role": "Room member stranger-9",
         })
-        for message in speakers.values():
-            self.assertNotIn("Room participant", message.source.user_name)
+        for name, message in speakers.items():
+            self.assertNotIn("Room participant", message.source.user_name, name)
+            self.assertNotIn("Room participant", message.text, name)  # transcript and current input
+        prompt = speakers["unknown_role"].text
+        self.assertIn("#45 Room member stranger-9: An earlier note from an unlisted member.", prompt)
+        self.assertIn("\n\nRoom member stranger-9: Should the doctor disclose the diagnosis?", prompt)
 
     def test_p1a_04_pass_envelope_documented_technically_without_usage_advice(self):
         instruction = adapter.ROOM_RESPONSE_INSTRUCTION

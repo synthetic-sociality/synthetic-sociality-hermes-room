@@ -75,9 +75,11 @@ def room_actor_name(state: dict[str, Any], event: dict[str, Any]) -> str:
         return "Human participant"
     if role in {"participant_agent", "room_master", "observer"}:
         return "Room agent"
-    if role == "system" or str(event.get("actorId") or "") in {"system", "room_coordinator"}:
+    actor_id = str(event.get("actorId") or "").strip()
+    if role == "system" or actor_id in {"system", "room_coordinator"} or not actor_id:
         return ROOM_SYSTEM_ACTOR
-    return "Room participant"
+    # An actor the roster does not name is identified, never invented (P1a-5).
+    return f"Room member {actor_id}"
 
 
 def canonical_room_context(
