@@ -35,6 +35,14 @@ discussion". An unresolvable source is stated as such, never replaced by
 connector text, and connector-stated scheduling facts carry no invented
 speaker.
 
+Host notices never become Room contributions (P1a-6). Hermes core delivers
+its status lines, including the model-fallback notice, and its platform
+notices through `adapter.send(chat_id, text, metadata=…)` without a reply
+anchor (`gateway/run_turn_runner.py:891-912`, `gateway/run.py:757-766`,
+`gateway/run_notifications.py:176`); this adapter refuses any send without a
+canonical source before buffering or posting, so such a notice can neither be
+posted nor replace the model's reply. Pinned by `P1a-07`.
+
 ## 1.0.71 — Refused replies are recorded truthfully
 
 Parity release P1 with OpenClaw 0.2.53; the shared contract section and case

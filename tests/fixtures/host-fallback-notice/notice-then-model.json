@@ -1,0 +1,11 @@
+{
+ "source": "PROMPTS-20261001-parity-P1a-addendum2.md (Joined Coding, 2026-10-01 17:21 UTC): the host's fallback notice followed by the fallback model's reply; texts as quoted in the addendum",
+ "payloads": [
+  {"kind": "host_status", "statusKey": "lifecycle",
+   "content": "↪️ Model Fallback: openrouter/deepseek/deepseek-v4-flash (selected xai/grok-4.7; format)",
+   "metadata": {"thread_id": "room-epoch-v1:fixture", "reply_to_message_id": "SOURCE_REF"}},
+  {"kind": "model_final",
+   "content": "↪ #976 TJE — the unresolved thread that sticks with me…",
+   "replyTo": "SOURCE_REF", "metadata": {"notify": true}}
+ ]
+}

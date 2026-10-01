@@ -13,6 +13,7 @@ import json
 import re
 import types
 import unittest
+from pathlib import Path
 
 from test_delivery_lifecycle import ROOT, adapter
 
@@ -240,6 +241,62 @@ class DiscussionStartTests(unittest.TestCase):
             self.assertNotIn(invented, prompt)
         # Context: the description under "Current discussion".
         self.assertIn(f"Current discussion: {topic['title']}\n{topic['description']}\n", prompt)
+
+
+def core_status_sender():
+    """Hermes core's own ``_send_or_update_status_coro`` (gateway/run.py), compiled
+    from its source: the module itself needs dependencies this venv lacks."""
+    import ast
+    import inspect
+    from test_delivery_lifecycle import hermes_build_session_key
+    path = Path(inspect.getfile(hermes_build_session_key)).with_name("run.py")
+    tree = ast.parse(path.read_text())
+    node = next(item for item in tree.body
+                if isinstance(item, ast.AsyncFunctionDef) and item.name == "_send_or_update_status_coro")
+    namespace: dict = {}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
+    return namespace["_send_or_update_status_coro"]
+
+
+class HostNoticeTests(unittest.TestCase):
+    def test_p1a_07_host_fallback_notice_is_never_posted_the_model_reply_is(self):
+        from test_parity_p1 import cycle_attempt, room_instance, source_ref
+        fixture = json.loads((ROOT / "tests" / "fixtures" / "host-fallback-notice" / "notice-then-model.json").read_text())
+        notice, model = fixture["payloads"]
+        send_status = core_status_sender()
+
+        async def run():
+            instance, binding, api, _published, _dispatched = room_instance(cycle_attempt())
+            bodies, post = [], api.post_message
+
+            def recording_post(room_id, turn_id, observed, source_id, body, *args, **kwargs):
+                bodies.append(body)
+                return post(room_id, turn_id, observed, source_id, body, *args, **kwargs)
+
+            api.post_message = recording_post
+            # The Room adapter has no send_or_update_status, so core falls back to send().
+            self.assertFalse(callable(getattr(instance, "send_or_update_status", None)))
+            metadata = {key: (source_ref() if value == "SOURCE_REF" else value)
+                        for key, value in notice["metadata"].items()}
+            notice_result = await send_status(instance, "room-1", notice["statusKey"], notice["content"], metadata)
+            after_notice = (list(api.posts), dict(instance._buffered_output), list(api.completions))
+            model_result = await instance.send(
+                "room-1", model["content"], reply_to=source_ref(), metadata=model["metadata"],
+            )
+            return instance, binding, api, notice_result, after_notice, model_result, bodies
+
+        instance, binding, api, notice_result, after_notice, model_result, bodies = asyncio.run(run())
+        # The notice reaches the adapter without a canonical source: refused,
+        # neither posted nor buffered as a preview that could be finalised.
+        self.assertFalse(notice_result.success)
+        self.assertEqual(after_notice, ([], {}, []))
+        # The model's reply is the one contribution, posted once.
+        self.assertTrue(model_result.success)
+        self.assertEqual(len(api.posts), 1)
+        self.assertEqual(bodies, ["TJE — the unresolved thread that sticks with me…"])  # marker removed
+        self.assertEqual([payload["action"] for _id, payload in api.completions], ["contribute"])
+        self.assertEqual(instance._terminal_results[source_ref()]["status"], "posted")
+        self.assertNotIn("Model Fallback", json.dumps(binding.delivery_intents, ensure_ascii=False))
 
 
 def importlib_room_tools():

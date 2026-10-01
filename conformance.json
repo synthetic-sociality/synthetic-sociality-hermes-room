@@ -215,7 +215,8 @@
     "P1a-03 without Room instructions only procedural facts are present": "test_p1a_03_without_room_instructions_only_procedural_facts_are_present",
     "P1a-04 pass envelope documented technically without usage advice": "test_p1a_04_pass_envelope_documented_technically_without_usage_advice",
     "P1a-05 policy word limit stated as a number on every turn when set, in open and coordinated modes": "test_p1a_05_policy_word_limit_stated_as_number_on_every_turn_when_set_in_open_and_coordinated_modes",
-    "P1a-06 discussion start title and description presented verbatim and attributed to the starting human": "test_p1a_06_discussion_start_title_and_description_presented_verbatim_and_attributed_to_the_starting_human"
+    "P1a-06 discussion start title and description presented verbatim and attributed to the starting human": "test_p1a_06_discussion_start_title_and_description_presented_verbatim_and_attributed_to_the_starting_human",
+    "P1a-07 host fallback notice is never posted; the model reply is": "test_p1a_07_host_fallback_notice_is_never_posted_the_model_reply_is"
   },
   "parityP1aDenyList": [
     "consensus",
