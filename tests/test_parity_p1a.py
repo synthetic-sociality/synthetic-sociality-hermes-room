@@ -80,7 +80,8 @@ def build_prompt(event, **options):
 
 
 def build_message(event, *, attempt=None, policy=None, rules=None, context=(START, HUMAN, PEER),
-                  epoch_id="epoch-2", starts_at=41, topic=None, library=(), artifacts=None):
+                  epoch_id="epoch-2", starts_at=41, topic=None, library=(), artifacts=None, roster=None,
+                  keep_instance=None):
     """Return the exact MessageEvent the adapter hands to Hermes for ``event``."""
     captured = []
     instance = object.__new__(adapter.SyntheticSocialityAdapter)
@@ -92,9 +93,9 @@ def build_message(event, *, attempt=None, policy=None, rules=None, context=(STAR
         "title": "Showroom", "purpose": "Patient and doctor use case", "headSeq": 60,
         "activeEpoch": {"id": epoch_id, "startsAtSeq": starts_at}, "rules": list(rules or []),
         **({"activeTopic": topic} if topic else {}),
-        "roster": [{"membershipId": "owner-1", "displayName": "Owner"},
-                   {"membershipId": "peer-1", "displayName": "Peer"},
-                   {"membershipId": "member-1", "displayName": "Agent"}],
+        "roster": list(roster or [{"membershipId": "owner-1", "displayName": "Owner"},
+                                  {"membershipId": "peer-1", "displayName": "Peer"},
+                                  {"membershipId": "member-1", "displayName": "Agent"}]),
     }
     api = types.SimpleNamespace(
         room_state=lambda _room: state,
@@ -115,6 +116,8 @@ def build_message(event, *, attempt=None, policy=None, rules=None, context=(STAR
     binding.legacy_session_epoch_id = "epoch-1"
     instance._event_epoch[event["id"]] = epoch_id
     assert asyncio.run(instance._dispatch_room_event(binding, event, "generation"))
+    if keep_instance is not None:
+        keep_instance.append((instance, binding))
     return captured[0]
 
 
@@ -283,7 +286,7 @@ class ParityP1aTests(unittest.TestCase):
             self.assertNotIn("Room participant", message.text, name)  # transcript and current input
         prompt = speakers["unknown_role"].text
         self.assertIn("#45 Unknown actor: An earlier note from an unlisted member.", prompt)
-        self.assertIn("\n\nUnknown actor: Should the doctor disclose the diagnosis?", prompt)
+        self.assertIn("\n\n#58 Unknown actor: Should the doctor disclose the diagnosis?", prompt)
 
     def test_p1a_04_pass_envelope_documented_technically_without_usage_advice(self):
         instruction = adapter.ROOM_RESPONSE_INSTRUCTION
@@ -317,6 +320,66 @@ class ParityP1aTests(unittest.TestCase):
                 self.assertNotIn("Word limit", build_prompt({**HUMAN, "id": "m-58", "seq": 58}, policy=unset))
 
 
+class ReplyMarkerTargetTests(unittest.TestCase):
+    def test_p1a_09_reply_marker_addresses_only_real_messages(self):
+        # Canary shape, Joined Coding 2026-10-01 22:01 UTC (neutral IDs and text):
+        # Zurie's message 991 addresses Paula; attempt-ready 992 offers Paula the
+        # turn. Paula answered "↪ #992" and the post addressed the system event.
+        roster = [{"membershipId": "owner-1", "displayName": "TJE"},
+                  {"membershipId": "zurie-1", "displayName": "Zurie"},
+                  {"membershipId": "member-1", "displayName": "Paula"}]
+        zurie = {"id": "msg-991", "seq": 991, "type": "message.posted", "actorRole": "participant_agent",
+                 "actorId": "zurie-1", "payload": {"body": "A passing test is presumptive closure.",
+                                                   "resolvedRecipientMembershipIds": ["member-1"],
+                                                   "respondsTo": ["msg-988"]}}
+        ready = {"id": "attempt-ready-x", "seq": 992, "type": "discussion.cycle_attempt_ready",
+                 "actorRole": "system", "actorId": "room_coordinator",
+                 "payload": {"cycleId": "cycle-1", "epochId": "epoch-2", "generation": 1,
+                             "membershipId": "member-1", "round": 1, "sourceEventId": "msg-991"}}
+        kept = []
+        message = build_message(ready, attempt=cycle(total_turns=10), roster=roster,
+                                context=(START, {**HUMAN, "id": "msg-988", "seq": 988, "actorId": "owner-1"}, zurie),
+                                keep_instance=kept)
+        instance, binding = kept[0]
+        # The prompt numbers only real messages: the current item is #991 and
+        # the attempt-ready number is offered nowhere.
+        self.assertIn("\n\n#991 Zurie: A passing test is presumptive closure.", message.text)
+        self.assertNotIn("992", message.text)
+        # The number index holds only messages.
+        known = instance._room_post_ids["room-1"]
+        self.assertEqual(known.get(991), "msg-991")
+        self.assertNotIn(992, known)
+        # A marker naming the system event resolves to no addresses; the body is kept.
+        self.assertEqual(instance._reply_target("room-1", "↪ #992 I agree, with a caveat."),
+                         ("", "I agree, with a caveat."))
+        self.assertEqual(instance._reply_target("room-1", "↪ #991 I agree, with a caveat."),
+                         ("msg-991", "I agree, with a caveat."))
+        # End to end: the frozen post carries 991 or nothing, never 992.
+        for marker, expected in (("↪ #992", ""), ("↪ #991", "msg-991")):
+            with self.subTest(marker=marker):
+                sent = []
+
+                class API:
+                    def with_idempotency_key(self, _key): return self
+                    def with_logical_contribution_id(self, _value): return self
+                    def with_message_payload_dialect(self, _value): return self
+                    def post_message(self, _room, _turn, _observed, _source, body, _epoch, **kwargs):
+                        sent.append((body, kwargs.get("addresses", "")))
+                        return {"id": "posted-994", "seq": 994, "ts": "2026-10-01T22:01:18Z"}
+
+                async def call(_binding, operation, api=API()):
+                    return operation(api)
+
+                instance._call = call
+                instance._persist_binding = lambda _binding: True
+                source = f"attempt-ready-x{marker[-3:]}"
+                asyncio.run(instance._post_with_fresh_context(
+                    binding, "room-1", "", 992, source, f"{marker} I agree, with a caveat.", "epoch-2",
+                    coordination_mode="open",
+                ))
+                self.assertEqual(sent, [("I agree, with a caveat.", expected)])
+
+
 class SpeakerLabelTests(unittest.TestCase):
     def test_p1a_08_speaker_labels_follow_one_precedence_and_four_role_labels(self):
         context = importlib_context()
@@ -346,7 +409,7 @@ class SpeakerLabelTests(unittest.TestCase):
                  "actorId": "visitor-7", "payload": {"body": "A visitor's question.", "displayName": "Visitor"}}
         message = build_message({**guest, "id": "m-61", "seq": 61}, context=(START, HUMAN, guest))
         self.assertIn("#46 Visitor: A visitor's question.", message.text)
-        self.assertIn("\n\nVisitor: A visitor's question.", message.text)
+        self.assertIn("\n\n#61 Visitor: A visitor's question.", message.text)
         self.assertEqual(message.source.user_name, "Visitor")
 
 

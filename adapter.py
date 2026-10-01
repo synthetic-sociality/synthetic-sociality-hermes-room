@@ -2332,6 +2332,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _remember_post_numbers(self, room_id: str, events: list[dict[str, Any]]) -> None:
         known = self._post_number_index().setdefault(room_id, {})
         for item in events:
+            # Only real messages are reply targets: a marker naming a system
+            # event (cycle_attempt_ready, 1.0.68-1.0.72) must resolve to nothing.
+            if item.get("type") != "message.posted":
+                continue
             seq, event_id = int(item.get("seq") or 0), str(item.get("id") or "")
             if seq > 0 and event_id:
                 known[seq] = event_id
@@ -4143,6 +4147,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             body if prompt_event.get("type") in {"discussion.cycle_attempt_ready", "discussion.cycle_terminal"}
             else f"{actor}: {body}"
         )
+        prompt_seq = int(prompt_event.get("seq") or 0)
+        if prompt_event.get("type") == "message.posted" and prompt_seq > 0:
+            # The current message carries its own number, as in the transcript,
+            # so it can be named with a reply marker.
+            current_input = f"#{prompt_seq} {current_input}"
         word_limit, word_limit_source = _contribution_word_limit(
             _policy_view(context_policy), cycle_attempt["cycle"] if cycle_attempt else None,
         )
@@ -4150,7 +4159,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             f"Word limit per response: {word_limit} words ({word_limit_source}). " if word_limit else ""
         )
         prompt = (
-            f"[Synthetic Sociality Room event {event_id}, canonical sequence {seq}]\n"
+            # No sequence number here: for a cycle turn it is the system
+            # attempt-ready event's, which the model named as a reply target.
+            f"[Synthetic Sociality Room event {event_id}]\n"
             f"{_runtime_capability_context(binding, state, transport=getattr(self, '_effective_transports', {}).get(binding.room_id) or binding.transport)}\n"
             f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{current_input}{cycle_context}\n\n"
             f"{ROOM_HISTORY_INSTRUCTION} "
