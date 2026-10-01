@@ -21,9 +21,10 @@ and turn budget as numbers, the reply-marker syntax, the reply envelope and
 the trust boundary of peer messages. Room-supplied text is passed verbatim
 with its source: Room rules and policy guidance, owner commands, and the
 server's `payload.phaseInstruction` (UF-17, G21), which the connector now
-reads. When the Room policy sets `maxContributionWords` (or an assigned
-cycle's `budgets.maxContributionWords`), every turn states it as a number, in
-open and coordinated modes. Delivery, refusal, lease, queue and
+reads. The per-response word limit is stated as a number on every turn when
+set: with an assigned cycle attempt only that cycle's
+`budgets.maxContributionWords`, which the server enforces (0 or none means no
+cap); without an attempt, the Room policy's `maxContributionWords`. Delivery, refusal, lease, queue and
 acknowledgement logic are unchanged. The full prompt inventory is in
 `docs/p1a-prompt-inventory.md`.
 
@@ -31,8 +32,10 @@ A cycle seeded by the epoch's `discussion.started` (P1a-5) now presents the
 topic title and description verbatim as the current-turn input, attributed to
 the human who started the discussion, instead of the connector's fallback
 text; the canonical context renders the topic description under "Current
-discussion". An unresolvable source is stated as such, never replaced by
-connector text, and connector-stated scheduling facts carry no invented
+discussion". When the source cannot be resolved, the turn says so in a
+scheduler fact that names the missing source event, instead of standing in
+for it. System-originated inputs are attributed to `Room (system)`, never to
+an invented participant, both in the prompt and as the Hermes session
 speaker.
 
 Host notices never become Room contributions (P1a-6). Hermes core delivers

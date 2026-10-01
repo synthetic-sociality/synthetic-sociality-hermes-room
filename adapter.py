@@ -27,6 +27,7 @@ from .context import discussion_handover_context as _discussion_handover_context
 from .context import epoch_start_event as _epoch_start_event
 from .context import recent_room_messages as _recent_room_messages
 from .context import room_actor_name as _room_actor_name
+from .context import ROOM_SYSTEM_ACTOR
 from .context import source_artifact_context as _source_artifact_context
 from .origin_context import forget_room_context, is_room_context
 from .protocol import (
@@ -161,6 +162,13 @@ ROOM_RESPONSE_INSTRUCTION = (
     "to the Room as your contribution, as plain natural text, not wrapped in JSON, XML or a code fence."
 )
 ROOM_IDENTITY_FACT = "Your reply is posted to the Room under your own Room membership."
+# Model-visible tool fence for a Room-origin turn (procedural: delivery path).
+ROOM_ORIGIN_POST_BLOCK_MESSAGE = (
+    "This is already a Synthetic Sociality Room-origin turn. The platform adapter owns "
+    "its single canonical delivery path. Do not call synthetic_sociality_room_post, do "
+    "not retry or describe this block, and return the contribution directly as the final "
+    "response so the adapter can post it exactly once."
+)
 
 _PRIOR_EPOCH_LIFECYCLE_TERMINALS = frozenset({
     ("human_owner", "interrupted", "human_interrupted"),
@@ -347,15 +355,7 @@ def _on_pre_tool_call(
 ) -> dict[str, str] | None:
     if tool_name != "synthetic_sociality_room_post" or not is_room_context(**kwargs):
         return None
-    return {
-        "action": "block",
-        "message": (
-            "This is already a Synthetic Sociality Room-origin turn. The platform adapter owns "
-            "its single canonical delivery path. Do not call synthetic_sociality_room_post, do "
-            "not retry or describe this block, and return the contribution directly as the final "
-            "response so the adapter can post it exactly once."
-        ),
-    }
+    return {"action": "block", "message": ROOM_ORIGIN_POST_BLOCK_MESSAGE}
 
 
 def _on_session_end(**kwargs: Any) -> None:
@@ -520,6 +520,14 @@ def _cycle_source_body(event: dict[str, Any], payload: dict[str, Any]) -> str:
     return str(payload.get("body") or "").strip()
 
 
+def _session_speaker(actor: str, event: dict[str, Any]) -> str:
+    """The speaker Hermes records for this turn: never an invented participant."""
+    if actor != "Room participant":
+        return actor
+    actor_id = str(event.get("actorId") or "").strip()
+    return f"Room member {actor_id}" if actor_id else ROOM_SYSTEM_ACTOR
+
+
 def _cycle_prompt_event(
     event: dict[str, Any], payload: dict[str, Any], context_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -611,17 +619,18 @@ def _cycle_phase_instruction(attempt: dict[str, Any], cycle: dict[str, Any], pay
 def _contribution_word_limit(policy: dict[str, Any], cycle: dict[str, Any] | None) -> tuple[int, str]:
     """The per-response word limit and its source, or (0, "") when unset.
 
-    Contract P1a-3: an assigned cycle attempt's ``budgets.maxContributionWords``
-    binds that attempt; otherwise the Room policy's ``maxContributionWords``
-    (GET /rooms/{id}/policy, omitempty) applies in open and coordinated modes.
-    Absent or 0 means no cap.
+    Contract P1a-3: with an assigned cycle attempt only the cycle's
+    ``budgets.maxContributionWords`` is stated, because that is what the
+    server enforces for the attempt (cycles.go:394); a budget of 0 or none
+    means no cap and never falls back to the policy. Without an attempt (open
+    mode) the Room policy's ``maxContributionWords`` (GET /rooms/{id}/policy,
+    omitempty) applies. Absent or 0 means no cap.
     """
     def words(value: Any) -> int:
         return value if type(value) is int and value > 0 else 0
     if cycle is not None:
         budget = words((cycle.get("budgets") or {}).get("maxContributionWords"))
-        if budget:
-            return budget, "cycle budget"
+        return (budget, "cycle budget") if budget else (0, "")
     limit = words(policy.get("maxContributionWords"))
     return (limit, "Room policy") if limit else (0, "")
 
@@ -4175,7 +4184,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding, active_epoch_id,
             ),
             user_id=binding.room_id,
-            user_name=str(actor),
+            user_name=_session_speaker(actor, prompt_event),
             message_id=dispatch_source,
         )
         message_event = MessageEvent(

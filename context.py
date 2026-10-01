@@ -9,6 +9,9 @@ from typing import Any
 
 
 CONTEXT_MESSAGE_LIMIT = 16
+# Truthful label for inputs the Room itself originates (scheduler, cycle
+# terminals); never presented as a participant (contract P1a-5).
+ROOM_SYSTEM_ACTOR = "Room (system)"
 # A reply may begin with the number of the one post it answers. The connector
 # reads the marker, removes it, and records the post as `addresses`; the Room
 # then shows the reply as answering that post rather than what woke the agent.
@@ -72,6 +75,8 @@ def room_actor_name(state: dict[str, Any], event: dict[str, Any]) -> str:
         return "Human participant"
     if role in {"participant_agent", "room_master", "observer"}:
         return "Room agent"
+    if role == "system" or str(event.get("actorId") or "") in {"system", "room_coordinator"}:
+        return ROOM_SYSTEM_ACTOR
     return "Room participant"
 
 
@@ -157,7 +162,7 @@ def canonical_room_context(
             max_sources = int(policy.get("researchMaxSources") or 0)
             freshness = int(policy.get("researchFreshnessSeconds") or 0)
             if max_sources > 0:
-                research += f"; use at most {max_sources} sources when research tools are available"
+                research += f"; maximum sources {max_sources}"
             if freshness > 0:
                 research += f"; freshness window {freshness} seconds"
             lines.append(research + ".")

@@ -14,6 +14,7 @@ import re
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_delivery_lifecycle import ROOT, adapter
 
@@ -31,6 +32,25 @@ HUMAN = {"id": "m-42", "seq": 42, "type": "message.posted", "actorRole": "human_
 PEER = {"id": "m-43", "seq": 43, "type": "message.posted", "actorRole": "participant_agent",
         "actorId": "peer-1", "payload": {"body": "Disclosure first, then support.",
                                          "resolvedRecipientMembershipIds": ["member-1"]}}
+
+
+HANDOVER = {
+    "sourceEpochOrdinal": 1, "coveredThroughSeq": 40, "revision": 1, "reviewStatus": "human_reviewed",
+    "digest": "e" * 64, "sections": {"goal": "Decide how to disclose a diagnosis.",
+                                     "openQuestions": ["Who tells the family?"]},
+    "sourceRefs": [{"kind": "event", "eventId": "evt-40", "seq": 40}],
+}
+START_WITH_HANDOVER = {**START, "payload": {"epoch": EPOCH, "handover": HANDOVER}}
+ATTACHED = {**HUMAN, "id": "m-44", "seq": 44, "payload": {
+    "body": "Here is the case summary.",
+    "attachments": [{"artifactId": "artifact-1", "versionId": "v1", "name": "case.pdf",
+                     "mediaType": "application/pdf", "sha256": "a" * 64}]}}
+ARTIFACT = {"artifactId": "artifact-1", "visibility": "room_shared",
+            "currentVersion": {"versionId": "v1", "name": "case.pdf", "extractionStatus": "ready",
+                               "extractedText": "Patient is 54; prefers direct information."}}
+LIBRARY_ITEM = {"artifactId": "artifact-2", "visibility": "room_shared", "title": "Guideline",
+                "currentVersion": {"versionId": "v9", "name": "guideline.pdf", "mediaType": "application/pdf",
+                                   "sha256": "b" * 64, "extractionStatus": "ready"}}
 
 
 def attempt_ready(seq, round_number, source="m-42", **extra):
@@ -52,9 +72,14 @@ def cycle(total_turns=6, used=1, **budgets):
             "attempt": {"id": "attempt-1", "round": 1}}
 
 
-def build_prompt(event, *, attempt=None, policy=None, rules=None, context=(START, HUMAN, PEER),
-                 epoch_id="epoch-2", starts_at=41, topic=None):
+def build_prompt(event, **options):
     """Return the exact prompt text the adapter hands to Hermes for ``event``."""
+    return build_message(event, **options).text
+
+
+def build_message(event, *, attempt=None, policy=None, rules=None, context=(START, HUMAN, PEER),
+                  epoch_id="epoch-2", starts_at=41, topic=None, library=(), artifacts=None):
+    """Return the exact MessageEvent the adapter hands to Hermes for ``event``."""
     captured = []
     instance = object.__new__(adapter.SyntheticSocialityAdapter)
     instance.platform = adapter.Platform(adapter.NAME)
@@ -73,8 +98,8 @@ def build_prompt(event, *, attempt=None, policy=None, rules=None, context=(START
         room_state=lambda _room: state,
         room_policy=lambda _room: {"policy": dict(policy or {})},
         events=lambda _room, after, _wait: {"events": [item for item in context if item["seq"] > after]},
-        artifacts=lambda _room: {"items": []},
-        artifact=lambda _room, _artifact: {},
+        artifacts=lambda _room: {"items": list(library)},
+        artifact=lambda _room, artifact_id: dict((artifacts or {}).get(artifact_id) or {}),
     )
     instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
     instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
@@ -88,12 +113,21 @@ def build_prompt(event, *, attempt=None, policy=None, rules=None, context=(START
     binding.legacy_session_epoch_id = "epoch-1"
     instance._event_epoch[event["id"]] = epoch_id
     assert asyncio.run(instance._dispatch_room_event(binding, event, "generation"))
-    return captured[0].text
+    return captured[0]
 
 
 def every_prompt(**options):
     """Every prompt shape the Hermes connector can build."""
+    rich = {"context": (START_WITH_HANDOVER, HUMAN, PEER, ATTACHED), "library": (LIBRARY_ITEM,),
+            "artifacts": {"artifact-1": ARTIFACT}, "policy": {"maxContributionWords": 150}}
+    rich.update({key: value for key, value in options.items() if key != "policy"})
+    rich["policy"] = {**rich["policy"], **(options.get("policy") or {})}
     return {
+        # A new discussion with a reviewed handover, an attached document, a
+        # library item and a word limit: every context block at once.
+        "rich_human_reply": build_prompt({**ATTACHED, "id": "m-59", "seq": 59}, **rich),
+        "rich_opening": build_prompt(attempt_ready(60, 1, source="m-44"),
+                                     attempt=cycle(maxContributionWords=90), **rich),
         "opening": build_prompt(attempt_ready(50, 1), attempt=cycle(), **options),
         "follow_up": build_prompt(attempt_ready(51, 2, source="m-43"),
                                   attempt={**cycle(), "attempt": {"id": "attempt-2", "round": 2}}, **options),
@@ -132,8 +166,18 @@ class ParityP1aTests(unittest.TestCase):
         for name, prompt in every_prompt().items():
             with self.subTest(prompt=name):
                 self.assert_no_behavioural_wording(name, prompt)
+        rich = every_prompt()["rich_human_reply"]
+        for block in ("[Reviewed handover from", "[Room-shared document context", "[Room document library",
+                      "Word limit per response: 150 words"):
+            self.assertIn(block, rich)  # the scan above covered each block
+        # The Room-origin tool fence the model receives when it calls the post tool.
+        with mock.patch.object(adapter, "is_room_context", return_value=True):
+            fence = adapter._on_pre_tool_call(tool_name="synthetic_sociality_room_post")
+        self.assertEqual(fence["message"], adapter.ROOM_ORIGIN_POST_BLOCK_MESSAGE)
+        self.assert_no_behavioural_wording("pre_tool_call block", fence["message"])
         # Cross-channel and tool framing: every tool description the model sees.
         tools = importlib_room_tools()
+        self.assert_no_behavioural_wording("history result note", tools.HISTORY_RESULT_NOTE)
         for schema_name in ("ROOM_CONTEXT_SCHEMA", "ROOM_POST_SCHEMA", "ROOM_HISTORY_SCHEMA"):
             for text in tool_texts(getattr(tools, schema_name)):
                 with self.subTest(tool=schema_name):
@@ -176,9 +220,13 @@ class ParityP1aTests(unittest.TestCase):
             with self.subTest(prompt=name):
                 self.assertNotIn("[Room phase instruction", prompt)
                 self.assertNotIn("[Active Room guidance", prompt)
-                tail = (f"{adapter.ROOM_HISTORY_INSTRUCTION} {adapter.ROOM_IDENTITY_FACT} "
-                        f"{adapter.ROOM_RESPONSE_INSTRUCTION}")
-                self.assertTrue(prompt.endswith(tail), name)
+                # The tail is procedural only; the word limit is the one optional fact.
+                tail = re.compile(
+                    re.escape(f"{adapter.ROOM_HISTORY_INSTRUCTION} {adapter.ROOM_IDENTITY_FACT} ")
+                    + r"(Word limit per response: \d+ words \((cycle budget|Room policy)\)\. )?"
+                    + re.escape(adapter.ROOM_RESPONSE_INSTRUCTION) + r"\Z"
+                )
+                self.assertRegex(prompt, tail, name)
         prompts = every_prompt()
         # Phase name and budget as numbers, nothing after them.
         self.assertIn("[Autonomous discussion phase opening, round 1, turn 2/6]\n\n", prompts["opening"])
@@ -196,6 +244,34 @@ class ParityP1aTests(unittest.TestCase):
             self.assertNotIn("Room participant:", prompts[name])
         self.assertIn("[Room policy summaryBehavior=on_cycle_complete names you summary coordinator; "
                       "discussion cycle cycle-1 ended: completed]", prompts["summary_for_self"])
+
+    def test_phase_instruction_without_server_phase_keeps_the_computed_phase(self):
+        phase_text = "Room phase: each agent states its own position first."
+        prompt = build_prompt(attempt_ready(51, 2, source="m-43", phaseInstruction=phase_text),
+                              attempt={**cycle(), "attempt": {"id": "attempt-2", "round": 2}})
+        self.assertIn("[Autonomous discussion phase follow_up, round 2, turn 2/6]", prompt)
+        self.assertIn(f"[Room phase instruction — server-provided, verbatim]\n{phase_text}\n[/Room phase instruction]", prompt)
+
+    def test_hermes_session_speaker_is_never_an_invented_participant(self):
+        speakers = {
+            "autonomous_fallback": build_message(attempt_ready(54, 2, source="not-in-context"), attempt=cycle()),
+            "summary_for_self": build_message(
+                {"id": "term-57", "seq": 57, "type": "discussion.cycle_terminal", "actorRole": "system",
+                 "actorId": "room_coordinator", "payload": {"cycleId": "cycle-1", "state": "completed",
+                                                             "epochId": "epoch-2"}}),
+            "human_reply": build_message({**HUMAN, "id": "m-56", "seq": 56}),
+            "peer_follow_up": build_message(attempt_ready(51, 2, source="m-43"),
+                                            attempt={**cycle(), "attempt": {"id": "attempt-2", "round": 2}}),
+            "unknown_role": build_message({**HUMAN, "id": "m-58", "seq": 58, "actorId": "stranger-9",
+                                           "actorRole": "guest"}),
+        }
+        names = {name: message.source.user_name for name, message in speakers.items()}
+        self.assertEqual(names, {
+            "autonomous_fallback": "Room (system)", "summary_for_self": "Room (system)",
+            "human_reply": "Owner", "peer_follow_up": "Peer", "unknown_role": "Room member stranger-9",
+        })
+        for message in speakers.values():
+            self.assertNotIn("Room participant", message.source.user_name)
 
     def test_p1a_04_pass_envelope_documented_technically_without_usage_advice(self):
         instruction = adapter.ROOM_RESPONSE_INSTRUCTION
@@ -215,9 +291,15 @@ class ParityP1aTests(unittest.TestCase):
                                    policy={"coordinationMode": "coordinated", "maxContributionWords": 120})
         self.assertIn("Word limit per response: 80 words (cycle budget).", coordinated)
         self.assertNotIn("120 words", coordinated)
-        coordinated_policy_only = build_prompt(attempt_ready(50, 1), attempt=cycle(),
-                                               policy={"coordinationMode": "coordinated", "maxContributionWords": 120})
-        self.assertIn("Word limit per response: 120 words (Room policy).", coordinated_policy_only)
+        # With an assigned attempt only the enforced cycle budget counts; a
+        # budget of 0 or none is no cap and never falls back to the policy.
+        for budget in ({}, {"maxContributionWords": 0}):
+            with self.subTest(cycle_budget=budget):
+                coordinated_policy_only = build_prompt(
+                    attempt_ready(50, 1), attempt=cycle(**budget),
+                    policy={"coordinationMode": "coordinated", "maxContributionWords": 120})
+                self.assertNotIn("Word limit", coordinated_policy_only)
+                self.assertNotIn("120", coordinated_policy_only)
         for unset in ({}, {"maxContributionWords": 0}, {"maxContributionWords": True}, {"maxContributionWords": "90"}):
             with self.subTest(policy=unset):
                 self.assertNotIn("Word limit", build_prompt({**HUMAN, "id": "m-58", "seq": 58}, policy=unset))
