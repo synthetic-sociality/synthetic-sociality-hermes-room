@@ -143,3 +143,7 @@ name for the event's actorId; otherwise (2) the payload's actorDisplayName or di
 "Room (system)" for actorRole system or actorId room_coordinator/system; "Human participant" for human roles and
 agent_owner; "Room agent" for participant_agent, room_master and observer; "Unknown actor" for anything else, including a
 missing role. The same label is used in the transcript, the current input and the host session speaker.
+
+P1a-8 What the agent reads. Every model turn contains, unshortened, the message the turn answers (the cycle's source message
+or the direct message), shown as the current item with its post number and speaker label. When the Room context must be
+bounded, the oldest transcript entries are dropped first; the newest entries are kept.

@@ -433,6 +433,72 @@ class DiscussionStartTests(unittest.TestCase):
         self.assertIn(f"Current discussion: {topic['title']}\n{topic['description']}\n", prompt)
 
 
+class ContextWindowTests(unittest.TestCase):
+    def test_p1a_10_the_agent_reads_the_newest_messages_and_the_message_it_answers(self):
+        # Canary shape, Joined Coding 2026-10-02 06:12 UTC (neutral IDs and text):
+        # sixteen ~1,500-character agent messages 1003-1018, the owner's short
+        # message 1020, attempt-ready 1022 for Zurie sourced from 1020; then Zurie
+        # 1023, Paula 1026 and attempt-ready 1027 for Zurie sourced from 1026.
+        context = importlib_context()
+        roster = [{"membershipId": "owner-1", "displayName": "TJE"},
+                  {"membershipId": "member-1", "displayName": "Zurie"},
+                  {"membershipId": "paula-1", "displayName": "Paula"}]
+        names = {"owner-1": "TJE", "member-1": "Zurie", "paula-1": "Paula"}
+        start = {**START, "seq": 1002, "payload": {"epoch": {**EPOCH, "startsAtSeq": 1002}}}
+
+        def message(seq, actor_id, role, body, **extra):
+            return {"id": f"msg-{seq}", "seq": seq, "type": "message.posted", "actorRole": role,
+                    "actorId": actor_id, "payload": {"body": body, **extra}}
+
+        def long(seq):
+            filler = "The formatter pin and the composition boundary stay open until the shared fixture lands. " * 17
+            return f"[m{seq}] {filler}"[:1500]
+
+        earlier = [message(1003 + index, "member-1" if index % 2 else "paula-1", "participant_agent", long(1003 + index))
+                   for index in range(16)]
+        owner = message(1020, "owner-1", "human_owner",
+                        "@Zurie @Paula can you decide who takes what role here in coding. be brief.",
+                        resolvedRecipientMembershipIds=["member-1", "paula-1"])
+        zurie = message(1023, "member-1", "participant_agent",
+                        "On the formatter pin: keep it until the fixture lands.", respondsTo=["msg-1020"])
+        paula = message(1026, "paula-1", "participant_agent",
+                        "Roles: Zurie owns the parser, I own review and the fixture. ↪ kept short as asked.",
+                        respondsTo=["msg-1023"], resolvedRecipientMembershipIds=["member-1"])
+
+        def entry(item):
+            return f"#{item['seq']} {names[item['actorId']]}: {item['payload']['body']}"
+
+        for source, page, newest in (
+            (owner, (start, *earlier, owner), (earlier[15], earlier[14], earlier[13])),
+            (paula, (start, *earlier, owner, zurie, paula), (zurie, owner, earlier[15])),
+        ):
+            with self.subTest(source=source["seq"]):
+                ready = attempt_ready(source["seq"] + 1, 1, source=source["id"])
+                text = build_prompt(ready, attempt=cycle(total_turns=6, used=0), roster=roster,
+                                    context=page, starts_at=1002)
+                current = entry(source)
+                # The source message is the current item, verbatim, exactly once
+                # and after the bounded context; it is not a transcript entry.
+                self.assertEqual(text.count(current), 1, text)
+                self.assertIn(current, text.split("\n"))
+                end = text.index("[/Canonical Room context]") + len("[/Canonical Room context]")
+                self.assertGreater(text.index(current), end)
+                block = text[text.index("[Canonical Room context"):end]
+                self.assertLessEqual(len(block), context.CONTEXT_CHARACTER_LIMIT)
+                # The newest transcript entries are present, whole; the oldest may be dropped.
+                lines = block.split("\n")
+                transcript = lines[lines.index("Recent canonical transcript:") + 1:-1]
+                numbers = [int(line.split(" ", 1)[0][1:]) for line in transcript]
+                for item in newest:
+                    self.assertIn(item["seq"], numbers)
+                    self.assertTrue(any(line.endswith(item["payload"]["body"]) for line in transcript), item["seq"])
+                # Whole entries only, contiguous and ending with the newest.
+                expected = [item["seq"] for item in page if item["type"] == "message.posted" and item is not source]
+                self.assertGreaterEqual(len(numbers), 3)
+                self.assertEqual(numbers, expected[-len(numbers):])
+                self.assertNotIn(source["seq"], numbers)
+
+
 def core_status_sender():
     """Hermes core's own ``_send_or_update_status_coro`` (gateway/run.py), compiled
     from its source: the module itself needs dependencies this venv lacks."""

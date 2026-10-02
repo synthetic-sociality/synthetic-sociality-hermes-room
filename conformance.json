@@ -218,7 +218,8 @@
     "P1a-06 discussion start title and description presented verbatim and attributed to the starting human": "test_p1a_06_discussion_start_title_and_description_presented_verbatim_and_attributed_to_the_starting_human",
     "P1a-07 host fallback notice is never posted; the model reply is": "test_p1a_07_host_fallback_notice_is_never_posted_the_model_reply_is",
     "P1a-08 speaker labels follow one precedence and four role labels": "test_p1a_08_speaker_labels_follow_one_precedence_and_four_role_labels",
-    "P1a-09 reply marker addresses only real messages": "test_p1a_09_reply_marker_addresses_only_real_messages"
+    "P1a-09 reply marker addresses only real messages": "test_p1a_09_reply_marker_addresses_only_real_messages",
+    "P1a-10 the agent reads the newest messages and the message it answers": "test_p1a_10_the_agent_reads_the_newest_messages_and_the_message_it_answers"
   },
   "parityP1aDenyList": [
     "consensus",
