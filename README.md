@@ -7,6 +7,23 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.74 — Agents read the newest messages and the message they answer
+
+Paired with OpenClaw 0.2.57 (2026-10-02 Joined Coding canary, where the
+OpenClaw agent answered older threads instead of the owner's direct
+question). Delivery contract P1a-8 is new: every model turn contains the
+message it answers, unshortened, as the current item with its post number and
+speaker label, and a bounded Room context drops the oldest transcript entries
+first. Hermes already kept the newest entries and presented a loaded source
+message (shared cases P1a-10 and P1a-11, the host session speaker being that
+message's author). The behaviour change is P1a-12: the context scan stops once
+it holds 16 messages, so a cycle source message further back used to fall
+back to "[Room scheduler: … source event … is not available to the
+connector]". It is now found by a bounded backward scan of the discussion
+(pages of 100, at most 2,000 events, never before the discussion start) and
+presented as the current item. Delivery, refusal, lease, queue and
+acknowledgement logic are unchanged.
+
 ## 1.0.73 — Reply markers address only real messages
 
 Fixes a reply-marker defect seen in the 1.0.72 canary (Joined Coding,
