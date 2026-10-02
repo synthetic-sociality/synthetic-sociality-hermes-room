@@ -150,9 +150,11 @@ SESSION_RELEASE_POLL_LIMIT = 40
 # One warning when a Room has waited this long for core's session release.
 SESSION_WAIT_WARN_SECONDS = 900.0
 # Contract P2a-1: a session guard the core cannot report on (no owner task in
-# _session_tasks, or no _session_task_is_stale at all; Mac128 core 7a1aafb4e1
-# has both but no _track_session_task, so its guards carry no owner task) is
-# waited for at most this long, then the queue proceeds as without the gate.
+# _session_tasks, or no _session_task_is_stale at all) is waited for at most
+# this long, then the queue proceeds as without the gate. Mac128 core
+# 7a1aafb4e1 has no _track_session_task; a guard installed there without an
+# owner task (its stale check returns False for those) is bounded; an owned
+# live run still waits.
 # Lease renewal keeps a long run's attempt alive, so a run still active after
 # the bound receives the next event through core's busy path (steer,
 # interrupt or queue; gateway/run.py _handle_active_session_busy_message).
@@ -5058,9 +5060,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         owners = getattr(self, "_session_tasks", None)
         if callable(stale) and isinstance(owners, dict) and owners.get(key) is not None:
             return not stale(key)
-        # Contract P2a-1: no owner task, so this core cannot report the
-        # release (core's own stale check is False for an ownerless guard,
-        # which on 7a1aafb4e1 kept Real silent for hours). Wait at most
+        # Contract P2a-1: a guard installed without an owner task, so this
+        # core cannot report the release (core's own stale check returns
+        # False for those, on 7a1aafb4e1 as well). Wait at most
         # SESSION_UNOBSERVABLE_WAIT_SECONDS from the start of this wait, then
         # proceed as without the gate; say so once per Room.
         started = (getattr(self, "_session_wait_started", None) or {}).get(room_id)

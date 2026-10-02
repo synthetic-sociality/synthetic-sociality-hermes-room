@@ -14,13 +14,13 @@ P2a-06). Behaviour changes:
 
 - P2a-1: on a Hermes core that cannot report a session release, a queued
   Room event waited forever on a stale session guard; on 2026-10-02 Real sent
-  no turn from 09:33 to 14:16 Berlin time. Mac128 core 7a1aafb4e1 has
-  `_session_tasks` and `_session_task_is_stale` but no `_track_session_task`,
-  so its guards carry no owner task and its stale check says "not stale". A
-  guard without an owner task is now waited for at most 120 seconds, then the
-  queue proceeds as without the gate, logged once per Room. A guard with a
-  live owner task keeps the gate. Each wait and each dispatch is logged at
-  INFO with room, seq and seconds waited.
+  no turn from 09:33 to 14:16 Berlin time. Mac128 core 7a1aafb4e1 has no
+  `_track_session_task`. A guard installed without an owner task (a command
+  guard, or one installed outside `handle_message`; core's stale check returns
+  False for those) is now waited for at most 120 seconds, then the queue
+  proceeds as without the gate, logged once per Room. An owned live run still
+  waits. Each wait and each dispatch is logged at INFO with room, seq and
+  seconds waited.
   Known limit: lease renewal keeps a long run's attempt alive, so if the
   previous run is genuinely still active after 120 seconds, the next event
   goes to core while it is busy. Core then handles it by its busy input mode

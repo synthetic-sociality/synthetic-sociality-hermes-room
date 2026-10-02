@@ -99,8 +99,8 @@ class P2aConformanceTests(unittest.TestCase):
 class P2aTests(unittest.TestCase):
     def test_p2a_01_a_host_wait_the_connector_cannot_observe_is_bounded_and_falls_back(self):
         # Mac128 core 7a1aafb4e1 has _session_tasks and _session_task_is_stale
-        # but no _track_session_task: its guards carry no owner task, and its
-        # stale check is False for an ownerless guard, so Real stayed silent
+        # but no _track_session_task. A guard installed there without an owner
+        # task (its stale check returns False for those) kept Real silent
         # for hours. Such a guard is unobservable: the wait is bounded, then
         # the queue proceeds as without the gate, logged once; the wait and
         # the dispatch are logged at INFO with room, seq and wait seconds.

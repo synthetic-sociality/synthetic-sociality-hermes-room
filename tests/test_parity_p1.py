@@ -560,8 +560,8 @@ MISSING_CORE_SESSION_METHODS = [name for name in CORE_SESSION_METHODS if not has
 
 @unittest.skipIf(
     bool(MISSING_CORE_SESSION_METHODS),
-    f"this Hermes core lacks {', '.join(MISSING_CORE_SESSION_METHODS)} (Mac128 core 7a1aafb4e1 lacks "
-    "_track_session_task, so its session guards carry no owner task); contract P2a-1 bounds the wait "
+    f"this Hermes core lacks {', '.join(MISSING_CORE_SESSION_METHODS)} (Mac128 core 7a1aafb4e1 has no "
+    "_track_session_task); a guard installed without an owner task is bounded by contract P2a-1 "
     "instead (test_p2a_01)",
 )
 class SessionReleaseTests(unittest.TestCase):
