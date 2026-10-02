@@ -24,6 +24,7 @@ from . import cli, renewal
 from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
+from .context import cycle_source_message as _cycle_source_message
 from .context import epoch_start_event as _epoch_start_event
 from .context import recent_room_messages as _recent_room_messages
 from .context import room_actor_name as _room_actor_name
@@ -4099,6 +4100,23 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     logger.warning("Room %s discussion start unavailable: %s", binding.room_id, error)
             if isinstance(start_event, dict) and str(start_event.get("id") or "") == source_id:
                 prompt_event = start_event
+            elif source_id:
+                # Contract P1a-8: a source message older than the bounded
+                # context is read by a bounded scan and is still the current item.
+                source_message = None
+                try:
+                    source_message = await self._call(
+                        binding,
+                        lambda api: _cycle_source_message(
+                            lambda after: api.events(binding.room_id, after, 0), source_id,
+                            before_seq=seq, active_epoch_starts_at=starts_at,
+                        ),
+                    )
+                except Exception as error:
+                    logger.warning("Room %s cycle source unavailable: %s", binding.room_id, error)
+                if isinstance(source_message, dict):
+                    prompt_event = source_message
+                    self._remember_post_numbers(binding.room_id, [source_message])
         prompt_payload = prompt_event.get("payload") or {}
         prompt_event_id = str(prompt_event.get("id") or event_id)
         actor = _room_actor_name(state, prompt_event)

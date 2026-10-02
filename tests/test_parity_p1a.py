@@ -499,6 +499,87 @@ class ContextWindowTests(unittest.TestCase):
                 self.assertNotIn(source["seq"], numbers)
 
 
+CODING_ROSTER = [{"membershipId": "owner-1", "displayName": "TJE"},
+                 {"membershipId": "member-1", "displayName": "Zurie"},
+                 {"membershipId": "paula-1", "displayName": "Paula"}]
+CODING_START = {**START, "seq": 1002, "payload": {"epoch": {**EPOCH, "startsAtSeq": 1002}}}
+CODING_OWNER_BODY = "@Zurie @Paula can you decide who takes what role here in coding. be brief."
+
+
+def coding_message(seq, actor_id, role, body, **extra):
+    return {"id": f"msg-{seq}", "seq": seq, "type": "message.posted", "actorRole": role,
+            "actorId": actor_id, "payload": {"body": body, **extra}}
+
+
+class SourceSpeakerTests(unittest.TestCase):
+    def test_p1a_11_the_host_session_speaker_is_the_author_of_the_message_the_turn_answers(self):
+        # A cycle turn sourced from a message: the speaker is its author,
+        # labelled per P1a-7. A system source stays Room (system); a discussion
+        # start keeps P1a-5 (case P1a-06).
+        owner = coding_message(1020, "owner-1", "human_owner", CODING_OWNER_BODY)
+        paula = coding_message(1026, "paula-1", "participant_agent", "Roles: Zurie owns the parser.")
+        unnamed = coding_message(1028, "stranger-9", "participant_agent", "An unlisted agent's note.")
+        cycle_started = {"id": "cycle-started-1029", "seq": 1029, "type": "discussion.cycle_started",
+                         "actorRole": "system", "actorId": "room_coordinator", "payload": {"cycleId": "cycle-1"}}
+        page = (CODING_START, owner, paula, unnamed, cycle_started)
+        for source, name in ((owner, "TJE"), (paula, "Paula"), (unnamed, "Room agent"),
+                             (cycle_started, "Room (system)")):
+            with self.subTest(source=source["seq"]):
+                message = build_message(attempt_ready(1030, 1, source=source["id"]), attempt=cycle(used=0),
+                                        roster=CODING_ROSTER, context=page, starts_at=1002)
+                self.assertEqual(message.source.user_name, name)
+                if source["type"] == "message.posted":
+                    self.assertIn(f"\n\n#{source['seq']} {name}: {source['payload']['body']}", message.text)
+                else:
+                    self.assertNotIn("#1029", message.text)
+
+
+class OlderSourceTests(unittest.TestCase):
+    def test_p1a_12_a_source_message_older_than_the_loaded_context_is_still_the_current_item(self):
+        # The owner's 1020, then 16 later messages whose reply targets resolve
+        # and which span more than one 100-sequence chunk (so the context scan
+        # stops before 1020), then the attempt at 1250 sourced from 1020.
+        context = importlib_context()
+        owner = coding_message(1020, "owner-1", "human_owner", CODING_OWNER_BODY)
+        later = [coding_message(1100 + 8 * index, "paula-1" if index % 2 else "member-1", "participant_agent",
+                                f"Later note {index}.") for index in range(16)]
+        page = (CODING_START, owner, *later)
+        reads = []
+
+        def tracked(_room, after, _wait):
+            reads.append(after)
+            return {"events": [item for item in page if item["seq"] > after]}
+
+        loaded = context.recent_room_messages(lambda after: tracked(None, after, 0), before_seq=1250,
+                                              active_epoch_starts_at=1002)
+        self.assertNotIn("msg-1020", [item["id"] for item in loaded], "the context scan alone misses 1020")
+        message = build_message(attempt_ready(1250, 1, source="msg-1020"), attempt=cycle(used=0),
+                                roster=CODING_ROSTER, context=page, starts_at=1002)
+        current = f"#1020 TJE: {CODING_OWNER_BODY}"
+        self.assertEqual(message.text.count(current), 1, message.text)
+        self.assertGreater(message.text.index(current), message.text.index("[/Canonical Room context]"))
+        self.assertEqual(message.source.user_name, "TJE")
+        # A source that is not in the epoch gets no current item.
+        missing = build_message(attempt_ready(1250, 1, source="msg-elsewhere"), attempt=cycle(used=0),
+                                roster=CODING_ROSTER, context=page, starts_at=1002)
+        self.assertNotIn(CODING_OWNER_BODY, missing.text)
+        self.assertEqual(missing.source.user_name, "Room (system)")
+        # Bounded: at most CONTEXT_SCAN_LIMIT sequence numbers, never before the epoch start.
+        scans = []
+        self.assertIsNone(context.cycle_source_message(lambda after: scans.append(after) or {"events": []},
+                                                       "msg-1020", before_seq=9000, active_epoch_starts_at=1002))
+        self.assertEqual(len(scans), 20)
+        self.assertEqual(min(scans), 9000 - 2000 - 1)
+        floor_scans = []
+        context.cycle_source_message(lambda after: floor_scans.append(after) or {"events": []},
+                                     "msg-x", before_seq=1250, active_epoch_starts_at=1002)
+        self.assertGreaterEqual(min(floor_scans), 1001)
+        # A found source that is not a message is no current item.
+        self.assertIsNone(context.cycle_source_message(
+            lambda after: {"events": [item for item in page if item["seq"] > after]},
+            CODING_START["id"], before_seq=1250, active_epoch_starts_at=1002))
+
+
 def core_status_sender():
     """Hermes core's own ``_send_or_update_status_coro`` (gateway/run.py), compiled
     from its source: the module itself needs dependencies this venv lacks."""

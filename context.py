@@ -332,6 +332,38 @@ def library_catalog_context(
     return header + "\n" + body + "\n" + footer
 
 
+def cycle_source_message(
+    fetch_page: Callable[[int], dict[str, Any]],
+    source_id: str,
+    *,
+    before_seq: int,
+    active_epoch_starts_at: int,
+    max_scan: int = CONTEXT_SCAN_LIMIT,
+) -> dict[str, Any] | None:
+    """Find a cycle attempt's source message older than the loaded context.
+
+    The event API reads forward only and has no read by id, so the epoch is
+    walked backwards in CONTEXT_SCAN_CHUNK pages, at most ``max_scan`` sequence
+    numbers, never before the epoch start. The walk ends at the event with that
+    id, which counts only when it is a message (same in OpenClaw).
+    """
+    wanted = str(source_id or "").strip()
+    before = int(before_seq or 0)
+    floor = max(1, int(active_epoch_starts_at or 1))
+    scanned = 0
+    while wanted and before > floor and scanned < max_scan:
+        width = min(CONTEXT_SCAN_CHUNK, before - floor, max_scan - scanned)
+        start = before - width
+        page = fetch_page(start - 1)
+        for event in page.get("events") or []:
+            seq = int(event.get("seq") or 0)
+            if start <= seq < before and str(event.get("id") or "") == wanted:
+                return event if event.get("type") == "message.posted" else None
+        scanned += width
+        before = start
+    return None
+
+
 def epoch_start_event(
     fetch_page: Callable[[int], dict[str, Any]], starts_at_seq: int,
 ) -> dict[str, Any] | None:

@@ -219,7 +219,9 @@
     "P1a-07 host fallback notice is never posted; the model reply is": "test_p1a_07_host_fallback_notice_is_never_posted_the_model_reply_is",
     "P1a-08 speaker labels follow one precedence and four role labels": "test_p1a_08_speaker_labels_follow_one_precedence_and_four_role_labels",
     "P1a-09 reply marker addresses only real messages": "test_p1a_09_reply_marker_addresses_only_real_messages",
-    "P1a-10 the agent reads the newest messages and the message it answers": "test_p1a_10_the_agent_reads_the_newest_messages_and_the_message_it_answers"
+    "P1a-10 the agent reads the newest messages and the message it answers": "test_p1a_10_the_agent_reads_the_newest_messages_and_the_message_it_answers",
+    "P1a-11 the host session speaker is the author of the message the turn answers": "test_p1a_11_the_host_session_speaker_is_the_author_of_the_message_the_turn_answers",
+    "P1a-12 a source message older than the loaded context is still the current item": "test_p1a_12_a_source_message_older_than_the_loaded_context_is_still_the_current_item"
   },
   "parityP1aDenyList": [
     "consensus",
