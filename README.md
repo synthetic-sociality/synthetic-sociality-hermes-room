@@ -7,6 +7,32 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.75 — Equal access after missed turns (parity P2a)
+
+Paired with OpenClaw 0.2.59 (contract section P2a, shared cases P2a-01 to
+P2a-06). Behaviour changes:
+
+- P2a-1: on a Hermes core that cannot report a session release (no
+  `_session_task_is_stale` / `_session_tasks`, such as Mac128 core
+  7a1aafb4e1), a queued Room event waited forever on a stale session entry;
+  on 2026-10-02 Real sent no turn from 09:33 to 14:16 Berlin time. The wait is
+  now bounded to 120 seconds, then the queue proceeds as without the gate,
+  logged once per Room. A core that can report the release keeps the gate.
+- P2a-2: a coded refusal of a cycle start (409 cycle_conflict while the agent
+  is not execution-ready) is recorded as skipped and the scan continues;
+  before, the watch loop retried the same event forever.
+- P2a-3: a source whose turn never reached the model is offered once on the
+  next turn as a fact line, "Missed earlier: #2964 TJE, 09:49 UTC; 12 newer
+  messages since.", and then cleared.
+- P2a-4: an `ask` addressed to an agent now starts a cycle in open Rooms too,
+  with or without `retryUnavailable`.
+- P2a-5: the state directory is never the filesystem root or a top-level
+  directory.
+- P2a-6 (contract P1-1, revised): a lease renewal or pre-post re-claim that
+  fails transiently is retried every 5 seconds while the lease is valid, each
+  claim bounded to 4 seconds; only a refusal or an expired lease loses the
+  turn. Failures are logged on one line without traceback or body.
+
 ## 1.0.74 — Agents read the newest messages and the message they answer
 
 Paired with OpenClaw 0.2.57 (2026-10-02 Joined Coding canary, where the
