@@ -422,8 +422,9 @@ def _on_pre_tool_call(
     # Room store, or a shell/code call naming it, is refused. A fence error
     # refuses too; older cores let a raising hook through.
     try:
+        cwd = _tool_cwd(kwargs)
         for directory in _secret_store_dirs():
-            blocked = secret_isolation.tool_call_block(tool_name, kwargs.get("args") or {}, directory)
+            blocked = secret_isolation.tool_call_block(tool_name, kwargs.get("args") or {}, directory, cwd=cwd)
             if blocked:
                 logger.warning("Room connector refused a %s tool call that reaches its private state", tool_name or "tool")
                 return {"action": "block", "message": blocked}
@@ -433,6 +434,18 @@ def _on_pre_tool_call(
     if tool_name != "synthetic_sociality_room_post" or not is_room_context(**kwargs):
         return None
     return {"action": "block", "message": ROOM_ORIGIN_POST_BLOCK_MESSAGE}
+
+
+def _tool_cwd(kwargs: dict[str, Any]) -> str:
+    """The calling task's cwd as Hermes records it, when the core reports one."""
+    task_id = str(kwargs.get("task_id") or "")
+    if not task_id:
+        return ""
+    try:
+        from tools.terminal_tool import get_session_cwd  # Hermes core
+        return str(get_session_cwd(task_id) or "")
+    except Exception:  # noqa: BLE001 - the configured terminal cwd applies
+        return ""
 
 
 def _on_transform_tool_result(result: Any = None, **_kwargs: Any) -> str | None:
@@ -1110,10 +1123,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _secret_isolation_enforced(self) -> bool:
         """The installation's P2c-1 enforcement switch (off by default)."""
+        # Boolean true only, as in OpenClaw's schema; any other value is off.
         extra = getattr(getattr(self, "config", None), "extra", None) or {}
         value = extra.get(secret_isolation.ENFORCEMENT_SETTING, False) if isinstance(extra, dict) else False
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
         return value is True
 
     def _secret_store_reasons(self) -> list[str]:
@@ -3345,6 +3357,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 self._renewing_rooms.discard(room_id)
                 latest = load(self._state_file).binding(room_id)
                 if latest is not None:
+                    # Contract P2c-1: a renewed credential is scrubbed too.
+                    secret_isolation.remember_secrets([latest])
                     upsert(self._state, latest)
                     if (not self._stop.is_set() and latest.enabled and not latest.revoked
                             and not latest.credential_rotation and room_id not in self._tasks):
@@ -4666,6 +4680,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if not text or not answered or not epoch_id or reason == "stale_epoch":
                 return
             if len(text) > KEPT_REPLY_CHARACTER_LIMIT:
+                # Latest wins: an older kept reply is not offered in its place.
+                if binding.kept_reply:
+                    binding.kept_reply = {}
+                    self._persist_binding(binding)
                 logger.info("Room %s reply not kept: code late_reply_too_large", binding.room_id)
                 return
             seq = int(

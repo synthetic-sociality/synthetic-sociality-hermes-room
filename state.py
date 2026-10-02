@@ -17,6 +17,8 @@ from typing import Any, Callable, Iterator, TypeVar
 
 import fcntl
 
+from .secret_isolation import remember_secrets
+
 
 STATE_VERSION = 1
 T = TypeVar("T")
@@ -450,10 +452,14 @@ def load(path: Path | None = None) -> PluginState:
     payload = json.loads(target.read_text(encoding="utf-8"))
     if payload.get("version") != STATE_VERSION:
         raise ValueError(f"unsupported Synthetic Sociality state version: {payload.get('version')}")
-    return PluginState(
+    state = PluginState(
         version=STATE_VERSION,
         bindings=[RoomBinding.from_dict(item) for item in payload.get("bindings", [])],
     )
+    # Contract P2c-1: every credential this process reads (including one a
+    # renewal wrote) is scrubbed from tool results and logs.
+    remember_secrets(state.bindings)
+    return state
 
 
 def save(state: PluginState, path: Path | None = None) -> None:
@@ -463,6 +469,9 @@ def save(state: PluginState, path: Path | None = None) -> None:
     assert_state_directory(target.parent)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(target.parent, 0o700)
+    # Contract P2c-1: a credential or renewal-journal secret is registered for
+    # scrubbing before it is written.
+    remember_secrets(state.bindings)
     encoded = json.dumps(asdict(state), indent=2, sort_keys=True) + "\n"
     fd, temporary = tempfile.mkstemp(prefix=".state-", dir=target.parent)
     try:

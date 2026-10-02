@@ -148,8 +148,39 @@ def _path_candidates(tool_name: str, args: Mapping[str, Any]) -> Iterable[str]:
                 yield (match.group(1) or match.group(2) or "").strip()
 
 
+def store_spellings(store_dir: str | os.PathLike[str], environ: Mapping[str, str] | None = None) -> set[str]:
+    """The ways a command can name the store itself: its absolute path, and the
+    same path written from ~, $HOME or $HERMES_HOME. The bare directory name is
+    not one: a plugin directory of the same name (~/.hermes/plugins/...) or a
+    command argument naming the plugin is not the store."""
+    environ = os.environ if environ is None else environ
+    paths = {str(Path(os.path.expanduser(str(store_dir)))), str(_resolved(store_dir))}
+    spellings = set(paths)
+    home = os.path.expanduser("~")
+    hermes_home = (environ.get("HERMES_HOME") or "").strip() or os.path.join(home, ".hermes")
+    prefixes = [(home, ("~", "$HOME", "${HOME}"))]
+    for root in {os.path.expanduser(hermes_home), str(_resolved(hermes_home))}:
+        prefixes.append((root, ("$HERMES_HOME", "${HERMES_HOME}")))
+    for path in paths:
+        for root, names in prefixes:
+            root = root.rstrip("/")
+            if root and path.startswith(root + "/"):
+                spellings.update(name + path[len(root):] for name in names)
+    return {spelling for spelling in spellings if spelling and spelling != "/"}
+
+
+def _tool_base(cwd: str, environ: Mapping[str, str]) -> str:
+    """The directory a relative tool path is resolved against: the tool's own
+    cwd, else the terminal cwd Hermes configures (TERMINAL_CWD, MESSAGING_CWD,
+    else the home directory)."""
+    for value in (cwd, environ.get("TERMINAL_CWD"), environ.get("MESSAGING_CWD")):
+        if value and str(value).strip():
+            return os.path.expanduser(str(value).strip())
+    return os.path.expanduser("~")
+
+
 def tool_call_block(tool_name: str, args: Any, store_dir: str | os.PathLike[str],
-                    environ: Mapping[str, str] | None = None) -> str | None:
+                    environ: Mapping[str, str] | None = None, *, cwd: str = "") -> str | None:
     """The block message for a tool call that would reach the store, else None."""
     environ = os.environ if environ is None else environ
     store = _resolved(store_dir)
@@ -157,10 +188,14 @@ def tool_call_block(tool_name: str, args: Any, store_dir: str | os.PathLike[str]
     if tool_name in SHELL_TOOLS:
         # Backstop only: a command string cannot be fenced reliably. The start
         # gate keeps shell tools on a backend where the store does not exist.
-        names = {STORE_DIRECTORY_NAME, str(store)}
+        names = store_spellings(store_dir, environ)
         if any(name in text for text in _string_leaves(mapping) for name in names):
             return BLOCK_MESSAGE
-    base = (environ.get("TERMINAL_CWD") or "").strip() or os.getcwd()
+    base = _tool_base(cwd, environ)
+    if tool_name in SEARCH_TOOLS and not str(mapping.get("path") or "").strip():
+        # A search without a path searches its cwd.
+        if _within(store, _resolved(base)):
+            return BLOCK_MESSAGE
     for candidate in _path_candidates(tool_name, mapping):
         if not candidate:
             continue

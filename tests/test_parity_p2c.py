@@ -128,7 +128,7 @@ class P2cTests(unittest.TestCase):
             alias.symlink_to(state_file)
             notes = Path(scratch) / "notes.txt"
             notes.write_text("an ordinary file")
-            with mock.patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "HOME": scratch}):
                 # 1. The plugin's own fence, in every session (no Room context).
                 refused = {
                     "read_file": {"path": str(state_file)},
@@ -137,7 +137,9 @@ class P2cTests(unittest.TestCase):
                     "write_file": {"path": str(store / "status.json"), "content": "{}"},
                     "search_files": {"path": scratch, "pattern": "credential"},
                     "patch": {"mode": "patch", "patch": f"*** Begin Patch\n*** Update File: {state_file}\n@@\n-a\n+b\n*** End Patch"},
-                    "terminal": {"command": "cd ~/.hermes && cat synthetic-sociality-room/state.json"},
+                    "terminal": {"command": "cat ~/.hermes/synthetic-sociality-room/state.json"},
+                    "terminal ($HERMES_HOME)": {"command": "cat $HERMES_HOME/synthetic-sociality-room/state.json"},
+                    "terminal (${HERMES_HOME})": {"command": "cat ${HERMES_HOME}/synthetic-sociality-room/state.json"},
                     "process": {"action": "spawn", "command": f"tail -f {store}/state.json"},
                     "execute_code": {"code": "print(open('" + str(state_file) + "').read())"},
                 }
@@ -149,6 +151,27 @@ class P2cTests(unittest.TestCase):
                             self.assertEqual(verdict["action"], "block", label)
                             self.assertNotIn(FAKE_CREDENTIAL, verdict["message"])
                 self.assertIsNone(adapter._on_pre_tool_call(tool_name="read_file", args={"path": str(notes)}))
+                # The shell backstop matches the store, not the plugin's name.
+                for command in ("ls ~/.hermes/plugins/synthetic-sociality-room",
+                                "hermes plugins update synthetic-sociality-room",
+                                "openclaw plugins inspect synthetic-sociality-room"):
+                    self.assertIsNone(adapter._on_pre_tool_call(tool_name="terminal", args={"command": command}), command)
+                # Relative paths resolve against the tool's own cwd (the task's
+                # recorded cwd, else TERMINAL_CWD/MESSAGING_CWD, else home).
+                relative = {"path": ".hermes/synthetic-sociality-room/state.json"}
+                with mock.patch.dict(os.environ, {"TERMINAL_CWD": str(Path(scratch) / "work")}):
+                    self.assertIsNone(adapter._on_pre_tool_call(tool_name="read_file", args=relative))
+                    terminal_tool = types.SimpleNamespace(get_session_cwd=lambda task: scratch if task == "task-1" else None)
+                    with mock.patch.dict("sys.modules", {"tools.terminal_tool": terminal_tool}), \
+                            self.assertLogs(adapter.logger, level="WARNING"):
+                        self.assertEqual(adapter._on_pre_tool_call(tool_name="read_file", args=relative, task_id="task-1")["action"], "block")
+                    # A search without a path searches its cwd.
+                    self.assertIsNone(adapter._on_pre_tool_call(tool_name="search_files", args={"pattern": "credential"}))
+                with mock.patch.dict(os.environ, {"TERMINAL_CWD": scratch}), self.assertLogs(adapter.logger, level="WARNING"):
+                    self.assertEqual(adapter._on_pre_tool_call(tool_name="search_files", args={"pattern": "credential"})["action"], "block")
+                with mock.patch.dict(os.environ, {"TERMINAL_CWD": "", "MESSAGING_CWD": ""}), self.assertLogs(adapter.logger, level="WARNING"):
+                    # Unset: the home directory, which holds the store here.
+                    self.assertEqual(adapter._on_pre_tool_call(tool_name="search_files", args={"pattern": "x", "path": ""})["action"], "block")
                 self.assertIsNone(adapter._on_pre_tool_call(tool_name="search_files", args={"path": str(store.parent / "skills")}))
                 # A fence error refuses (older cores let a raising hook through).
                 with mock.patch.object(secret_isolation, "tool_call_block", side_effect=RuntimeError("boom")), \
@@ -238,8 +261,16 @@ class P2cTests(unittest.TestCase):
                 self.assertNotIn(FAKE_CREDENTIAL, adapter._on_transform_tool_result(tool_name="terminal", result=FAKE_CREDENTIAL))
                 secret_isolation.forget_secrets()
 
-                # Enforced (enforceSecretIsolation on): refuses, logged once.
-                for switch in (True, "true"):
+                # Only boolean true enables enforcement (as in OpenClaw's
+                # schema): the string "true" reports and starts.
+                adapter._SECRET_REFUSAL_LOGGED.clear()
+                stringly = gate_instance({"enforceSecretIsolation": "true"})
+                with mock.patch.dict(os.environ, {"TERMINAL_ENV": "local"}), self.assertLogs(adapter.logger, level="WARNING"):
+                    self.assertEqual(asyncio.run(connect_twice(stringly)), [True, True])
+                self.assertEqual(local_status.read(status_file)["secretIsolationEnforced"], False)
+
+                # Enforced (enforceSecretIsolation true): refuses, logged once.
+                for switch in (True,):
                     adapter._SECRET_REFUSAL_LOGGED.clear()
                     enforcing = gate_instance({"enforceSecretIsolation": switch})
                     with mock.patch.dict(os.environ, {"TERMINAL_ENV": "local"}), \
@@ -283,7 +314,48 @@ class P2cTests(unittest.TestCase):
                 self.assertNotIn(FAKE_REPLACEMENT, prompt.text)
                 self.assertNotIn(FAKE_CREDENTIAL, json.dumps(prompt.raw_message, default=str))
 
-        # 5. No plugin module places anything in the environment tools inherit.
+        # 5. A renewed credential is scrubbed too: one written by a renewal
+        # (journal or swap) through the state file, and one the renewal
+        # finally-path reloads after another writer replaced it.
+        secret_isolation.forget_secrets()
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "profile" / "state.json"
+            renewed = "room-cred-TEST-renewed-" + "5e6f" * 6
+            journal = "room-cred-TEST-journal-" + "7a8b" * 6
+            first = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", FAKE_CREDENTIAL,
+                                        installation_id="inst-1",
+                                        credential_rotation={"owner_initiated": True, "replacement_credential": journal})
+            state_module.save(adapter.PluginState(bindings=[first]), path)
+            self.assertNotIn(journal, secret_isolation.scrub(f"x {journal}"))
+            secret_isolation.forget_secrets()
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            for name, value in {"_state_file": path, "_state": adapter.PluginState(bindings=[first]), "_tasks": {},
+                                "_heartbeat_tasks": {}, "_renewing_rooms": set(), "_renewal_retry_after": {},
+                                "_active_dispatch_rooms": {}, "_receive_locks": {}, "_stream_generations": {},
+                                "_stop": asyncio.Event()}.items():
+                setattr(instance, name, value)
+            instance._stop.set()
+
+            def swap(state_path, room_id, _intent):
+                # Another writer (the renewal CLI process) replaced the
+                # credential; nothing in this process saw it being written.
+                payload = json.loads(Path(state_path).read_text())
+                payload["bindings"][0]["credential"] = renewed
+                payload["bindings"][0]["credential_rotation"] = {}
+                Path(state_path).write_text(json.dumps(payload))
+
+            with mock.patch.object(adapter.renewal, "eligible", lambda _b: True), \
+                    mock.patch.object(adapter.renewal, "quiescent", lambda _b: True), \
+                    mock.patch.object(adapter.renewal, "resume", swap), \
+                    mock.patch.object(adapter, "load", lambda *_a: state_module.PluginState(
+                        bindings=[adapter.RoomBinding.from_dict(item) for item in json.loads(path.read_text())["bindings"]])):
+                asyncio.run(instance._maintain_renewal(first))
+            self.assertEqual(instance._state.bindings[0].credential, renewed)
+            self.assertNotIn(renewed, secret_isolation.scrub(f"export X={renewed}"))
+            self.assertNotIn(renewed, adapter._on_transform_tool_result(tool_name="terminal", result=renewed))
+        secret_isolation.forget_secrets()
+
+        # 6. No plugin module places anything in the environment tools inherit.
         for module in ROOT.glob("*.py"):
             source = module.read_text()
             self.assertNotRegex(source, r"os\.environ\[[^\]]+\]\s*=|os\.putenv|os\.environ\.(update|setdefault)\(", module.name)
@@ -330,17 +402,20 @@ class P2cTests(unittest.TestCase):
         instance._keep_late_reply(binding, "evt-5", "m-1", "epoch-1", "first", "turn_expired")
         instance._keep_late_reply(binding, "evt-5", "m-2", "epoch-1", "second", "cycle_superseded")
         self.assertEqual((binding.kept_reply["source_event_id"], binding.kept_reply["text"]), ("m-2", "second"))
+        second = dict(binding.kept_reply)
         instance._keep_late_reply(binding, "evt-5", "m-3", "epoch-1", "x" * (state_module.KEPT_REPLY_CHARACTER_LIMIT + 1), "turn_expired")
-        self.assertEqual(binding.kept_reply["source_event_id"], "m-2")
+        # Latest wins even when the latest is too long to keep: the older kept
+        # reply is cleared, never offered in its place.
+        self.assertEqual(binding.kept_reply, {})
 
         # Durable: saved, reloaded and validated with the state.
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "profile" / "state.json"
             stored = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential",
-                                         kept_reply=dict(binding.kept_reply))
+                                         kept_reply=dict(second))
             state_module.save(adapter.PluginState(bindings=[stored]), path)
-            self.assertEqual(state_module.load(path).bindings[0].kept_reply, binding.kept_reply)
-            for broken in ({"text": "x"}, {**binding.kept_reply, "text": ""}, {**binding.kept_reply, "source_seq": "5"}):
+            self.assertEqual(state_module.load(path).bindings[0].kept_reply, second)
+            for broken in ({"text": "x"}, {**second, "text": ""}, {**second, "source_seq": "5"}):
                 with self.assertRaises(ValueError):
                     adapter.RoomBinding.from_dict({**stored.__dict__, "kept_reply": broken})
 
