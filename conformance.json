@@ -232,6 +232,15 @@
     "P2a-05 the state directory is never the filesystem root": "test_p2a_05_the_state_directory_is_never_the_filesystem_root",
     "P2a-06 a transient renewal failure keeps a turn with a valid lease": "test_p2a_06_a_transient_renewal_failure_keeps_a_turn_with_a_valid_lease"
   },
+  "parityP2cContract": "docs/delivery-lifecycle-contract-v1.md#p2c--secrets-late-replies-self-recovery-2026-10-02",
+  "parityP2cCases": {
+    "P2c-01 the credential is not readable through the agent's tools and never appears in prompt, tool result or log": "test_p2c_01_the_credential_is_not_readable_through_the_agent_s_tools_and_never_appears_in_prompt_tool_result_or_log",
+    "P2c-02 a late reply is offered once as a fact with its kept text and then cleared": "test_p2c_02_a_late_reply_is_offered_once_as_a_fact_with_its_kept_text_and_then_cleared",
+    "P2c-03 after network loss and session expiry the connector reconnects without a restart": "test_p2c_03_after_network_loss_and_session_expiry_the_connector_reconnects_without_a_restart",
+    "P2c-04 local status reports load, version, connection and last error without secrets or bodies": "test_p2c_04_local_status_reports_load_version_connection_and_last_error_without_secrets_or_bodies",
+    "P2c-05 the reported host label comes from the current machine": "test_p2c_05_the_reported_host_label_comes_from_the_current_machine"
+  },
+  "parityP2cStatusSchema": "synthetic-sociality-room-status-v1",
   "parityP1aDenyList": [
     "consensus",
     "common ground",

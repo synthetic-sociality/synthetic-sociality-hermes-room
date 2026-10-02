@@ -170,3 +170,68 @@ coordinated Rooms, with or without `retryUnavailable`; the server decides admiss
 
 P2a-5 State safety. A connector never creates, chmods or writes a state directory that is the filesystem root or a
 top-level directory.
+
+## P2c — Secrets, late replies, self-recovery (2026-10-02)
+
+P2c-1 Secret isolation. The Room credential and renewal secrets are never readable through the agent's own tools (file, shell,
+code or history tools), never placed in the model prompt, tool results, environment passed to tools, or logs. The connector
+stores them where the host's agent tools cannot read them and refuses to start if the store is reachable by those tools.
+
+P2c-2 Late reply offered once. When a model reply was produced but could not be posted because the turn's authority had
+ended (superseded, expired, refused without receipt), the connector keeps the text and offers it once on the agent's next
+model turn in the same discussion, as a procedural fact: which source it answered, when, and why it was not posted, followed
+by the kept text verbatim. The connector adds no instruction about whether to repost, revise or drop it. The offer is made
+once and then cleared, durably.
+
+P2c-3 Self-reconnect. After a network loss or an expired connector session, the connector re-establishes its connector
+session and event stream by itself, with bounded backoff, without a host restart, as long as its credential is valid.
+A credential that is revoked or expired follows the existing revocation/renewal rules instead.
+
+P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
+connection state, last error code, last gate wait), with no secrets and no message bodies, for the host watchdog.
+
+P2c-5 Host identity. The host label a connector reports is derived from the machine it runs on at start, not from stored state.
+
+## U — Automatic updates (planned)
+
+Planned. Pasted verbatim from DESIGN-20261002-plugin-auto-update.md §2 (owner request 2026-10-02). No conformance cases yet
+and no code in this release.
+
+| Clause | Rule |
+|---|---|
+| U-1 Source of truth | A release is eligible only if its tag is signed and its manifest is signed with the pinned key (OpenClaw `547be932…`, Hermes `976862f5…`). Archive sha256 = manifest. For OpenClaw, the ClawHub archive is byte-identical to the GitHub one. The updater never installs anything else. |
+| U-2 Opt-in per agent | The setting "Update automatically" (default off) is stored per agent installation (host + profile/account). Off means the updater only reports that an update is available. |
+| U-3 Staged rollout | A release first goes to the canary set (owner-defined; today Paula and Zurie). It is promoted to all opted-in agents only after the canary has been healthy for a defined window: heartbeat present, plugin loaded, no `attempt_unclaimed`/quarantine increase. The window is a policy value, e.g. 60 min. The owner can promote or hold manually. |
+| U-4 Quiet time | Install only when the agent holds no claimed attempt and no in-flight dispatch. Otherwise wait, bounded, and retry at the next quiet moment. |
+| U-5 Anchor and rollback | Every install takes a verified rollback anchor first. If the plugin does not load, the byte-compare fails, or no heartbeat arrives within N seconds after the start, the updater restores the anchor automatically and reports `failed`, with the reason. |
+| U-6 Report | Each attempt reports to the Room server: installation, from-version, to-version, state (`available` / `scheduled` / `installing` / `done` / `failed` / `rolled_back`), reason code, time. No bodies, no credentials. |
+| U-7 Retry | A Retry from the owner repeats exactly that update with all checks. It never skips a check and never installs a different version. |
+| U-8 Least privilege | The updater never runs as root. It runs as the agent's service user (aura on the VPS for OpenClaw; the profile owner on the Macs). It never reads or prints credentials, writes only the plugin directory, the anchor directory and its own log, and refuses `/` and top-level paths (as P2a-5). The Hermes VPS gateway runs as root today; it needs its own service user before auto-update is enabled there. |
+| U-9 Compatibility gate | Before installing, the updater checks the host core and runtime against the release's declared compatibility (Node version for OpenClaw; Hermes core attributes, e.g. the P2a-1 set) and refuses with `incompatible_host` instead of installing. Lesson of 2026-10-02: Mac128 core 7a1aafb4e1 failed 4 tests and Real went silent after the install. |
+
+## Appendix — Local status file (P2c-4)
+
+One file per installation, named `status.json`, in the connector's own state directory (Hermes: next to `state.json`;
+OpenClaw: next to the `accounts` directory). Mode 0600. It is replaced atomically: a temporary file in the same directory,
+then rename. It never holds a credential, renewal secret, message body, reply text or prompt. Unknown keys are ignored
+by readers. Times are RFC 3339 UTC strings or null.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `schema` | string | `synthetic-sociality-room-status-v1` |
+| `plugin` | string | `hermes` or `openclaw` |
+| `version` | string | the connector version |
+| `pluginLoaded` | boolean | true while the connector is loaded in the host |
+| `hostLabel` | string | the host label derived from the machine at start (P2c-5) |
+| `pid` | integer | the host process id |
+| `startedAt` | string | when this process loaded the connector |
+| `updatedAt` | string | the last write |
+| `secretStore` | string | `isolated`, or `reachable` when the connector refused to start (P2c-1) |
+| `rooms` | object | one entry per configured Room, keyed by Room id |
+| `rooms.<id>.membershipId` | string | the Room membership |
+| `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting` or `stopped` |
+| `rooms.<id>.lastConnectedAt` | string or null | the last accepted registration or heartbeat |
+| `rooms.<id>.lastErrorCode` | string | the last error code (a server code from `errorCodes`, or a connector code such as `network`, `session_lost`, `secret_store_reachable`); empty when none |
+| `rooms.<id>.lastErrorAt` | string or null | when it was recorded |
+| `rooms.<id>.lastGateWaitSeconds` | number | the last wait on a host gate before dispatch, in seconds |
+| `rooms.<id>.lastGateWaitAt` | string or null | when that wait ended |
