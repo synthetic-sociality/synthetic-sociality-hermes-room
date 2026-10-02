@@ -241,6 +241,7 @@
     "P2c-05 the reported host label comes from the current machine": "test_p2c_05_the_reported_host_label_comes_from_the_current_machine"
   },
   "parityP2cStatusSchema": "synthetic-sociality-room-status-v1",
+  "parityP2cEnforcementSetting": "enforceSecretIsolation",
   "parityP1aDenyList": [
     "consensus",
     "common ground",
