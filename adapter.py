@@ -75,7 +75,8 @@ CONNECTOR_VERSION = "1.0.76"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
-# Contract P2c-1: the start refusal is logged once per process.
+# Contract P2c-1: the store report (or, when enforced, the refusal) is logged
+# once per process.
 _SECRET_REFUSAL_LOGGED: set[bool] = set()
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
@@ -1107,6 +1108,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001 - status is diagnostics only
             logger.debug("Room local status update failed")
 
+    def _secret_isolation_enforced(self) -> bool:
+        """The installation's P2c-1 enforcement switch (off by default)."""
+        extra = getattr(getattr(self, "config", None), "extra", None) or {}
+        value = extra.get(secret_isolation.ENFORCEMENT_SETTING, False) if isinstance(extra, dict) else False
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return value is True
+
     def _secret_store_reasons(self) -> list[str]:
         reasons: list[str] = []
         directories = [self._state_file.parent, *_secret_store_dirs()]
@@ -1119,11 +1128,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         # Contract P2c-1: never start while the agent's tools can reach the
         # store that holds the Room credential.
+        # Contract P2c-1: report whether the agent's tools can reach the store
+        # that holds the Room credential; refuse to start only when this
+        # installation enables enforcement (enforceSecretIsolation, off by
+        # default). The path fence and the scrubbing apply in both modes.
         reasons = self._secret_store_reasons()
-        if reasons:
-            status = getattr(self, "_status", None)
-            if status is not None:
-                status.set_secret_store("reachable")
+        enforced = self._secret_isolation_enforced()
+        status = getattr(self, "_status", None)
+        if status is not None:
+            status.set_secret_store("reachable" if reasons else "isolated", reasons, enforced=enforced)
+        if reasons and enforced:
             for binding in self._state.bindings:
                 self._status_room(binding, connection="stopped", error_code=secret_isolation.REFUSAL_CODE)
             if not _SECRET_REFUSAL_LOGGED:
@@ -1135,10 +1149,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     secret_isolation.REFUSAL_CODE, ",".join(reasons),
                 )
             return False
+        if reasons and not _SECRET_REFUSAL_LOGGED:
+            _SECRET_REFUSAL_LOGGED.add(True)
+            logger.warning(
+                "Room connector: %s (%s). The agent's file, shell or code tools could read the Room "
+                "credential; reporting only (enforceSecretIsolation is off), the path fence and scrubbing "
+                "stay active.",
+                secret_isolation.REFUSAL_CODE, ",".join(reasons),
+            )
         secret_isolation.remember_secrets(self._state.bindings)
-        status = getattr(self, "_status", None)
-        if status is not None:
-            status.set_secret_store("isolated")
         self._stop.clear()
         if any(renewal.eligible(binding) for binding in self._state.bindings):
             if self._renewal_task is None or self._renewal_task.done():

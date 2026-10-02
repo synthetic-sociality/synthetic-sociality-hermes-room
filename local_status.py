@@ -53,6 +53,8 @@ class LocalStatus:
             "startedAt": _now(),
             "updatedAt": _now(),
             "secretStore": "isolated",
+            "secretStoreReasons": [],
+            "secretIsolationEnforced": False,
             "rooms": {},
         }
 
@@ -60,9 +62,12 @@ class LocalStatus:
         with self._lock:
             return json.loads(json.dumps(self._data))
 
-    def set_secret_store(self, value: str) -> None:
+    def set_secret_store(self, value: str, reasons: list[str] | tuple[str, ...] = (), *, enforced: bool = False) -> None:
+        reachable = value == "reachable"
         with self._lock:
-            self._data["secretStore"] = "reachable" if value == "reachable" else "isolated"
+            self._data["secretStore"] = "reachable" if reachable else "isolated"
+            self._data["secretStoreReasons"] = [_code(reason) for reason in reasons if _code(reason)] if reachable else []
+            self._data["secretIsolationEnforced"] = bool(enforced)
         self.write()
 
     def set_loaded(self, loaded: bool) -> None:

@@ -191,32 +191,81 @@ class P2cTests(unittest.TestCase):
                 self.assertEqual(secret_isolation.store_reachability(store, isolated, mount_sources=[str(home / "skills")]), [])
 
                 binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", FAKE_CREDENTIAL,
-                                              installation_id="inst-1", enabled=False, disabled_reason="credential_expired",
-                                              credential_rotation={"replacement_credential": FAKE_REPLACEMENT})
-                instance = object.__new__(adapter.SyntheticSocialityAdapter)
-                instance._state_file = state_file
-                instance._state = adapter.PluginState(bindings=[binding])
-                instance._status = local_status.LocalStatus(store / "status.json", plugin="hermes",
-                                                            version=adapter.CONNECTOR_VERSION, host_label="host-a")
-                instance._stop = asyncio.Event()
-                instance._tasks, instance._renewal_task = {}, None
-                with mock.patch.dict(os.environ, {"TERMINAL_ENV": "local"}), self.assertLogs(adapter.logger, level="ERROR") as logs:
-                    self.assertFalse(asyncio.run(instance.connect()))
-                    self.assertFalse(asyncio.run(instance.connect()))
-                refusals = [line for line in logs.output if "refused to start" in line]
-                self.assertEqual(len(refusals), 1, logs.output)
-                self.assertIn("secret_store_reachable (host_shell_backend)", refusals[0])
-                self.assertEqual(instance._tasks, {})
-                written = local_status.read(store / "status.json")
-                self.assertEqual(written["secretStore"], "reachable")
-                self.assertEqual(written["rooms"]["room-1"]["lastErrorCode"], "secret_store_reachable")
+                                              installation_id="inst-1")
+                status_file = store / "status.json"
+
+                def gate_instance(extra):
+                    instance = object.__new__(adapter.SyntheticSocialityAdapter)
+                    instance.config = types.SimpleNamespace(extra=dict(extra))
+                    instance._state_file = state_file
+                    instance._state = adapter.PluginState(bindings=[binding])
+                    instance._status = local_status.LocalStatus(status_file, plugin="hermes",
+                                                                version=adapter.CONNECTOR_VERSION, host_label="host-a")
+                    instance._stop = asyncio.Event()
+                    instance._tasks, instance._renewal_task = {}, None
+                    instance.watched = []
+
+                    async def watch(current, *, is_reconnect):
+                        instance.watched.append(current.room_id)
+
+                    instance._watch = watch
+                    return instance
+
+                async def connect_twice(instance):
+                    results = [await instance.connect(), await instance.connect()]
+                    await asyncio.gather(*instance._tasks.values(), return_exceptions=True)
+                    return results
+
+                # Report-only (the default): reported once, status says why,
+                # and the Room still starts. Fence and scrubbing stay active.
+                adapter._SECRET_REFUSAL_LOGGED.clear()
+                reporting = gate_instance({})
+                with mock.patch.dict(os.environ, {"TERMINAL_ENV": "local"}), \
+                        self.assertLogs(adapter.logger, level="WARNING") as logs:
+                    self.assertEqual(asyncio.run(connect_twice(reporting)), [True, True])
+                reports = [line for line in logs.output if "secret_store_reachable (host_shell_backend)" in line]
+                self.assertEqual(len(reports), 1, logs.output)
+                self.assertIn("reporting only", reports[0])
+                self.assertFalse(any("refused to start" in line for line in logs.output))
+                self.assertEqual(reporting.watched, ["room-1"])
+                written = local_status.read(status_file)
+                self.assertEqual((written["secretStore"], written["secretStoreReasons"], written["secretIsolationEnforced"]),
+                                 ("reachable", ["host_shell_backend"], False))
+                self.assertNotEqual(written["rooms"]["room-1"]["lastErrorCode"], "secret_store_reachable")
+                with self.assertLogs(adapter.logger, level="WARNING"):
+                    self.assertEqual(adapter._on_pre_tool_call(tool_name="read_file", args={"path": str(state_file)})["action"], "block")
+                secret_isolation.remember_secrets([binding])
+                self.assertNotIn(FAKE_CREDENTIAL, adapter._on_transform_tool_result(tool_name="terminal", result=FAKE_CREDENTIAL))
+                secret_isolation.forget_secrets()
+
+                # Enforced (enforceSecretIsolation on): refuses, logged once.
+                for switch in (True, "true"):
+                    adapter._SECRET_REFUSAL_LOGGED.clear()
+                    enforcing = gate_instance({"enforceSecretIsolation": switch})
+                    with mock.patch.dict(os.environ, {"TERMINAL_ENV": "local"}), \
+                            self.assertLogs(adapter.logger, level="ERROR") as logs:
+                        self.assertEqual(asyncio.run(connect_twice(enforcing)), [False, False])
+                    refusals = [line for line in logs.output if "refused to start" in line]
+                    self.assertEqual(len(refusals), 1, logs.output)
+                    self.assertIn("secret_store_reachable (host_shell_backend)", refusals[0])
+                    self.assertEqual((enforcing._tasks, enforcing.watched), ({}, []))
+                    written = local_status.read(status_file)
+                    self.assertEqual((written["secretStore"], written["secretIsolationEnforced"]), ("reachable", True))
+                    self.assertEqual(written["rooms"]["room-1"]["lastErrorCode"], "secret_store_reachable")
+                # Enforced on an isolated host: starts.
+                adapter._SECRET_REFUSAL_LOGGED.clear()
+                isolated_host = gate_instance({"enforceSecretIsolation": True})
                 with mock.patch.object(secret_isolation, "_sandbox_mount_sources", lambda: []), \
                         mock.patch.dict(os.environ, isolated):
-                    asyncio.run(instance.connect())
-                self.assertEqual(local_status.read(store / "status.json")["secretStore"], "isolated")
-                self.assertNotIn(FAKE_CREDENTIAL, (store / "status.json").read_text())
+                    asyncio.run(connect_twice(isolated_host))
+                self.assertEqual(isolated_host.watched, ["room-1"])
+                written = local_status.read(status_file)
+                self.assertEqual((written["secretStore"], written["secretStoreReasons"]), ("isolated", []))
+                self.assertNotIn(FAKE_CREDENTIAL, status_file.read_text())
 
                 # 4. Never in a tool result, a log line, or the model prompt.
+                secret_isolation.remember_secrets([types.SimpleNamespace(
+                    credential=FAKE_CREDENTIAL, credential_rotation={"replacement_credential": FAKE_REPLACEMENT})])
                 self.assertIsNone(adapter._on_transform_tool_result(tool_name="terminal", result="clean output"))
                 for secret in (FAKE_CREDENTIAL, FAKE_REPLACEMENT):
                     result = adapter._on_transform_tool_result(tool_name="terminal", result=f"export X={secret}\n")

@@ -7,16 +7,18 @@ holds the store, so nothing in this process can make the store unreadable to
 them. On a sandbox backend they run where the store is not mounted. The
 connector therefore:
 
-1. refuses to start while the store is reachable (``store_reachability``):
-   a host backend, or a sandbox mount that contains the store;
+1. reports whether the store is reachable (``store_reachability``): a host
+   backend, or a sandbox mount that contains the store; it refuses to start
+   while the store is reachable only when the installation enables
+   ``enforceSecretIsolation`` (platforms.synthetic_sociality.extra);
 2. blocks, in every session, any tool call whose path arguments resolve into
    the store (or, for a search, contain it), and any shell or code call that
    names it (``tool_call_block``); a hook error blocks;
 3. removes the exact credential and renewal secret values from every tool
    result before it reaches the model (``scrub``).
 
-The install script sets ``terminal.backend`` to a sandbox and mounts nothing
-that contains HERMES_HOME. Reason codes never contain a path or a secret.
+Before enforcement is switched on, the host sets ``terminal.backend`` to a
+sandbox and mounts nothing that contains HERMES_HOME. Reason codes never contain a path or a secret.
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ SHELL_TOOLS = frozenset({"terminal", "process", "execute_code"})
 SEARCH_TOOLS = frozenset({"search_files"})
 STORE_DIRECTORY_NAME = "synthetic-sociality-room"
 REFUSAL_CODE = "secret_store_reachable"
+# The per-installation switch: off reports and keeps running, on refuses.
+ENFORCEMENT_SETTING = "enforceSecretIsolation"
 BLOCK_MESSAGE = (
     "Blocked by the Synthetic Sociality Room connector: its private state holds the Room "
     "credential and is not available to agent tools."
