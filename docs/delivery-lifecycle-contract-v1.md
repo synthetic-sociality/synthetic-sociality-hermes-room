@@ -149,3 +149,24 @@ missing role. The same label is used in the transcript, the current input and th
 P1a-8 What the agent reads. Every model turn contains, unshortened, the message the turn answers (the cycle's source message
 or the direct message), shown as the current item with its post number and speaker label. When the Room context must be
 bounded, the oldest transcript entries are dropped first; the newest entries are kept.
+
+## P2a — Equal access after missed turns (2026-10-02)
+
+P2a-1 Bounded host waits. A connector never waits without bound for a host signal it cannot observe. When the host cannot
+report the condition the connector waits for (for example, that the previous run released its session), the connector waits
+at most a bounded time, then proceeds as it would without the gate, and logs the fallback once per Room.
+
+P2a-2 Refused cycle start. A refusal of a cycle start with a code, or any other 4xx, is recorded as skipped with that code
+and acknowledged; the scan continues. Transient errors (network, timeout, 429, 5xx without code) keep the retry path.
+A refused start never stops the channel.
+
+P2a-3 Missed source offered once. When a connector's turn for a source was not delivered to the model (unclaimed, expired,
+superseded, or refused before the model ran), the source is offered once on the agent's next model turn in the same Room,
+as a procedural fact only: its post number, its speaker label, its time, and the number of newer messages since. The
+connector adds no instruction about whether or how to respond. The offer is made once and is then cleared, durably.
+
+P2a-4 Coordinated ask. A human `ask` command addressed to an agent starts a cycle for that agent in both open and
+coordinated Rooms, with or without `retryUnavailable`; the server decides admission.
+
+P2a-5 State safety. A connector never creates, chmods or writes a state directory that is the filesystem root or a
+top-level directory.

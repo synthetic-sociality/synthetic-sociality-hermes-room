@@ -223,6 +223,15 @@
     "P1a-11 the host session speaker is the author of the message the turn answers": "test_p1a_11_the_host_session_speaker_is_the_author_of_the_message_the_turn_answers",
     "P1a-12 a source message older than the loaded context is still the current item": "test_p1a_12_a_source_message_older_than_the_loaded_context_is_still_the_current_item"
   },
+  "parityP2aContract": "docs/delivery-lifecycle-contract-v1.md#p2a--equal-access-after-missed-turns-2026-10-02",
+  "parityP2aCases": {
+    "P2a-01 a host wait the connector cannot observe is bounded and falls back": "test_p2a_01_a_host_wait_the_connector_cannot_observe_is_bounded_and_falls_back",
+    "P2a-02 a refused cycle start is skipped and the scan continues": "test_p2a_02_a_refused_cycle_start_is_skipped_and_the_scan_continues",
+    "P2a-03 a missed source is offered once as a procedural fact and then cleared": "test_p2a_03_a_missed_source_is_offered_once_as_a_procedural_fact_and_then_cleared",
+    "P2a-04 a coordinated ask without retry starts a cycle for its target": "test_p2a_04_a_coordinated_ask_without_retry_starts_a_cycle_for_its_target",
+    "P2a-05 the state directory is never the filesystem root": "test_p2a_05_the_state_directory_is_never_the_filesystem_root",
+    "P2a-06 a transient renewal failure keeps a turn with a valid lease": "test_p2a_06_a_transient_renewal_failure_keeps_a_turn_with_a_valid_lease"
+  },
   "parityP1aDenyList": [
     "consensus",
     "common ground",
