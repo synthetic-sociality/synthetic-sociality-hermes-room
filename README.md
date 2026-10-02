@@ -12,24 +12,38 @@ Room identity.
 Paired with OpenClaw 0.2.60 (contract section P2c, shared cases P2c-01 to
 P2c-05; section U, automatic updates, is recorded as planned only).
 
-**Install precondition (P2c-1).** This version refuses to start while the
-agent's own tools can read the Room credential, and logs once:
-`Room connector refused to start: secret_store_reachable (<reasons>)`. Hermes
-runs read_file, search_files, patch, terminal, process and execute_code
-through one terminal backend; on `local` or `ssh` they run as the gateway's
-user next to `state.json` (an unfenced read_file returned the credential in
-the P2c-01 control). Before installing, set in the profile's `config.yaml`:
+**Secret isolation (P2c-1): report first, enforce per installation.** At
+start the connector checks whether the agent's own tools can read the Room
+credential. Hermes runs read_file, search_files, patch, terminal, process and
+execute_code through one terminal backend; on `local` or `ssh` they run as the
+gateway's user next to `state.json` (an unfenced read_file returned the
+credential in the P2c-01 control). By default the connector only reports this:
+it logs once `Room connector: secret_store_reachable (<reasons>) … reporting
+only`, writes `"secretStore": "reachable"` with `secretStoreReasons` to
+`status.json`, and keeps running. Installing 1.0.76 does not need a host
+change.
+
+Enforcement is a per-installation switch, off by default. When it is on, the
+connector refuses to start while the store is reachable:
+
+    platforms:
+      synthetic_sociality:
+        extra:
+          enforceSecretIsolation: true
+
+Per-host step before switching it on, in the profile's `config.yaml`:
 
     terminal:
-      backend: docker                    # or singularity, modal, daytona, vercel_sandbox
+      backend: docker                    # or singularity, modal, managed_modal, daytona, vercel_sandbox
       docker_volumes: []                 # nothing that contains HERMES_HOME
       docker_mount_cwd_to_workspace: false
 
-Recommended as well: run the VPS gateway under its own user rather than root.
+Then confirm `"secretStore": "isolated"` in `status.json`. Recommended as well:
+run the VPS gateway under its own user rather than root.
 
 Behaviour changes:
 
-- P2c-1: the store is also fenced in every session. A file, search or patch
+- P2c-1: in both modes the store is fenced in every session. A file, search or patch
   path whose real path lies in `synthetic-sociality-room/` (or a search root
   that contains it), or a terminal/process/execute_code call that names it,
   is refused; a fence error refuses. The exact credential and renewal-journal
