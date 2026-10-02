@@ -98,41 +98,53 @@ class P2aConformanceTests(unittest.TestCase):
 
 class P2aTests(unittest.TestCase):
     def test_p2a_01_a_host_wait_the_connector_cannot_observe_is_bounded_and_falls_back(self):
-        # Mac128 core 7a1aafb4e1 has no _session_task_is_stale / _session_tasks:
-        # a stale _active_sessions entry kept Real silent for hours. The wait is
-        # now bounded, then the queue proceeds as without the gate, logged once.
-        async def run(observable):
+        # Mac128 core 7a1aafb4e1 has _session_tasks and _session_task_is_stale
+        # but no _track_session_task: its guards carry no owner task, and its
+        # stale check is False for an ownerless guard, so Real stayed silent
+        # for hours. Such a guard is unobservable: the wait is bounded, then
+        # the queue proceeds as without the gate, logged once; the wait and
+        # the dispatch are logged at INFO with room, seq and wait seconds.
+        async def run(owner_running):
             instance, binding, _api, _published, dispatched = room_instance(None, queued=(6,))
             instance._active_dispatch_rooms = {}
             instance._active_sessions = {KEY: asyncio.Event()}
             instance._room_session_keys = {"room-1": KEY}
-            if observable:
-                instance._session_tasks = {}
-                instance._session_task_is_stale = lambda _key: False  # the run is genuinely active
-            for name in ("_session_task_is_stale", "_session_tasks", "_track_session_task"):
-                if not observable:
-                    self.assertFalse(hasattr(instance, name), name)
+            # The 7a1aafb4e1 attribute set and stale-check semantics.
+            instance._session_tasks = {}
+            instance._session_task_is_stale = lambda key: bool(
+                instance._session_tasks.get(key) is not None and instance._session_tasks[key].done()
+            )
+            self.assertFalse(hasattr(instance, "_track_session_task"))
+            if owner_running:
+                instance._session_tasks[KEY] = asyncio.get_running_loop().create_future()  # a live owner task
             started = time.monotonic()
             await instance._dispatch_next_queued(binding)
             for _ in range(60):
                 if dispatched:
                     break
                 await asyncio.sleep(0.05)
+            for owner in instance._session_tasks.values():
+                owner.cancel()
             return dispatched, time.monotonic() - started
 
         with mock.patch.object(adapter, "SESSION_UNOBSERVABLE_WAIT_SECONDS", 0.3), \
                 mock.patch.object(adapter, "SESSION_RELEASE_POLL_SECONDS", 0.05), \
-                self.assertLogs(adapter.logger, level="WARNING") as logs:
-            dispatched, elapsed = asyncio.run(run(observable=False))
-            adapter.logger.warning("end of P2a-01 case")
+                self.assertLogs(adapter.logger, level="INFO") as logs:
+            dispatched, elapsed = asyncio.run(run(owner_running=False))
         self.assertEqual(dispatched, ["evt-6"])
         self.assertGreaterEqual(elapsed, 0.3)
         fallback = [line for line in logs.output if "cannot report session release" in line]
         self.assertEqual(len(fallback), 1, logs.output)
-        # A core that can report the release keeps the gate.
+        waiting = [line for line in logs.output if "waiting on the host session gate" in line]
+        self.assertEqual(len(waiting), 1, logs.output)
+        self.assertIn("Room room-1 seq 6 waiting", waiting[0])
+        sent = [line for line in logs.output if "dispatched to Hermes core after waiting" in line]
+        self.assertEqual(len(sent), 1, logs.output)
+        self.assertRegex(sent[0], r"Room room-1 seq 6 dispatched to Hermes core after waiting (0\.[3-9]|[1-9])")
+        # A live owner task is observable: the gate holds.
         with mock.patch.object(adapter, "SESSION_UNOBSERVABLE_WAIT_SECONDS", 0.3), \
                 mock.patch.object(adapter, "SESSION_RELEASE_POLL_SECONDS", 0.05):
-            dispatched, _elapsed = asyncio.run(run(observable=True))
+            dispatched, _elapsed = asyncio.run(run(owner_running=True))
         self.assertEqual(dispatched, [])
 
     def test_p2a_03_a_missed_source_is_offered_once_as_a_procedural_fact_and_then_cleared(self):
@@ -181,6 +193,23 @@ class P2aTests(unittest.TestCase):
         again = build_message(attempt_ready(2971, 1, source="msg-2969"), attempt=cycle(used=0), roster=ROSTER,
                               context=page, starts_at=2900).text
         self.assertNotIn("Missed earlier", again)
+
+        # Shared table: a missed source before the current discussion is not
+        # offered (missed #2900, epoch starts at 2950, turn 3000), and cleared.
+        earlier = message(2900, "owner-1", "human_owner", "Before the restart.")
+        restart = {**START, "id": "start-2950", "seq": 2950,
+                   "payload": {"epoch": {**START["payload"]["epoch"], "startsAtSeq": 2950}}}
+        late = message(2999, "paula-1", "participant_agent", "Zurie, your turn.", resolvedRecipientMembershipIds=["member-1"])
+        floor_saved = []
+
+        def floor_prepare(instance, binding):
+            binding.missed_sources = [{"source_event_id": "msg-2900", "source_seq": 2900}]
+            instance._persist_binding = lambda current: floor_saved.append(list(current.missed_sources)) or True
+
+        floor_text = build_message(attempt_ready(3000, 1, source="msg-2999"), attempt=cycle(used=0), roster=ROSTER,
+                                   context=(earlier, restart, late), starts_at=2950, prepare=floor_prepare).text
+        self.assertNotIn("Missed earlier", floor_text)
+        self.assertEqual(floor_saved[-1], [])
 
     def test_p2a_04_a_coordinated_ask_without_retry_starts_a_cycle_for_its_target(self):
         ask = {"id": "cmd-2980", "seq": 2980, "type": "human.command", "actorRole": "human_owner", "actorId": "owner-1",

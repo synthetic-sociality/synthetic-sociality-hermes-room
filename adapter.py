@@ -149,10 +149,13 @@ SESSION_RELEASE_POLL_SECONDS = 0.25
 SESSION_RELEASE_POLL_LIMIT = 40
 # One warning when a Room has waited this long for core's session release.
 SESSION_WAIT_WARN_SECONDS = 900.0
-# Contract P2a-1: a core that cannot report its session release (no
-# _session_task_is_stale / _session_tasks, e.g. Mac128 core 7a1aafb4e1) is
-# waited for at most this long, the attempt lease, then the queue proceeds as
-# without the gate. A run that holds the session longer has lost its attempt.
+# Contract P2a-1: a session guard the core cannot report on (no owner task in
+# _session_tasks, or no _session_task_is_stale at all; Mac128 core 7a1aafb4e1
+# has both but no _track_session_task, so its guards carry no owner task) is
+# waited for at most this long, then the queue proceeds as without the gate.
+# Lease renewal keeps a long run's attempt alive, so a run still active after
+# the bound receives the next event through core's busy path (steer,
+# interrupt or queue; gateway/run.py _handle_active_session_busy_message).
 SESSION_UNOBSERVABLE_WAIT_SECONDS = 120.0
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_HISTORY_INSTRUCTION = (
@@ -4620,8 +4623,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # Hermes core still owns this Room's session: a handoff now
                 # would be steered, interrupted, merged or dropped by its
                 # busy-session path and never get its own completion (R1).
-                self._dispatch_when_session_released(binding)
+                self._dispatch_when_session_released(binding, seq)
                 return
+            # Diagnostics (OP-12 P2a): every dispatch says how long it waited
+            # on the host session gate, so a silent agent shows its cause.
+            waited = time.time() - (getattr(self, "_session_wait_started", None) or {}).get(binding.room_id, time.time())
+            logger.info(
+                "Room %s seq %s dispatched to Hermes core after waiting %.1fs on the host session gate",
+                binding.room_id, seq, waited,
+            )
             self._end_session_wait(binding.room_id)
             event_id = str(event.get("id") or "")
             dispatch_generation = uuid.uuid4().hex
@@ -5045,9 +5055,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if not key or not isinstance(active, dict) or key not in active:
             return False
         stale = getattr(self, "_session_task_is_stale", None)
-        if callable(stale) and isinstance(getattr(self, "_session_tasks", None), dict):
+        owners = getattr(self, "_session_tasks", None)
+        if callable(stale) and isinstance(owners, dict) and owners.get(key) is not None:
             return not stale(key)
-        # Contract P2a-1: this core cannot report the release. Wait at most
+        # Contract P2a-1: no owner task, so this core cannot report the
+        # release (core's own stale check is False for an ownerless guard,
+        # which on 7a1aafb4e1 kept Real silent for hours). Wait at most
         # SESSION_UNOBSERVABLE_WAIT_SECONDS from the start of this wait, then
         # proceed as without the gate; say so once per Room.
         started = (getattr(self, "_session_wait_started", None) or {}).get(room_id)
@@ -5064,9 +5077,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
         return False
 
-    def _dispatch_when_session_released(self, binding: RoomBinding) -> None:
+    def _dispatch_when_session_released(self, binding: RoomBinding, seq: int = 0) -> None:
         """Resume this Room's queue once core's owner task for it has exited."""
-        self._note_session_wait(binding.room_id)
+        self._note_session_wait(binding.room_id, seq)
         waiters = getattr(self, "_session_release_waiters", None)
         if waiters is None:
             waiters = self._session_release_waiters = set()
@@ -5084,7 +5097,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # poll briefly. The watch loop's sweep also re-runs the queue.
         self._schedule_queue_resume(binding, poll=True)
 
-    def _note_session_wait(self, room_id: str) -> None:
+    def _note_session_wait(self, room_id: str, seq: int = 0) -> None:
         """Start, and once past the bound warn about, one session-release wait."""
         started = getattr(self, "_session_wait_started", None)
         if started is None:
@@ -5093,6 +5106,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if warned is None:
             warned = self._session_wait_warned = set()
         now = time.time()
+        if room_id not in started:
+            logger.info(
+                "Room %s seq %s waiting on the host session gate (Hermes core still holds the Room session)",
+                room_id, seq or "?",
+            )
         since = started.setdefault(room_id, now)
         if now - since > SESSION_WAIT_WARN_SECONDS and room_id not in warned:
             warned.add(room_id)

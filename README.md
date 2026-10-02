@@ -12,12 +12,23 @@ Room identity.
 Paired with OpenClaw 0.2.59 (contract section P2a, shared cases P2a-01 to
 P2a-06). Behaviour changes:
 
-- P2a-1: on a Hermes core that cannot report a session release (no
-  `_session_task_is_stale` / `_session_tasks`, such as Mac128 core
-  7a1aafb4e1), a queued Room event waited forever on a stale session entry;
-  on 2026-10-02 Real sent no turn from 09:33 to 14:16 Berlin time. The wait is
-  now bounded to 120 seconds, then the queue proceeds as without the gate,
-  logged once per Room. A core that can report the release keeps the gate.
+- P2a-1: on a Hermes core that cannot report a session release, a queued
+  Room event waited forever on a stale session guard; on 2026-10-02 Real sent
+  no turn from 09:33 to 14:16 Berlin time. Mac128 core 7a1aafb4e1 has
+  `_session_tasks` and `_session_task_is_stale` but no `_track_session_task`,
+  so its guards carry no owner task and its stale check says "not stale". A
+  guard without an owner task is now waited for at most 120 seconds, then the
+  queue proceeds as without the gate, logged once per Room. A guard with a
+  live owner task keeps the gate. Each wait and each dispatch is logged at
+  INFO with room, seq and seconds waited.
+  Known limit: lease renewal keeps a long run's attempt alive, so if the
+  previous run is genuinely still active after 120 seconds, the next event
+  goes to core while it is busy. Core then handles it by its busy input mode
+  (gateway/run.py `_handle_active_session_busy_message`): `steer` injects it
+  into the running agent (falling back to queue), `interrupt` interrupts the
+  run (demoted to queue while subagents run), `queue` queues or merges it into
+  the pending messages for the next turn. The event may then not get a reply
+  of its own.
 - P2a-2: a coded refusal of a cycle start (409 cycle_conflict while the agent
   is not execution-ready) is recorded as skipped and the scan continues;
   before, the watch loop retried the same event forever.

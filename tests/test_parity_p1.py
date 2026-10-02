@@ -555,10 +555,14 @@ class ParityP1Tests(unittest.TestCase):
 
 
 
-@unittest.skipUnless(
-    all(hasattr(CoreBase, name) for name in CORE_SESSION_METHODS),
-    "this Hermes core cannot report session release (no _session_task_is_stale/_track_session_task); "
-    "contract P2a-1 bounds the wait instead (test_p2a_01)",
+MISSING_CORE_SESSION_METHODS = [name for name in CORE_SESSION_METHODS if not hasattr(CoreBase, name)]
+
+
+@unittest.skipIf(
+    bool(MISSING_CORE_SESSION_METHODS),
+    f"this Hermes core lacks {', '.join(MISSING_CORE_SESSION_METHODS)} (Mac128 core 7a1aafb4e1 lacks "
+    "_track_session_task, so its session guards carry no owner task); contract P2a-1 bounds the wait "
+    "instead (test_p2a_01)",
 )
 class SessionReleaseTests(unittest.TestCase):
     """OP-12 R1/R2: the next Room event waits for Hermes core's session release."""
@@ -737,6 +741,10 @@ class SessionReleaseTests(unittest.TestCase):
             instance, binding, _api, busy, delivered, _hold = self.core_instance(None)
             instance._active_dispatch_rooms = {}
             instance._active_sessions[self.KEY] = asyncio.Event()
+            # A live owner task: an observable guard can wait this long (an
+            # ownerless one proceeds after SESSION_UNOBSERVABLE_WAIT_SECONDS).
+            owner = asyncio.get_running_loop().create_future()
+            instance._session_tasks[self.KEY] = owner
             instance._session_wait_started = {"room-1": time.time() - adapter.SESSION_WAIT_WARN_SECONDS - 1}
             with self.assertLogs(adapter.logger, level="WARNING") as logs:
                 for _ in range(3):
@@ -744,6 +752,7 @@ class SessionReleaseTests(unittest.TestCase):
                     instance._session_release_waiters.discard("room-1")
                 adapter.logger.warning("sentinel")
             del instance._active_sessions[self.KEY]
+            owner.set_result(None)
             await asyncio.sleep(0.3)
             return logs.output, delivered, instance
 
