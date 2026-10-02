@@ -63,6 +63,10 @@ def state_path_scope(path: Path) -> Iterator[None]:
 
 
 MISSED_SOURCE_LIMIT = 8
+# Contract P2c-2: the longest kept reply, in characters. A longer reply is not
+# kept (it is never shortened: the offer repeats the text verbatim).
+KEPT_REPLY_CHARACTER_LIMIT = 16_000
+KEPT_REPLY_KEYS = frozenset({"source_event_id", "source_seq", "epoch_id", "produced_at", "reason", "text"})
 
 
 @dataclass
@@ -149,6 +153,11 @@ class RoomBinding:
     # turn and then cleared. At most MISSED_SOURCE_LIMIT entries of
     # {"source_event_id": str, "source_seq": int}.
     missed_sources: list[dict[str, Any]] = field(default_factory=list)
+    # Contract P2c-2: at most one model reply per Room that was produced but
+    # not posted because the turn's authority had ended; the latest wins.
+    # Offered once on the next model turn in the same discussion, then cleared.
+    # {"source_event_id", "source_seq", "epoch_id", "produced_at", "reason", "text"}.
+    kept_reply: dict[str, Any] = field(default_factory=dict)
     epoch_session_routing_initialized: bool = False
     legacy_session_epoch_id: str = ""
     rotate_current_epoch_session: bool = False
@@ -188,6 +197,16 @@ class RoomBinding:
             )
         ):
             raise ValueError("Room missed sources are invalid")
+        kept = binding.kept_reply
+        if not isinstance(kept, dict) or (kept and (
+            set(kept) != KEPT_REPLY_KEYS
+            or not all(isinstance(kept[key], str) for key in KEPT_REPLY_KEYS - {"source_seq"})
+            or not isinstance(kept["source_seq"], int) or isinstance(kept["source_seq"], bool)
+            or kept["source_seq"] < 0
+            or not kept["text"] or len(kept["text"]) > KEPT_REPLY_CHARACTER_LIMIT
+            or not kept["source_event_id"] or not kept["epoch_id"]
+        )):
+            raise ValueError("Room kept reply is invalid")
         if not isinstance(binding.delivery_lifecycle, dict):
             raise ValueError("Room delivery lifecycle journal must be an object")
         if not isinstance(binding.resolved_delivery_lifecycle, dict):

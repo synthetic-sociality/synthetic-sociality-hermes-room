@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
-from . import cli, renewal
+from . import cli, local_status, renewal, secret_isolation
 from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
@@ -46,7 +46,10 @@ from .room_tools import (
     room_history,
     room_post,
 )
-from .state import MISSED_SOURCE_LIMIT, PluginState, RoomBinding, load, state_path, update, upsert
+from .state import (
+    KEPT_REPLY_CHARACTER_LIMIT, MISSED_SOURCE_LIMIT, PluginState, RoomBinding, load, state_path, state_root,
+    update, upsert,
+)
 
 
 def _epoch_thread_id(epoch_id: str) -> str:
@@ -70,6 +73,10 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 NAME = "synthetic_sociality"
 CONNECTOR_VERSION = "1.0.75"
 logger = logging.getLogger(__name__)
+# The fastest heartbeat cadence, whatever the server advertises.
+HEARTBEAT_MIN_INTERVAL_SECONDS = 2
+# Contract P2c-1: the start refusal is logged once per process.
+_SECRET_REFUSAL_LOGGED: set[bool] = set()
 _connected_rooms: set[str] = set()
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 _ROOM_ENVELOPE_FRAGMENT = re.compile(
@@ -362,12 +369,92 @@ def _on_pre_llm_call(**kwargs: Any) -> None:
     is_room_context(**kwargs)
 
 
+KEPT_REPLY_OPEN = "[Your own earlier reply, kept: it was produced but not posted]"
+KEPT_REPLY_CLOSE = "[/Your own earlier reply]"
+
+
+def _utc_minute(raw: str) -> str:
+    if not _valid_canonical_timestamp(raw):
+        return ""
+    moment = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    return f"{moment.strftime('%H:%M')} UTC"
+
+
+def _kept_reply_text(kept: dict[str, Any], source: dict[str, Any] | None, state: dict[str, Any]) -> str:
+    """Contract P2c-2: the offer, identical in OpenClaw (keptReplyBlock)."""
+    seq = int((source or {}).get("seq") or kept.get("source_seq") or 0)
+    answered = f"#{seq}" if seq > 0 else "an earlier message"
+    if source:
+        answered += f" {_room_actor_name(state, source)}"
+        when = _utc_minute(str(source.get("ts") or ""))
+        if when:
+            answered += f", {when}"
+    lines = [KEPT_REPLY_OPEN, f"Answered: {answered}"]
+    produced = _utc_minute(str(kept.get("produced_at") or ""))
+    if produced:
+        lines.append(f"Produced: {produced}")
+    lines.append(f"Not posted: {kept.get('reason') or 'superseded'}")
+    lines.append(str(kept.get("text") or ""))
+    lines.append(KEPT_REPLY_CLOSE)
+    return "\n".join(lines)
+
+
+def _status_error_code(error: "ProtocolError") -> str:
+    """A status code for a Room failure: the server code, else a fixed class."""
+    if error.code:
+        return error.code
+    if error.status:
+        return f"http_{int(error.status)}"
+    return "network"
+
+
+def _secret_store_dirs() -> list[Any]:
+    """The Room store directories of this process (default and scoped)."""
+    directories = [state_root(), state_path().parent]
+    return [directory for index, directory in enumerate(directories) if directory not in directories[:index]]
+
+
 def _on_pre_tool_call(
     tool_name: str = "", **kwargs: Any,
 ) -> dict[str, str] | None:
+    # Contract P2c-1, in every session: a file, search or patch path inside the
+    # Room store, or a shell/code call naming it, is refused. A fence error
+    # refuses too; older cores let a raising hook through.
+    try:
+        for directory in _secret_store_dirs():
+            blocked = secret_isolation.tool_call_block(tool_name, kwargs.get("args") or {}, directory)
+            if blocked:
+                logger.warning("Room connector refused a %s tool call that reaches its private state", tool_name or "tool")
+                return {"action": "block", "message": blocked}
+    except Exception:  # noqa: BLE001 - fail closed
+        logger.warning("Room connector refused a %s tool call: state fence unavailable", tool_name or "tool")
+        return {"action": "block", "message": secret_isolation.BLOCK_MESSAGE}
     if tool_name != "synthetic_sociality_room_post" or not is_room_context(**kwargs):
         return None
     return {"action": "block", "message": ROOM_ORIGIN_POST_BLOCK_MESSAGE}
+
+
+def _on_transform_tool_result(result: Any = None, **_kwargs: Any) -> str | None:
+    """Contract P2c-1: no tool result carries a Room credential to the model."""
+    scrubbed = secret_isolation.scrub(result)
+    return scrubbed if isinstance(result, str) and scrubbed != result else None
+
+
+class _SecretLogFilter(logging.Filter):
+    """Contract P2c-1: a Room credential never reaches a log line."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - leave malformed records to logging
+            return True
+        scrubbed = secret_isolation.scrub(message)
+        if scrubbed != message:
+            record.msg, record.args = scrubbed, None
+        return True
+
+
+logger.addFilter(_SecretLogFilter())
 
 
 def _on_session_end(**kwargs: Any) -> None:
@@ -946,6 +1033,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._state: PluginState = load()
         self._tasks: dict[str, asyncio.Task] = {}
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}
+        # Contract P2c-5: the host label is this machine's, read at start,
+        # never a value remembered in state.
+        self._host_label = platform.node()
+        # Rooms whose connector session this process registered (P2c-5: the
+        # first contact registers so the server holds current metadata; P2c-3:
+        # a lost session is registered again).
+        self._registered_rooms: set[str] = set()
+        secret_isolation.remember_secrets(self._state.bindings)
         # urllib's SSE reader blocks for the full stream lifetime.  Giving each
         # Room binding its own worker prevents long-lived stream reads from
         # exhausting asyncio's shared default executor, which is also used by
@@ -993,14 +1088,64 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # resolves only to an event this connector actually read from that Room.
         self._room_post_ids: dict[str, dict[int, str]] = {}
         self._state_file = state_path()
+        self._status = local_status.LocalStatus(
+            self._state_file.parent / "status.json",
+            plugin="hermes", version=CONNECTOR_VERSION, host_label=self._host_label,
+        )
+
+    def _status_room(self, binding: RoomBinding | None, room_id: str = "", **fields: Any) -> None:
+        """Contract P2c-4 status update; never raises into Room work."""
+        status = getattr(self, "_status", None)
+        if status is None:
+            return
+        try:
+            status.room(
+                binding.room_id if binding is not None else room_id,
+                binding.membership_id if binding is not None else "",
+                **fields,
+            )
+        except Exception:  # noqa: BLE001 - status is diagnostics only
+            logger.debug("Room local status update failed")
+
+    def _secret_store_reasons(self) -> list[str]:
+        reasons: list[str] = []
+        directories = [self._state_file.parent, *_secret_store_dirs()]
+        for index, directory in enumerate(directories):
+            if directory in directories[:index]:
+                continue
+            reasons.extend(code for code in secret_isolation.store_reachability(directory) if code not in reasons)
+        return reasons
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
+        # Contract P2c-1: never start while the agent's tools can reach the
+        # store that holds the Room credential.
+        reasons = self._secret_store_reasons()
+        if reasons:
+            status = getattr(self, "_status", None)
+            if status is not None:
+                status.set_secret_store("reachable")
+            for binding in self._state.bindings:
+                self._status_room(binding, connection="stopped", error_code=secret_isolation.REFUSAL_CODE)
+            if not _SECRET_REFUSAL_LOGGED:
+                _SECRET_REFUSAL_LOGGED.add(True)
+                logger.error(
+                    "Room connector refused to start: %s (%s). The agent's file, shell or code tools could "
+                    "read the Room credential; run them in a sandbox terminal backend that does not mount "
+                    "the Hermes home (terminal.backend: docker, no volume over HERMES_HOME).",
+                    secret_isolation.REFUSAL_CODE, ",".join(reasons),
+                )
+            return False
+        secret_isolation.remember_secrets(self._state.bindings)
+        status = getattr(self, "_status", None)
+        if status is not None:
+            status.set_secret_store("isolated")
         self._stop.clear()
         if any(renewal.eligible(binding) for binding in self._state.bindings):
             if self._renewal_task is None or self._renewal_task.done():
                 self._renewal_task = asyncio.create_task(self._renewal_loop(), name="room-renewal-maintenance")
         for binding in self._state.bindings:
             if binding.enabled and not binding.revoked and not binding.credential_rotation and binding.room_id not in self._tasks:
+                self._status_room(binding, connection="connecting")
                 self._tasks[binding.room_id] = asyncio.create_task(
                     self._watch(binding, is_reconnect=is_reconnect),
                     name=f"synthetic-sociality:{binding.room_id}",
@@ -1047,6 +1192,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     logger.debug("Room disconnect declaration failed", exc_info=True)
             _connected_rooms.discard(binding.room_id)
             self._lease_deadline.pop(binding.room_id, None)
+            self._status_room(binding, connection="stopped")
+        getattr(self, "_registered_rooms", set()).clear()
+        status = getattr(self, "_status", None)
+        if status is not None:
+            status.set_loaded(False)
         # These are process-local scheduling hints only. Durable pending
         # entries remain behind the acknowledgement cursor and replay after a
         # same-instance reconnect; stale ownership must not block that replay.
@@ -1878,6 +2028,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding, source_id, "terminal", status="superseded", suppress_errors=True,
             )
             self._log_outcome(binding, "superseded", source_id, "attempt_lease_lost", cycle_attempt)
+            self._keep_late_reply(binding, source_id, responds_to_id, observed_epoch, body, "attempt_lease_lost")
             return self._successful_terminal(
                 source_ref, dispatch_generation, f"superseded:{source_id}",
                 terminal_status="superseded", reason="attempt_lease_lost",
@@ -2003,6 +2154,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         getattr(self, "_cycle_attempts", {}).pop(source_id, None)
                         await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
                         self._log_outcome(binding, "superseded", source_id, "coordination_mode_changed", cycle_attempt)
+                        self._keep_late_reply(binding, source_id, responds_to_id, observed_epoch, body, "coordination_mode_changed")
                         return self._successful_terminal(
                             source_ref, dispatch_generation, f"superseded:{source_id}",
                             terminal_status="superseded", reason="coordination_mode_changed",
@@ -2130,6 +2282,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         suppress_errors=True,
                     )
                     self._log_outcome(binding, "superseded", source_id, "attempt_superseded", cycle_attempt)
+                    self._keep_late_reply(binding, source_id, responds_to_id, observed_epoch, body, "attempt_superseded")
                     return self._successful_terminal(
                         source_ref, dispatch_generation, f"superseded:{source_id}",
                         terminal_status="superseded", reason="attempt_superseded",
@@ -2277,6 +2430,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 await self._supersede_refused_post(binding, source_id, cycle_attempt)
                 await self._publish(binding, source_id, "terminal", status="superseded", suppress_errors=True)
                 self._log_outcome(binding, "superseded", source_id, error.code, cycle_attempt)
+                self._keep_late_reply(binding, source_id, responds_to_id, observed_epoch, body, error.code)
                 return self._successful_terminal(
                     source_ref, dispatch_generation, f"superseded:{source_id}",
                     terminal_status="superseded", reason=error.code,
@@ -2826,7 +2980,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         # advertised interval turns a reconnect into a rate
                         # limit storm, especially while an SSE connection is
                         # being re-established.
-                        interval = max(2, int(connector.get("heartbeatIntervalSeconds") or 10))
+                        interval = max(HEARTBEAT_MIN_INTERVAL_SECONDS, int(connector.get("heartbeatIntervalSeconds") or 10))
                         self._heartbeat_tasks[binding.room_id] = asyncio.create_task(
                             self._heartbeat_loop(binding, interval),
                             name=f"synthetic-sociality-heartbeat:{binding.room_id}",
@@ -2861,7 +3015,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         )
                         return
                     logger.warning("Room %s temporarily unavailable: %s", binding.room_id, error)
+                    self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     await asyncio.sleep(max(delay, min(error.retry_after, 120.0)))
+                    delay = min(delay * 2, 30)
+                except Exception as error:  # noqa: BLE001 - contract P2c-3
+                    # An unexpected failure must not end this Room's event
+                    # stream until a gateway restart: reconnect with the same
+                    # bounded backoff. Logged by type only (no body, no trace).
+                    logger.warning(
+                        "Room %s connector loop failed (%s); reconnecting", binding.room_id, type(error).__name__,
+                    )
+                    self._status_room(binding, connection="reconnecting", error_code="connector_error")
+                    await asyncio.sleep(delay)
                     delay = min(delay * 2, 30)
         finally:
             self._tasks.pop(binding.room_id, None)
@@ -2940,7 +3105,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     async def _ensure_connector(self, binding: RoomBinding) -> dict[str, Any]:
         await self._ensure_message_payload_contract(binding)
-        if binding.connector_session_id:
+        registered = getattr(self, "_registered_rooms", None)
+        if registered is None:
+            registered = self._registered_rooms = set()
+        # P2c-5: the first contact of this process registers (the server
+        # resumes the same installation's session with current metadata);
+        # later contacts heartbeat the session this process registered.
+        if binding.connector_session_id and binding.room_id in registered:
             try:
                 heartbeat = await self._call(
                     binding,
@@ -2955,12 +3126,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         metadata = {
             "runtimeName": "Hermes Agent",
             "runtimeVersion": os.environ.get("HERMES_VERSION", "unknown"),
-            "hostLabel": platform.node(),
+            "hostLabel": getattr(self, "_host_label", "") or platform.node(),
             "transport": "sse_preferred",
             "modelDescriptor": os.environ.get("HERMES_MODEL", "active Hermes profile model"),
         }
         session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata))
         binding.connector_session_id = session["sessionId"]
+        registered.add(binding.room_id)
         self._note_connected(binding, session)
         self._persist_binding(binding)
         return session
@@ -3049,11 +3221,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if not await self._refresh_binding(binding):
                     return
                 try:
-                    heartbeat = await self._call(
-                        binding,
-                        lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
-                    )
-                    self._note_connected(binding, heartbeat)
+                    if binding.room_id not in getattr(self, "_registered_rooms", {binding.room_id}):
+                        # Contract P2c-3: the Room no longer knows this
+                        # session (expired, removed, or not live for this
+                        # installation): register it again, no restart.
+                        logger.info("Room %s registering its connector session again", binding.room_id)
+                        await self._ensure_connector(binding)
+                    else:
+                        heartbeat = await self._call(
+                            binding,
+                            lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
+                        )
+                        self._note_connected(binding, heartbeat)
                     await self._accept_connector_enrollments(binding)
                     await self._publish(
                         binding,
@@ -3069,6 +3248,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         self._expire(binding)
                         return
                     logger.warning("Room %s heartbeat failed; lease will truthfully expire: %s", binding.room_id, error)
+                    self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
+                    if error.status == 404 or error.code == "connector_not_active":
+                        getattr(self, "_registered_rooms", set()).discard(binding.room_id)
                     # A 429 is a scheduling instruction, not a reason to
                     # keep probing.  Honour Retry-After before the next
                     # heartbeat; the room will truthfully show unavailable if
@@ -3077,6 +3259,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     deadline = self._lease_deadline.get(binding.room_id, 0)
                     if deadline and asyncio.get_running_loop().time() >= deadline:
                         _connected_rooms.discard(binding.room_id)
+                        # The lease is gone: the next contact registers.
+                        getattr(self, "_registered_rooms", set()).discard(binding.room_id)
                         if not _connected_rooms:
                             self._mark_disconnected()
         finally:
@@ -3167,6 +3351,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # HTML SPA fallback with HTTP 200.  Presence and ordinary Room
                 # work must continue for every compatibility shape.
                 if error.status in {404, 405, 501}:
+                    return
+                if error.code == "connector_not_active":
+                    # Contract P2c-3 (Wu and Real, Mac128, 2026-10-02): the
+                    # Room holds no live session for this installation. The
+                    # next heartbeat registers it again instead of repeating
+                    # this check until a restart.
+                    getattr(self, "_registered_rooms", set()).discard(source.room_id)
+                    self._status_room(source, connection="reconnecting", error_code=error.code)
+                    logger.warning(
+                        "Room %s connector enrollment check: no active connector session; registering again",
+                        source.room_id,
+                    )
                     return
                 logger.warning("Room connector enrollment check failed: %s", error)
                 return
@@ -4265,6 +4461,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding, state, seq, context_events, starts_at,
             {event_id, prompt_event_id, str(payload.get("sourceEventId") or "")},
         )
+        kept_block, kept_cleared = await self._kept_reply_block(
+            binding, state, context_events, str(active_epoch_id or ""), starts_at, seq,
+        )
         handover_context = ""
         try:
             handover_context = await self._epoch_handover_context(
@@ -4322,14 +4521,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # attempt-ready event's, which the model named as a reply target.
             f"[Synthetic Sociality Room event {event_id}]\n"
             f"{_runtime_capability_context(binding, state, transport=getattr(self, '_effective_transports', {}).get(binding.room_id) or binding.transport)}\n"
-            f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{current_input}{cycle_context}{''.join(chr(10) + line for line in missed_facts)}\n\n"
+            f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{current_input}{cycle_context}{''.join(chr(10) + line for line in missed_facts)}{chr(10) + chr(10) + kept_block if kept_block else ''}\n\n"
             f"{ROOM_HISTORY_INSTRUCTION} "
             f"{ROOM_IDENTITY_FACT} "
             f"{word_limit_fact}"
             f"{ROOM_RESPONSE_INSTRUCTION}"
         )
-        # Offered once, then cleared durably before core runs the turn (P2a-3).
+        # Offered once, then cleared durably before core runs the turn (P2a-3,
+        # P2c-2).
         self._clear_missed_sources(binding, missed_offered)
+        if kept_cleared:
+            self._clear_kept_reply(binding)
         # Bounded size telemetry for the pilot: character counts only, never
         # prompt, transcript or document content.
         logger.info(
@@ -4428,6 +4630,81 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     offered.pop()
                 logger.warning("Room %s missed source unavailable: code %s", binding.room_id, error.code or "-")
         return facts, offered
+
+    def _keep_late_reply(
+        self, binding: RoomBinding, source_id: str, responds_to_id: str, epoch_id: str,
+        body: Any, reason: str,
+    ) -> None:
+        """Keep a produced reply whose turn's authority ended (contract P2c-2).
+
+        At most one per Room, the latest wins; it never crosses discussions
+        (a refusal for a changed epoch keeps nothing). Never raises into the
+        delivery path: a reply that cannot be kept is only logged by code.
+        """
+        try:
+            text = body.strip() if isinstance(body, str) else ""
+            answered = str(responds_to_id or source_id or "")
+            if not text or not answered or not epoch_id or reason == "stale_epoch":
+                return
+            if len(text) > KEPT_REPLY_CHARACTER_LIMIT:
+                logger.info("Room %s reply not kept: code late_reply_too_large", binding.room_id)
+                return
+            seq = int(
+                binding.turn_sequences.get(answered)
+                or (getattr(self, "_event_seq", None) or {}).get(binding.room_id, {}).get(answered, 0)
+                or 0
+            )
+            binding.kept_reply = {
+                "source_event_id": answered,
+                "source_seq": seq,
+                "epoch_id": str(epoch_id),
+                "produced_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "reason": str(reason or "superseded"),
+                "text": text,
+            }
+            self._persist_binding(binding)
+            logger.info("Room %s kept a reply that was not posted: code %s", binding.room_id, reason or "-")
+        except Exception as error:  # noqa: BLE001 - keeping is best effort
+            logger.warning("Room %s reply could not be kept: %s", binding.room_id, type(error).__name__)
+
+    async def _kept_reply_block(
+        self, binding: RoomBinding, state: dict[str, Any], context_events: list[dict[str, Any]],
+        active_epoch_id: str, starts_at: int, current_seq: int,
+    ) -> tuple[str, bool]:
+        """The kept-reply offer (P2c-2) and whether the kept reply is cleared.
+
+        Procedural facts only: the source it answered, when it was produced,
+        why it was not posted, then the kept text verbatim under a label that
+        names it as the agent's own reply. No wording about what to do with it.
+        A kept reply from another discussion is cleared without an offer; one
+        whose source read fails stays for a later turn.
+        """
+        kept = binding.kept_reply
+        if not kept:
+            return "", False
+        source_seq = int(kept.get("source_seq") or 0)
+        if kept.get("epoch_id") != active_epoch_id or (source_seq and starts_at and source_seq < starts_at):
+            return "", True
+        source_id = str(kept.get("source_event_id") or "")
+        try:
+            source = next((
+                item for item in context_events
+                if item.get("type") == "message.posted" and str(item.get("id") or "") == source_id
+            ), None)
+            if source is None:
+                source = await self._call(binding, lambda api: _cycle_source_message(
+                    lambda after: api.events(binding.room_id, after, 0), source_id,
+                    before_seq=current_seq + 1, active_epoch_starts_at=starts_at,
+                ))
+        except ProtocolError as error:
+            logger.warning("Room %s kept reply source unavailable: code %s", binding.room_id, error.code or "-")
+            return "", False
+        return _kept_reply_text(kept, source, state), True
+
+    def _clear_kept_reply(self, binding: RoomBinding) -> None:
+        if binding.kept_reply:
+            binding.kept_reply = {}
+            self._persist_binding(binding)
 
     def _clear_missed_sources(self, binding: RoomBinding, offered: list[str]) -> None:
         if not offered:
@@ -5122,7 +5399,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
 
     def _end_session_wait(self, room_id: str) -> None:
-        (getattr(self, "_session_wait_started", None) or {}).pop(room_id, None)
+        started = (getattr(self, "_session_wait_started", None) or {}).pop(room_id, None)
+        if started is not None:
+            self._status_room(None, room_id, gate_wait_seconds=time.time() - started)
         (getattr(self, "_session_wait_warned", None) or set()).discard(room_id)
 
     def _room_awaits_session(self, room_id: str) -> bool:
@@ -5152,10 +5431,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         try:
             await self._dispatch_next_queued(binding)
-        except Exception:  # noqa: BLE001 - the stale sweep retries the queue
+        except Exception as error:  # noqa: BLE001 - the stale sweep retries the queue
             logger.warning(
-                "Room %s could not dispatch the next queued event after its session was released",
-                binding.room_id, exc_info=True,
+                "Room %s could not dispatch the next queued event after its session was released: %s",
+                binding.room_id, type(error).__name__,
             )
 
     async def _release_dispatch_at_record(
@@ -5186,11 +5465,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         try:
             await self._dispatch_next_queued(binding)
-        except Exception:  # noqa: BLE001 - the recorded outcome must reach Hermes
+        except Exception as error:  # noqa: BLE001 - the recorded outcome must reach Hermes
             # The queued event stays queued; the stale sweep dispatches it.
             logger.warning(
-                "Room %s could not dispatch the next queued event after recording source %s",
-                chat_id, source_id, exc_info=True,
+                "Room %s could not dispatch the next queued event after recording source %s: %s",
+                chat_id, source_id, type(error).__name__,
             )
 
     async def _settle_quarantined_send(
@@ -5456,6 +5735,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._lease_deadline[binding.room_id] = asyncio.get_running_loop().time() + remaining
         _connected_rooms.add(binding.room_id)
         self._mark_connected()
+        self._status_room(binding, connected=True)
 
     @staticmethod
     def _same_generation(left: RoomBinding, right: RoomBinding) -> bool:
@@ -5508,6 +5788,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             existing.delivery_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
             existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
             existing.missed_sources = [dict(item) for item in binding.missed_sources]
+            existing.kept_reply = dict(binding.kept_reply)
             merged_authority = copy.deepcopy(binding.delivery_authority)
             for key, durable_record in existing.delivery_authority.items():
                 if (
@@ -5657,6 +5938,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         return binding
 
     def _revoke(self, binding: RoomBinding) -> None:
+        self._status_room(binding, connection="stopped", error_code="credential_revoked")
         binding.revoked = True
         binding.enabled = False
         binding.connector_session_id = ""
@@ -5674,6 +5956,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _expire(self, binding: RoomBinding) -> None:
         """Stop an expired binding without turning expiry into revocation."""
+        self._status_room(binding, connection="stopped", error_code="credential_expired")
         binding.enabled = False
         binding.disabled_reason = "credential_expired"
         binding.connector_session_id = ""
@@ -5946,6 +6229,10 @@ def register(ctx) -> None:
     )
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    try:
+        ctx.register_hook("transform_tool_result", _on_transform_tool_result)
+    except Exception:  # noqa: BLE001 - a core without the hook keeps the other layers
+        logger.warning("Room connector: this Hermes core has no transform_tool_result hook")
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_finalize", _on_session_finalize)
     ctx.register_cli_command(

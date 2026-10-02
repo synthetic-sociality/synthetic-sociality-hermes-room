@@ -437,7 +437,10 @@ class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
             path = Path(directory) / "state.json"
             adapter_state = __import__(adapter.__package__ + ".state", fromlist=["save"])
             adapter_state.save(adapter.PluginState(bindings=[binding]), path)
-            with mock.patch.object(adapter, "load", lambda *_: adapter_state.load(path)):
+            # Contract P2c-1 start gate: this test is about maintenance, not the
+            # host tool backend (P2c-01 covers the gate).
+            with mock.patch.object(adapter, "load", lambda *_: adapter_state.load(path)), \
+                    mock.patch.object(adapter.secret_isolation, "store_reachability", lambda *_a, **_k: []):
                 self.assertTrue(adapter.validate_config(None))
                 instance = adapter.SyntheticSocialityAdapter(adapter.PlatformConfig())
                 instance._state_file = path
