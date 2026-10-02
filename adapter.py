@@ -521,6 +521,25 @@ def _cycle_source_body(event: dict[str, Any], payload: dict[str, Any]) -> str:
     return str(payload.get("body") or "").strip()
 
 
+# A coded 4xx refusal of POST /cycles is final for its source event; session
+# and credential codes, 429 and anything retryable keep the watch loop's
+# bounded retry (same rule as OpenClaw isCycleStartRefusal).
+_CYCLE_START_SESSION_CODES = frozenset({
+    "credential_expired", "credential_revoked", "connector_not_active", "busy", "credential_renewal_pending",
+})
+_REFUSAL_CODE = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")
+
+
+def _is_cycle_start_refusal(error: ProtocolError) -> bool:
+    return (
+        bool(_REFUSAL_CODE.match(str(error.code or "")))
+        and not error.retryable
+        and 400 <= int(error.status or 0) < 500
+        and int(error.status or 0) != 429
+        and error.code not in _CYCLE_START_SESSION_CODES
+    )
+
+
 def _cycle_prompt_event(
     event: dict[str, Any], payload: dict[str, Any], context_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -3636,6 +3655,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
                 return
             cycle = await self._ensure_discussion_cycle(binding, event, state=state)
+            if isinstance(cycle, dict) and cycle.get("refused"):
+                self._log_outcome(binding, "skipped", event_id, str(cycle["refused"]))
+                await self._complete_event(
+                    binding, seq, terminal_status="skipped", source_id=event_id,
+                    reason=str(cycle["refused"]),
+                )
+                return
             if cycle is None:
                 await self._complete_event(
                     binding, seq, terminal_status="ignored", source_id=event_id,
@@ -3774,6 +3800,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
         except ProtocolError as error:
             if error.code != "cycle_conflict":
+                if _is_cycle_start_refusal(error):
+                    return {"refused": error.code}
                 raise
             # The epoch may have advanced after the preflight state read.  A
             # source that is now historical is safely complete transport work;
@@ -3784,6 +3812,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             starts_at = int(fresh_epoch.get("startsAtSeq") or 0)
             if starts_at and int(event.get("seq") or 0) < starts_at:
                 return None
+            # A same-epoch conflict (for example this agent is not
+            # execution-ready) is final for this source: it is skipped with
+            # the Room's code instead of blocking every later event.
+            if _is_cycle_start_refusal(error):
+                return {"refused": error.code}
             raise
 
     async def _claim_discussion_attempt(

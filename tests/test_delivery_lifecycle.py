@@ -5585,6 +5585,81 @@ class ExploreOpenBaselineTests(unittest.TestCase):
         self.assertEqual([r["membershipId"] for r in starts[0]["roster"]], ["member-1"])
         self.assertEqual(completed[-1]["reason"], "cycle_source_context_only")
 
+    def test_refused_cycle_start_skips_its_source_and_later_events_proceed(self):
+        # Canary 2026-10-02 07:49 (OpenClaw Zurie; Hermes had the same rule):
+        # after a failed attempt the agent is not execution-ready, so starting
+        # the cycle for the owner's @mention 2964 is refused with 409
+        # cycle_conflict. Before: the error reached the watch loop, which
+        # retried 2964 forever. Now 2964 is skipped with that code and the next
+        # source (2965) starts its cycle normally.
+        binding = adapter.RoomBinding(
+            "https://room.example/api", "room-1", "member-1", "credential",
+            cursor=2963, acknowledged_cursor=2963,
+        )
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        for name, value in {
+            "_inflight_events": set(), "_event_seq": {}, "_event_epoch": {},
+            "_latest_source": {}, "_run_for_event": {}, "_activity_seq": {},
+            "_context_acknowledged_sources": set(), "_cycle_attempts": {},
+            "_cycle_response_sources": {}, "_source_coordination_modes": {},
+            "_open_reply_recipients": {}, "_queued_events": {},
+            "_active_dispatch_rooms": {}, "_event_dispatch_generation": {},
+            "_receive_locks": {}, "_ledger_locks": {}, "_terminal_sources": {},
+            "_terminal_results": {}, "_attempt_renewal_tasks": {},
+        }.items():
+            setattr(instance, name, value)
+        instance._persist_binding = lambda _binding: True
+        instance._state = types.SimpleNamespace(binding=lambda _room: binding)
+        starts, completed = [], []
+
+        class API:
+            def room_state(self, _room):
+                return {"headSeq": 2965, "activeEpoch": {"id": "epoch-z", "startsAtSeq": 2900}, "roster": [
+                    {"membershipId": "member-1", "displayName": "Zurie", "role": "participant_agent", "status": "active"},
+                ]}
+
+            def room_policy(self, _room):
+                return {"coordinationMode": "coordinated"}
+
+            def start_discussion_cycle(self, _room, request):
+                starts.append(request["sourceEventId"])
+                if request["sourceEventId"] == "msg-2964":
+                    raise adapter.ProtocolError("@Zurie your view?", status=409, code="cycle_conflict", retryable=False)
+                return {"id": "cycle-r"}
+
+            def activity(self, *_args):
+                return {"accepted": True}
+
+        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+        instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
+        instance._dispatch_next_queued = lambda _binding: asyncio.sleep(0)
+
+        def human(seq, body):
+            return {"id": f"msg-{seq}", "seq": seq, "type": "message.posted", "actorId": "owner",
+                    "actorRole": "human_owner",
+                    "payload": {"body": body, "resolvedRecipientMembershipIds": ["member-1"]}}
+
+        with self.assertLogs(adapter.logger, level="INFO") as logs:
+            asyncio.run(instance._consume(binding, human(2964, "@Zurie your view?")))
+        self.assertEqual(completed[-1], {"terminal_status": "skipped", "source_id": "msg-2964", "reason": "cycle_conflict"})
+        self.assertTrue(any("skipped" in line and "code cycle_conflict" in line for line in logs.output), logs.output)
+        self.assertFalse(any("your view" in line for line in logs.output))
+        asyncio.run(instance._consume(binding, human(2965, "@Zurie please try again.")))
+        self.assertEqual(starts, ["msg-2964", "msg-2965"])
+        self.assertEqual(completed[-1]["reason"], "cycle_source_context_only")
+        # Session codes, retryable and uncoded refusals keep the bounded retry.
+        for error, expected in (
+            (adapter.ProtocolError("x", status=409, code="cycle_conflict"), True),
+            (adapter.ProtocolError("x", status=409, code="stale_epoch"), True),
+            (adapter.ProtocolError("x", status=409, code=""), False),
+            (adapter.ProtocolError("x", status=409, code="cycle_conflict", retryable=True), False),
+            (adapter.ProtocolError("x", status=429, code="busy", retryable=True), False),
+            (adapter.ProtocolError("x", status=503, code="cycle_conflict", retryable=True), False),
+            (adapter.ProtocolError("x", status=401, code="credential_expired"), False),
+            (adapter.ProtocolError("x", status=0, code="", retryable=True), False),
+        ):
+            self.assertEqual(adapter._is_cycle_start_refusal(error), expected, (error.status, error.code))
+
     def test_reply_cap_refusal_is_a_successful_skipped_terminal(self):
         async def run():
             binding = lifecycle_binding()
