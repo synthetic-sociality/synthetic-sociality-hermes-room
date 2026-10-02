@@ -24,6 +24,7 @@ from . import cli, renewal
 from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
+from .context import count_messages_between as _count_messages_between
 from .context import cycle_source_message as _cycle_source_message
 from .context import epoch_start_event as _epoch_start_event
 from .context import recent_room_messages as _recent_room_messages
@@ -45,7 +46,7 @@ from .room_tools import (
     room_history,
     room_post,
 )
-from .state import PluginState, RoomBinding, load, state_path, update, upsert
+from .state import MISSED_SOURCE_LIMIT, PluginState, RoomBinding, load, state_path, update, upsert
 
 
 def _epoch_thread_id(epoch_id: str) -> str:
@@ -148,6 +149,11 @@ SESSION_RELEASE_POLL_SECONDS = 0.25
 SESSION_RELEASE_POLL_LIMIT = 40
 # One warning when a Room has waited this long for core's session release.
 SESSION_WAIT_WARN_SECONDS = 900.0
+# Contract P2a-1: a core that cannot report its session release (no
+# _session_task_is_stale / _session_tasks, e.g. Mac128 core 7a1aafb4e1) is
+# waited for at most this long, the attempt lease, then the queue proceeds as
+# without the gate. A run that holds the session longer has lost its attempt.
+SESSION_UNOBSERVABLE_WAIT_SECONDS = 120.0
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_HISTORY_INSTRUCTION = (
     "Earlier discussions and the library text are not preloaded. If your task needs an exact "
@@ -797,6 +803,37 @@ def _post_cycle_authority_attempt(
     }
 
 
+def _attempt_lease_remaining(cycle_attempt: dict[str, Any]) -> float:
+    """Seconds left on a held attempt's lease; 0 when expired or unknown."""
+    raw = str(((cycle_attempt or {}).get("attempt") or {}).get("leaseExpiresAt") or "")
+    if not _valid_canonical_timestamp(raw):
+        return 0.0
+    try:
+        expires = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    return max(0.0, (expires - datetime.now(timezone.utc)).total_seconds())
+
+
+def _is_transient_claim_failure(error: ProtocolError) -> bool:
+    """No answer, network, 429/5xx without a code, or the local renewal pause.
+
+    A refusal is anything the Room answered with a code or a non-retryable
+    4xx (same rule as OpenClaw claimHeldAttempt).
+    """
+    if error.code == "credential_renewal_pending":
+        return True
+    status = int(error.status or 0)
+    return not error.code and (error.retryable or not 400 <= status < 500)
+
+
+def _bounded_protocol(api: Any, seconds: float) -> Any:
+    """Bound one request of a RoomProtocol client (test doubles pass through)."""
+    if isinstance(api, RoomProtocol):
+        api.timeout = max(0.001, min(float(api.timeout), float(seconds)))
+    return api
+
+
 def _refreshed_claim_matches_expected(
     refreshed: dict[str, Any] | None,
     expected: dict[str, Any],
@@ -876,6 +913,12 @@ def env_enablement() -> dict[str, Any] | None:
 
 
 class SyntheticSocialityAdapter(BasePlatformAdapter):
+    # Contract P1-1 (revised), same values as OpenClaw 0.2.58: one re-claim
+    # answers within 4 s; a transient failure is retried every 5 s while the
+    # lease is valid.
+    ATTEMPT_RENEWAL_REQUEST_SECONDS = 4.0
+    ATTEMPT_RENEWAL_RETRY_SECONDS = 5.0
+
     supports_code_blocks = True
     REQUIRES_EDIT_FINALIZE = True
 
@@ -2063,8 +2106,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     terminal_status="posted", canonical_event_id=str(event.get("id") or ""),
                 )
             if cycle_attempt:
-                cycle_id = str((cycle_attempt.get("cycle") or {}).get("id") or "")
-                refreshed = await self._claim_discussion_attempt(binding, cycle_id)
+                refreshed = await self._claim_held_attempt(binding, source_id, cycle_attempt)
                 original_attempt_id = str((cycle_attempt.get("attempt") or {}).get("id") or "")
                 refreshed_attempt_id = str(((refreshed or {}).get("attempt") or {}).get("id") or "")
                 if not refreshed or refreshed_attempt_id != original_attempt_id:
@@ -2289,8 +2331,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "Discussion attempt authority was durably superseded",
                 code="attempt_authority_superseded", retryable=False,
             )
-        cycle = cycle_attempt.get("cycle") or {}
-        refreshed = await self._claim_discussion_attempt(binding, str(cycle.get("id") or ""))
+        refreshed = await self._claim_held_attempt(binding, source_id, cycle_attempt)
         active = _refreshed_claim_matches_expected(
             refreshed, cycle_attempt, binding.membership_id,
         )
@@ -3581,7 +3622,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             and not command.get("targetSelectors")
         )
         summarize_command = human_source and event_type == "human.command" and command.get("command") == "summarize"
-        if coordination_mode == "open" and event_type == "human.command" and not explicit_retry and not summarize_command:
+        # Contract P2a-4: an ask addressed to agents starts a cycle for its
+        # targets in open Rooms too, with or without retryUnavailable.
+        addressed_ask = (
+            human_source and event_type == "human.command"
+            and command.get("command") == "ask"
+            and bool(retry_targets)
+            and not str(payload.get("cycleId") or "").strip()
+        )
+        if coordination_mode == "open" and event_type == "human.command" and not explicit_retry and not addressed_ask and not summarize_command:
             # Structured bounded-discussion commands belong to coordinated
             # rooms. Ordinary open-room prose follows the free path; a human
             # "summarize now" is the open Room's synthesis (ADR 0089).
@@ -3657,6 +3706,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             cycle = await self._ensure_discussion_cycle(binding, event, state=state)
             if isinstance(cycle, dict) and cycle.get("refused"):
                 self._log_outcome(binding, "skipped", event_id, str(cycle["refused"]))
+                if event_type == "message.posted":
+                    # Refused before the model ran: offered next turn (P2a-3).
+                    self._note_missed_source(binding, event_id, seq)
                 await self._complete_event(
                     binding, seq, terminal_status="skipped", source_id=event_id,
                     reason=str(cycle["refused"]),
@@ -3681,6 +3733,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         elif payload.get("cycleId") and not summary_for_self:
             cycle_attempt = await self._claim_discussion_attempt(binding, str(payload.get("cycleId")))
         if (((human_source or agent_seed) and not open_message) or ready_for_self or (payload.get("cycleId") and not summary_for_self)) and not cycle_attempt:
+            if ready_for_self:
+                # Unclaimed or expired: the model never saw its source (P2a-3).
+                self._note_missed_source(binding, str(payload.get("sourceEventId") or ""))
             await self._complete_event(
                 binding, seq, terminal_status="superseded", source_id=event_id,
                 reason="discussion_attempt_unavailable",
@@ -3819,13 +3874,52 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 return {"refused": error.code}
             raise
 
+    async def _claim_held_attempt(
+        self, binding: RoomBinding, source_id: str, cycle_attempt: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Re-claim an attempt this connector holds (contract P1-1, revised).
+
+        Each claim is bounded by ATTEMPT_RENEWAL_REQUEST_SECONDS and never by
+        more than what is left of the lease. A refusal by the Room is final and
+        raised (cycle_no_attempt and cycle_superseded return None, as before);
+        a transient failure (no answer, network, 429 or 5xx without a code, or
+        this connector's own renewal pause) is retried every
+        ATTEMPT_RENEWAL_RETRY_SECONDS while the lease is valid and raised once
+        it has run out. Every failure is one log line: no traceback, no body.
+        """
+        cycle_id = str((cycle_attempt.get("cycle") or {}).get("id") or "")
+        attempt_id = str((cycle_attempt.get("attempt") or {}).get("id") or "-")
+        while True:
+            remaining = _attempt_lease_remaining(cycle_attempt)
+            bound = min(self.ATTEMPT_RENEWAL_REQUEST_SECONDS, remaining) if remaining > 0 else self.ATTEMPT_RENEWAL_REQUEST_SECONDS
+            try:
+                return await self._claim_discussion_attempt(binding, cycle_id, bound)
+            except ProtocolError as error:
+                transient = _is_transient_claim_failure(error)
+                remaining = _attempt_lease_remaining(cycle_attempt)
+                seq = int(
+                    binding.turn_sequences.get(source_id)
+                    or getattr(self, "_event_seq", {}).get(binding.room_id, {}).get(source_id, 0)
+                )
+                logger.warning(
+                    "Room %s attempt renewal failed source seq %s attempt %s code %s status %s %s",
+                    binding.room_id, seq or "?", attempt_id, error.code or "-", error.status or "-",
+                    f"transient; lease remaining {int(remaining * 1000)}ms" if transient else "refused",
+                )
+                stop = getattr(self, "_stop", None)
+                if not transient or remaining <= 0 or (stop is not None and stop.is_set()):
+                    raise
+                await asyncio.sleep(max(0.001, min(self.ATTEMPT_RENEWAL_RETRY_SECONDS, remaining)))
+
     async def _claim_discussion_attempt(
-        self, binding: RoomBinding, cycle_id: str,
+        self, binding: RoomBinding, cycle_id: str, request_seconds: float | None = None,
     ) -> dict[str, Any] | None:
         try:
             return await self._call(
                 binding,
-                lambda api: api.claim_discussion_attempt(binding.room_id, cycle_id),
+                lambda api: (
+                    _bounded_protocol(api, request_seconds) if request_seconds else api
+                ).claim_discussion_attempt(binding.room_id, cycle_id),
             )
         except ProtocolError as error:
             if error.code in {"cycle_no_attempt", "cycle_superseded"}:
@@ -3903,7 +3997,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         except ValueError:
                             pass
                     await asyncio.sleep(delay)
-                    refreshed = await self._claim_discussion_attempt(binding, cycle_id)
+                    refreshed = await self._claim_held_attempt(
+                        binding, source_event_id, cycle_attempts.get(source_event_id) or cycle_attempt,
+                    )
                     authority_key = _attempt_authority_key(
                         binding, source_event_id, cycle_attempt,
                     )
@@ -3984,12 +4080,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     cycle_attempts[source_event_id] = refreshed
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
+                # One line, no traceback: a traceback can carry request or
+                # response details (contract P1-5: code, seq and attempt only).
                 logger.warning(
-                    "Room %s discussion attempt renewal failed for source %s",
+                    "Room %s discussion attempt renewal failed for source %s: %s code %s",
                     binding.room_id,
                     source_event_id,
-                    exc_info=True,
+                    type(error).__name__,
+                    getattr(error, "code", "") or "-",
                 )
                 cycle_attempts.pop(source_event_id, None)
                 authority_key = _attempt_authority_key(binding, source_event_id, cycle_attempt)
@@ -4157,6 +4256,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         shared_context = _canonical_room_context(
             state, context_events, prompt_event_id, _policy_view(context_policy),
         )
+        missed_facts, missed_offered = await self._missed_source_facts(
+            binding, state, seq, context_events, starts_at,
+            {event_id, prompt_event_id, str(payload.get("sourceEventId") or "")},
+        )
         handover_context = ""
         try:
             handover_context = await self._epoch_handover_context(
@@ -4214,12 +4317,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # attempt-ready event's, which the model named as a reply target.
             f"[Synthetic Sociality Room event {event_id}]\n"
             f"{_runtime_capability_context(binding, state, transport=getattr(self, '_effective_transports', {}).get(binding.room_id) or binding.transport)}\n"
-            f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{current_input}{cycle_context}\n\n"
+            f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{current_input}{cycle_context}{''.join(chr(10) + line for line in missed_facts)}\n\n"
             f"{ROOM_HISTORY_INSTRUCTION} "
             f"{ROOM_IDENTITY_FACT} "
             f"{word_limit_fact}"
             f"{ROOM_RESPONSE_INSTRUCTION}"
         )
+        # Offered once, then cleared durably before core runs the turn (P2a-3).
+        self._clear_missed_sources(binding, missed_offered)
         # Bounded size telemetry for the pilot: character counts only, never
         # prompt, transcript or document content.
         logger.info(
@@ -4256,6 +4361,76 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             room_keys[binding.room_id] = session_key
         await self.handle_message(message_event)
         return True
+
+    def _note_missed_source(self, binding: RoomBinding, source_id: str, source_seq: int = 0) -> None:
+        """Record a source whose turn never reached the model (P2a-3)."""
+        if not source_id:
+            return
+        seq = int(source_seq or 0) or int(
+            binding.turn_sequences.get(source_id)
+            or (getattr(self, "_event_seq", None) or {}).get(binding.room_id, {}).get(source_id, 0)
+        )
+        kept = [item for item in binding.missed_sources if item.get("source_event_id") != source_id]
+        binding.missed_sources = [*kept, {"source_event_id": source_id, "source_seq": seq}][-MISSED_SOURCE_LIMIT:]
+        self._persist_binding(binding)
+
+    async def _missed_source_facts(
+        self, binding: RoomBinding, state: dict[str, Any], current_seq: int,
+        context_events: list[dict[str, Any]], starts_at: int, answered: set[str],
+    ) -> tuple[list[str], list[str]]:
+        """Fact lines for missed sources: number, speaker, time, newer count.
+
+        Nothing else and no wording about what to do (contract P1a-1, P2a-3).
+        A source this turn answers is cleared without an offer; one whose read
+        fails stays for a later turn.
+        """
+        facts: list[str] = []
+        offered: list[str] = []
+        for missed in list(binding.missed_sources):
+            source_id = str(missed.get("source_event_id") or "")
+            if source_id in answered:
+                offered.append(source_id)
+                continue
+            try:
+                source = next((
+                    item for item in context_events
+                    if item.get("type") == "message.posted" and str(item.get("id") or "") == source_id
+                ), None)
+                if source is None:
+                    source = await self._call(binding, lambda api, source_id=source_id: _cycle_source_message(
+                        lambda after: api.events(binding.room_id, after, 0), source_id,
+                        before_seq=current_seq, active_epoch_starts_at=starts_at,
+                    ))
+                offered.append(source_id)
+                source_seq = int((source or {}).get("seq") or 0)
+                if not source or source_seq <= 0 or source_seq >= current_seq:
+                    continue
+                newer, complete = await self._call(binding, lambda api, source_seq=source_seq: _count_messages_between(
+                    lambda after: api.events(binding.room_id, after, 0), source_seq, current_seq,
+                ))
+                time_text = ""
+                raw_ts = str(source.get("ts") or "")
+                if _valid_canonical_timestamp(raw_ts):
+                    moment = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+                    time_text = f", {moment.strftime('%H:%M')} UTC"
+                noun = "message" if newer == 1 and complete else "messages"
+                facts.append(
+                    f"Missed earlier: #{source_seq} {_room_actor_name(state, source)}{time_text}; "
+                    f"{newer}{'' if complete else '+'} newer {noun} since."
+                )
+            except ProtocolError as error:
+                if offered and offered[-1] == source_id:
+                    offered.pop()
+                logger.warning("Room %s missed source unavailable: code %s", binding.room_id, error.code or "-")
+        return facts, offered
+
+    def _clear_missed_sources(self, binding: RoomBinding, offered: list[str]) -> None:
+        if not offered:
+            return
+        binding.missed_sources = [
+            item for item in binding.missed_sources if item.get("source_event_id") not in offered
+        ]
+        self._persist_binding(binding)
 
     async def _epoch_handover_context(
         self, binding: RoomBinding, epoch_id: str, starts_at: int, event: dict[str, Any],
@@ -4870,7 +5045,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if not key or not isinstance(active, dict) or key not in active:
             return False
         stale = getattr(self, "_session_task_is_stale", None)
-        return not (callable(stale) and stale(key))
+        if callable(stale) and isinstance(getattr(self, "_session_tasks", None), dict):
+            return not stale(key)
+        # Contract P2a-1: this core cannot report the release. Wait at most
+        # SESSION_UNOBSERVABLE_WAIT_SECONDS from the start of this wait, then
+        # proceed as without the gate; say so once per Room.
+        started = (getattr(self, "_session_wait_started", None) or {}).get(room_id)
+        if started is None or time.time() - started < SESSION_UNOBSERVABLE_WAIT_SECONDS:
+            return True
+        logged = getattr(self, "_session_unobservable_logged", None)
+        if logged is None:
+            logged = self._session_unobservable_logged = set()
+        if room_id not in logged:
+            logged.add(room_id)
+            logger.warning(
+                "Room %s: Hermes core cannot report session release; proceeding after %.0fs without the gate",
+                room_id, time.time() - started,
+            )
+        return False
 
     def _dispatch_when_session_released(self, binding: RoomBinding) -> None:
         """Resume this Room's queue once core's owner task for it has exited."""
@@ -5295,6 +5487,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             }
             existing.delivery_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
             existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
+            existing.missed_sources = [dict(item) for item in binding.missed_sources]
             merged_authority = copy.deepcopy(binding.delivery_authority)
             for key, durable_record in existing.delivery_authority.items():
                 if (

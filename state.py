@@ -62,6 +62,9 @@ def state_path_scope(path: Path) -> Iterator[None]:
         _state_file.reset(token)
 
 
+MISSED_SOURCE_LIMIT = 8
+
+
 @dataclass
 class RoomBinding:
     base_url: str
@@ -141,6 +144,11 @@ class RoomBinding:
     # keep their current epoch on the legacy route; later epochs rotate. An
     # operator-authorized current reset sets rotate_current_epoch_session before
     # restart, causing initialization to omit the legacy baseline.
+    # Contract P2a-3: sources whose turn never reached the model (unclaimed or
+    # expired attempt, refused cycle start), offered once on the next model
+    # turn and then cleared. At most MISSED_SOURCE_LIMIT entries of
+    # {"source_event_id": str, "source_seq": int}.
+    missed_sources: list[dict[str, Any]] = field(default_factory=list)
     epoch_session_routing_initialized: bool = False
     legacy_session_epoch_id: str = ""
     rotate_current_epoch_session: bool = False
@@ -166,6 +174,20 @@ class RoomBinding:
             raise ValueError("Room current epoch rotation marker must be boolean")
         if binding.message_payload_dialect not in {"v1", "v2"}:
             raise ValueError("unsupported Room message payload dialect")
+        if (
+            not isinstance(binding.missed_sources, list)
+            or len(binding.missed_sources) > MISSED_SOURCE_LIMIT
+            or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("source_event_id"), str)
+                or not item["source_event_id"]
+                or len(item["source_event_id"]) > 128
+                or type(item.get("source_seq")) is not int
+                or item["source_seq"] < 0
+                for item in binding.missed_sources
+            )
+        ):
+            raise ValueError("Room missed sources are invalid")
         if not isinstance(binding.delivery_lifecycle, dict):
             raise ValueError("Room delivery lifecycle journal must be an object")
         if not isinstance(binding.resolved_delivery_lifecycle, dict):
@@ -385,12 +407,25 @@ class PluginState:
         return next((item for item in self.bindings if item.room_id == room_id), None)
 
 
+def assert_state_directory(directory: Path) -> Path:
+    """Contract P2a-5: never the filesystem root or a top-level directory.
+
+    The state directory is created and chmodded 0700; a state path such as
+    "/state.json" would otherwise chmod "/" (OpenClaw, 2026-10-02).
+    """
+    resolved = Path(os.path.abspath(str(directory)))
+    if len([part for part in resolved.parts if part not in (resolved.anchor, "")]) < 2:
+        raise ValueError("Synthetic Sociality state directory must be at least two levels below the filesystem root")
+    return resolved
+
+
 def load(path: Path | None = None) -> PluginState:
     target = path or state_path()
     if not target.exists():
         return PluginState()
     if target.is_symlink() or not target.is_file() or target.parent.is_symlink():
         raise ValueError("Synthetic Sociality state must be a regular file in a regular directory")
+    assert_state_directory(target.parent)
     os.chmod(target.parent, 0o700)
     os.chmod(target, 0o600)
     payload = json.loads(target.read_text(encoding="utf-8"))
@@ -406,6 +441,7 @@ def save(state: PluginState, path: Path | None = None) -> None:
     target = path or state_path()
     if target.is_symlink() or target.parent.is_symlink():
         raise ValueError("refusing to write Synthetic Sociality state through a symlink")
+    assert_state_directory(target.parent)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(target.parent, 0o700)
     encoded = json.dumps(asdict(state), indent=2, sort_keys=True) + "\n"
@@ -443,6 +479,7 @@ def _exclusive_state_lock(path: Path | None = None) -> Iterator[Path]:
     target = path or state_path()
     if target.is_symlink() or target.parent.is_symlink():
         raise ValueError("refusing to lock Synthetic Sociality state through a symlink")
+    assert_state_directory(target.parent)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(target.parent, 0o700)
     lock_path = target.parent / ".state.lock"
@@ -474,6 +511,7 @@ def binding_renewal_lock(room_id: str) -> Iterator[None]:
     target = state_path()
     if target.is_symlink() or target.parent.is_symlink():
         raise ValueError("refusing renewal through a symlink")
+    assert_state_directory(target.parent)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path = target.parent / (".renewal-" + hashlib.sha256(room_id.encode()).hexdigest() + ".lock")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)

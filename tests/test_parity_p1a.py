@@ -81,7 +81,7 @@ def build_prompt(event, **options):
 
 def build_message(event, *, attempt=None, policy=None, rules=None, context=(START, HUMAN, PEER),
                   epoch_id="epoch-2", starts_at=41, topic=None, library=(), artifacts=None, roster=None,
-                  keep_instance=None):
+                  keep_instance=None, prepare=None):
     """Return the exact MessageEvent the adapter hands to Hermes for ``event``."""
     captured = []
     instance = object.__new__(adapter.SyntheticSocialityAdapter)
@@ -115,6 +115,8 @@ def build_message(event, *, attempt=None, policy=None, rules=None, context=(STAR
     binding.epoch_session_routing_initialized = True
     binding.legacy_session_epoch_id = "epoch-1"
     instance._event_epoch[event["id"]] = epoch_id
+    if prepare is not None:
+        prepare(instance, binding)
     assert asyncio.run(instance._dispatch_room_event(binding, event, "generation"))
     if keep_instance is not None:
         keep_instance.append((instance, binding))

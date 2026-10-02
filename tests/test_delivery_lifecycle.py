@@ -5585,7 +5585,7 @@ class ExploreOpenBaselineTests(unittest.TestCase):
         self.assertEqual([r["membershipId"] for r in starts[0]["roster"]], ["member-1"])
         self.assertEqual(completed[-1]["reason"], "cycle_source_context_only")
 
-    def test_refused_cycle_start_skips_its_source_and_later_events_proceed(self):
+    def test_p2a_02_a_refused_cycle_start_is_skipped_and_the_scan_continues(self):
         # Canary 2026-10-02 07:49 (OpenClaw Zurie; Hermes had the same rule):
         # after a failed attempt the agent is not execution-ready, so starting
         # the cycle for the owner's @mention 2964 is refused with 409

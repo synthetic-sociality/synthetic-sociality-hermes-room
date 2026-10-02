@@ -555,6 +555,11 @@ class ParityP1Tests(unittest.TestCase):
 
 
 
+@unittest.skipUnless(
+    all(hasattr(CoreBase, name) for name in CORE_SESSION_METHODS),
+    "this Hermes core cannot report session release (no _session_task_is_stale/_track_session_task); "
+    "contract P2a-1 bounds the wait instead (test_p2a_01)",
+)
 class SessionReleaseTests(unittest.TestCase):
     """OP-12 R1/R2: the next Room event waits for Hermes core's session release."""
 

@@ -364,6 +364,33 @@ def cycle_source_message(
     return None
 
 
+def count_messages_between(
+    fetch_page: Callable[[int], dict[str, Any]], from_seq: int, to_seq: int,
+    *, max_scan: int = CONTEXT_SCAN_LIMIT,
+) -> tuple[int, bool]:
+    """Messages after ``from_seq`` and before ``to_seq`` (contract P2a-3).
+
+    Read forward page by page, at most ``max_scan`` sequence numbers; the
+    flag says whether the whole gap was counted (same in OpenClaw).
+    """
+    end = min(int(to_seq), int(from_seq) + 1 + max_scan)
+    after = int(from_seq)
+    count = 0
+    while after < end - 1:
+        last = after
+        for event in fetch_page(after).get("events") or []:
+            seq = int(event.get("seq") or 0)
+            if seq <= after or seq >= end:
+                continue
+            if event.get("type") == "message.posted":
+                count += 1
+            last = max(last, seq)
+        if last == after:
+            break
+        after = last
+    return count, int(to_seq) <= int(from_seq) + 1 + max_scan
+
+
 def epoch_start_event(
     fetch_page: Callable[[int], dict[str, Any]], starts_at_seq: int,
 ) -> dict[str, Any] | None:
