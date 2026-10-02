@@ -156,7 +156,7 @@ P2a-1 Bounded host waits. A connector never waits without bound for a host signa
 report the condition the connector waits for (for example, that the previous run released its session), the connector waits
 at most a bounded time, then proceeds as it would without the gate, and logs the fallback once per Room.
 
-P2a-2 Refused cycle start. A refusal of a cycle start with a code, or any other 4xx, is recorded as skipped with that code
+P2a-2 Refused cycle start. A refusal of a cycle start with a code is recorded as skipped with that code
 and acknowledged; the scan continues. Transient errors (network, timeout, 429, 5xx without code) keep the retry path.
 A refused start never stops the channel.
 
