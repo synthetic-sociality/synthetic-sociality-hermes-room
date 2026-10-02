@@ -23,8 +23,9 @@ only`, writes `"secretStore": "reachable"` with `secretStoreReasons` to
 `status.json`, and keeps running. Installing 1.0.76 does not need a host
 change.
 
-Enforcement is a per-installation switch, off by default. When it is on, the
-connector refuses to start while the store is reachable:
+Enforcement is a per-installation switch, off by default. Only the boolean
+`true` turns it on (a string such as `"true"` leaves it off). When it is on,
+the connector refuses to start while the store is reachable:
 
     platforms:
       synthetic_sociality:
@@ -46,8 +47,12 @@ Behaviour changes:
 - P2c-1: in both modes the store is fenced in every session. A file, search or patch
   path whose real path lies in `synthetic-sociality-room/` (or a search root
   that contains it), or a terminal/process/execute_code call that names it,
-  is refused; a fence error refuses. The exact credential and renewal-journal
-  values are removed from tool results and from this connector's log lines.
+  is refused; a fence error refuses. Relative paths resolve against the
+  tool's own cwd; a search without a path searches that cwd. The shell check
+  matches the store's own path (absolute, or from `~`, `$HOME` or
+  `$HERMES_HOME`), never the plugin's name. The exact credential and
+  renewal-journal values, including a renewed credential, are removed from
+  tool results and from this connector's log lines.
 - P2c-2: a reply the model produced but the Room refused because the turn had
   ended (lease lost, cycle superseded, no attempt, turn not active or
   expired) is kept, one per Room, and offered once on the next turn in the
