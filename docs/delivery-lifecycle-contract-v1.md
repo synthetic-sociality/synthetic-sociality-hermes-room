@@ -86,8 +86,10 @@ or replay authority changes. Only an explicit authorized retry starts new work.
 ## P1 — Refusal, attempt authority and failure reporting (2026-10-01)
 
 P1-1 Attempt authority. A connector that claims a cycle attempt keeps the lease alive while the model runs
-(renew by re-claim at max(1, min(30, remaining/3)) seconds) and re-claims once immediately before posting.
-A failed renewal or re-claim marks the attempt superseded, durably and monotonically; no post follows.
+(renew by re-claim at max(1, min(30, remaining/3)) seconds) and re-claims immediately before posting.
+A renewal or re-claim has failed when the Room refuses it or the lease has expired; a transient error (no answer,
+network, 429 or 5xx without a code) is retried within the remaining lease. A failed renewal or re-claim marks the
+attempt superseded, durably and monotonically; no post follows.
 
 P1-2 Post-time refusal classification. A refusal of POST /messages without a canonical receipt maps to exactly one outcome:
 - reply_cap_reached → skipped (unchanged);
