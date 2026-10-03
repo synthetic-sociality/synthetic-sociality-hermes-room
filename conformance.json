@@ -325,8 +325,13 @@
     "handshakeInputSha256": "b57282332bfec0ec897e670d2f9bdb065f4a7af4580bd1026c2e7354f94cfd69",
     "handshakeSignatureBase64": "WSmkKmc4G28NYbhVgWMdzqqgzkJZwJy3QKeDltp21CR19RpkGDVqHkgU5NCNELqVbvUgkEO8CfkgzKHMMfNuDQ=="
   },
+  "parityP5Contract": "docs/delivery-lifecycle-contract-v1.md#p5--cycle-documents-2026-10-03",
+  "parityP5Cases": {
+    "P5-01 every turn of a cycle carries the cycle source's attachments once, then the turn source's, within the limits": "test_p5_01_every_turn_of_a_cycle_carries_the_cycle_source_attachments"
+  },
   "parityContractSectionSha256": {
     "P3": "a689096e24f9fee13e0603006274c303f3435ee823f082a84a63b765deb8906b",
-    "L1": "ac4eb8a938f91a5c20fac6872708dbd4381ea6761201b94ab00574959a0e5d24"
+    "L1": "e400931b9658460e47c24f7bff350b1b62ac47733305fdd6bb34e355027a5ea4",
+    "P5": "776afe79731c53035b987217e6879afe51843ad4d2943ee3ccb6ec1b369296ee"
   }
 }

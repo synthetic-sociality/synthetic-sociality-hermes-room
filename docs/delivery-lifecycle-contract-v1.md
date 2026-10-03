@@ -470,7 +470,31 @@ recorded as skipped with that code and acknowledged; such a refusal never stops 
 (the Room's refusal of a start source) is a known code in both connectors. An HTTP 401 or 403 on a cycle start is a
 session or authorisation failure whatever its code (the Room answers 401 `unauthorized`, Room server 772ca32
 `server/api/authz.go:231-243`): it is never recorded skipped and never acknowledged; it takes the connector's existing
-session-failure path, and the source is processed again when the credential works. Every other refusal under this
-rule, including 404 `not_found` and 409 `room_closed`, stays terminal for its source. A skipped human message or human
+session-failure path, and the source is processed again when the credential works, within that path's retry bound.
+Raising is new for Hermes (1.0.77 skipped and acknowledged a 401 or 403): it raises into its watch loop, which retries
+the source within its existing pending budget, three stale periods of 180 seconds, and then quarantines it, as for
+`busy`. OpenClaw throws and stops the channel, as in 0.2.61; the source stays unacknowledged. Every other refusal under
+this rule, including 404 `not_found` and 409 `room_closed`, stays terminal for its source. A skipped human message or human
 command is recorded as a missed source and offered once (P2a-3), so it is never lost silently; a discussion start is
 not, as it is never a trigger (L1-16) and its topic reaches the agent as "Current discussion".
+
+## P5 — Cycle documents (2026-10-03)
+
+P5-1 Cycle documents. On every turn of a discussion cycle the document context holds the exact attachments of the
+cycle's source message, and in addition those of the turn's own source message when that is a different message. Each
+exact version (artifact and version id) appears once; there is no duplicate block. The cycle's source is the
+`sourceEventId` of the cycle the connector claimed: the claim response carries the cycle, whose `sourceEventId` is set
+once at cycle start (Room server 772ca32 `server/application/cycles/cycles.go` `Cycle`), while the
+`sourceEventId` of a `discussion.cycle_attempt_ready` names the turn's source, after the first turn usually the
+previous contribution. The existing limits are unchanged: at most 8 attachments and 64,000 characters in total; the
+cycle source's attachments come first, then the turn source's, cut at the limit as before. The library catalog rule
+and the untrusted-content framing are unchanged.
+
+P5-2 Unresolvable cycle source. The connector takes the cycle's source message from the loaded context, otherwise from
+the bounded epoch scan of P1a-8 (at most 2000 sequence numbers, never before the epoch start), and remembers it per
+cycle. When it cannot be resolved (outside the scan bound, or a Room error), the turn proceeds without it, and one log
+line with code `cycle_source_unresolved` says so (Room, cycle and source ids only). The turn is never failed or retried
+for it.
+
+P5-3 Outside a cycle. A message outside a cycle (an open Room turn without a claimed cycle attempt) is unchanged: its
+own attachments only.
