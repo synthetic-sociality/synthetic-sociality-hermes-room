@@ -7,6 +7,44 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.77 — Ledger, recovery and holes (parity P3)
+
+Paired with OpenClaw 0.2.61 (contract section P3, shared cases P3-01 to P3-09).
+No state migration in Hermes: the new `recovery_closures` field is additive.
+
+**Owner-run hole closures (after install, never automatic).** Two
+acknowledgement holes are documented (2026-09-22): Paula on the VPS, seq 379
+(a quarantined `cycle_superseded` intent), and Claude on Mac128, seq 383 (an
+owner message with no local record). Each is closed only by an audited command
+the owner runs, with the gateway running:
+
+    hermes --profile <profile> room recovery list <room>
+    hermes --profile <profile> room recovery close <room> --seq N --reason REASON --evidence REF --operator NAME
+    hermes --profile <profile> room recovery close <room> --seq N --reason REASON --evidence REF --operator NAME --apply --confirm TOKEN
+
+The first `close` is a dry run: it fetches the Room's proof read-only
+(`cycle_terminal` or `cycle_superseded` with `cycle:<id>`, `epoch_closed` with
+`epoch:<id>`) and prints the audit record and a confirmation token. With
+`--apply --confirm TOKEN` the record is appended to
+`<state>.recovery-audit.jsonl`. The running connector re-checks the proof,
+records terminal evidence and acknowledges through its normal path. No command
+edits a cursor, an intent or a quarantine.
+
+Behaviour changes:
+
+- P3-2: terminal delivery intents beyond the newest 32 per Room are pruned at
+  acknowledgement; quarantined and open intents never are.
+- P3-3: holes (a seq above the acknowledgement with no ledger entry and no
+  evidence) and held quarantines are reported in `status.json`
+  (`acknowledgedSeq`, `holeSeqs`, `quarantinedSeqs`, `ledgerCode`) and each
+  hole is logged once.
+- P3-5: the status directory is created 0700 when missing.
+- P3-6: known path arguments (`path`, `file`, `cwd`, `dir`, ...) are always
+  checked, whatever their shape (`read_file("state.json")` inside the store).
+- P3-7: `secretStore` is `isolated` without a sandbox when the profile's
+  `agent.disabled_toolsets` contains `terminal` and `code_execution`; the file
+  tools stay fenced. This is the route for hosts without Docker.
+
 ## 1.0.76 — Secrets, late replies, self-recovery (parity P2c)
 
 Paired with OpenClaw 0.2.60 (contract section P2c, shared cases P2c-01 to
