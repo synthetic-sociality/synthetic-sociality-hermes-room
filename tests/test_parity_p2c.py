@@ -112,6 +112,11 @@ class P2cTests(unittest.TestCase):
     def setUp(self):
         secret_isolation.forget_secrets()
         adapter._SECRET_REFUSAL_LOGGED.clear()
+        # The start gate asks core for its tool selection (P3-7); these cases
+        # pin a profile whose shell tool is live, whatever this host's config.
+        selection = mock.patch.object(adapter, "_core_tool_selection", lambda: ({"terminal", "read_file"}, []))
+        selection.start()
+        self.addCleanup(selection.stop)
 
     def tearDown(self):
         secret_isolation.forget_secrets()

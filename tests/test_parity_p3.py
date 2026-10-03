@@ -120,6 +120,34 @@ def profile(binding):
             yield path
 
 
+CORE_SELECTION = r"""
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from support import load_module
+adapter = load_module("adapter")
+names, mcp = adapter._core_tool_selection()
+print("RESULT " + json.dumps({"names": sorted(names) if names is not None else None, "mcp": mcp}))
+"""
+
+
+def core_selection(config_yaml):
+    """adapter._core_tool_selection() against the real core, in a clean interpreter."""
+    import subprocess
+    import sys
+    with tempfile.TemporaryDirectory() as scratch:
+        home = Path(scratch) / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text(config_yaml)
+        completed = subprocess.run(
+            [sys.executable, "-c", CORE_SELECTION, str(ROOT / "tests")], capture_output=True, text=True,
+            timeout=240, env={**os.environ, "HERMES_HOME": str(home), "HOME": scratch}, cwd=str(ROOT / "tests"),
+        )
+    line = next((item for item in completed.stdout.splitlines() if item.startswith("RESULT ")), "")
+    if not line:
+        raise AssertionError(f"core selection failed: rc={completed.returncode} {completed.stderr[-800:]!r}")
+    return json.loads(line[len("RESULT "):])
+
+
 def run_cli(*argv):
     parser = __import__("argparse").ArgumentParser()
     cli.setup_cli(parser)
@@ -368,6 +396,63 @@ class P3Tests(unittest.TestCase):
             self.assertEqual((refused.acks, binding.acknowledged_cursor, binding.recovery_closures), ([], 378, {}))
             self.assertEqual(binding.inbox["379"], "quarantined")
 
+        # A sealed record for another binding (client instance, membership or
+        # Room) is never applied to this one.
+        for field, value in (("clientInstanceId", "other-instance"), ("membership", "member-2"), ("room", "room-2")):
+            with self.subTest(binding_field=field), profile(paula_binding()) as path:
+                proven = recovery.server_proof(ProofRoom(), "room-1", "member-1", 379, "cycle_terminal", f"cycle:{CYCLE}")
+                record = recovery.build_record(
+                    connector="hermes/test", room_id="room-1", membership_id="member-1", client_instance_id="inst-1",
+                    seq=379, reason="cycle_terminal", evidence_ref=f"cycle:{CYCLE}", proven=proven,
+                    prior={"kind": "quarantine", "intentKey": "ev379", "lastErrorCode": "cycle_superseded"}, operator="o")
+                record[field] = value
+                record["confirmToken"] = recovery.confirm_token(record)
+                recovery.append_record(recovery.journal_path(path), recovery.seal(record))
+                room = ProofRoom()
+                binding = state_module.load(path).bindings[0]
+                asyncio.run(ledger_instance(binding, room, path)._apply_recovery_closures(binding))
+                self.assertEqual((room.acks, binding.recovery_closures, binding.acknowledged_cursor), ([], {}, 378))
+
+        # OP-12 F2/F3: a transient error is retried at the next iteration; any
+        # other error retires only that record, logged once; the loop goes on.
+        with profile(paula_binding()) as path:
+            proven = recovery.server_proof(ProofRoom(), "room-1", "member-1", 379, "cycle_terminal", f"cycle:{CYCLE}")
+            recovery.append_record(recovery.journal_path(path), recovery.seal(recovery.build_record(
+                connector="hermes/test", room_id="room-1", membership_id="member-1", client_instance_id="inst-1",
+                seq=379, reason="cycle_terminal", evidence_ref=f"cycle:{CYCLE}", proven=proven,
+                prior={"kind": "quarantine", "intentKey": "ev379", "lastErrorCode": "cycle_superseded"}, operator="o")))
+            flaky = ProofRoom()
+            failures = [adapter.ProtocolError("Room API unavailable: timed out", retryable=True), TimeoutError("slow")]
+            original = flaky.get_discussion_cycle
+
+            def cycle(room_id, cycle_id):
+                if failures:
+                    raise failures.pop(0)
+                return original(room_id, cycle_id)
+
+            flaky.get_discussion_cycle = cycle
+            binding = state_module.load(path).bindings[0]
+            instance = ledger_instance(binding, flaky, path)
+            with self.assertLogs(adapter.logger, level="WARNING") as logs:
+                for _ in range(3):
+                    asyncio.run(instance._apply_recovery_closures(binding))
+            self.assertEqual((flaky.acks, binding.acknowledged_cursor), ([382], 382))
+            self.assertEqual(len([line for line in logs.output if "not applied yet (retrying)" in line]), 1, logs.output)
+        with profile(paula_binding()) as path:
+            recovery.append_record(recovery.journal_path(path), recovery.seal(recovery.build_record(
+                connector="hermes/test", room_id="room-1", membership_id="member-1", client_instance_id="inst-1",
+                seq=379, reason="cycle_terminal", evidence_ref=f"cycle:{CYCLE}", proven=proven,
+                prior={"kind": "quarantine", "intentKey": "ev379", "lastErrorCode": "cycle_superseded"}, operator="o")))
+            broken = ProofRoom()
+            broken.get_discussion_cycle = lambda *_a: (_ for _ in ()).throw(KeyError("unexpected"))
+            binding = state_module.load(path).bindings[0]
+            instance = ledger_instance(binding, broken, path)
+            with self.assertLogs(adapter.logger, level="WARNING") as logs:
+                asyncio.run(instance._apply_recovery_closures(binding))
+                asyncio.run(instance._apply_recovery_closures(binding))
+            self.assertEqual(len([line for line in logs.output if "not applied: KeyError" in line]), 1, logs.output)
+            self.assertEqual((broken.acks, binding.recovery_closures), ([], {}))
+
     def test_p3_08_the_status_file_is_written_next_to_the_state_in_use_and_its_directory_is_created_0700(self):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "profile" / "synthetic-sociality-room" / "status.json"
@@ -375,6 +460,13 @@ class P3Tests(unittest.TestCase):
             self.assertTrue(status.write())
             self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            # The rule: the status file sits in the directory of the state file
+            # in use, wherever that state lives.
+            custom = Path(scratch) / "elsewhere" / "custom-state.json"
+            with mock.patch.object(adapter, "state_path", lambda: custom), \
+                    mock.patch.object(adapter, "load", lambda *_: adapter.PluginState()):
+                built = adapter.SyntheticSocialityAdapter(adapter.PlatformConfig())
+            self.assertEqual(built._status.path, custom.parent / "status.json")
         # Never a filesystem root or a top-level directory (P2a-5).
         self.assertFalse(local_status.LocalStatus(Path("/p3-status-test/status.json"), plugin="hermes",
                                                   version="x", host_label="h").write())
@@ -396,21 +488,47 @@ class P3Tests(unittest.TestCase):
                                                            args={"command": f"cat {store}/state.json"})["action"], "block")
             with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "HOME": scratch, "TERMINAL_CWD": scratch}):
                 self.assertIsNone(adapter._on_pre_tool_call(tool_name="read_file", args={"path": "notes.md"}))
-            # Denied shell, process and code tools: isolated without a sandbox.
+            # Denied tools, judged by core's own tool selection (exact names):
+            # none of terminal / process / process_manage / execute_code left.
             local = {"TERMINAL_ENV": "local"}
-            self.assertEqual(secret_isolation.store_reachability(store, local, mount_sources=[],
-                                                                 disabled_toolsets=["terminal", "code_execution"]), [])
-            self.assertEqual(secret_isolation.store_reachability(store, local, mount_sources=[],
-                                                                 disabled_toolsets=["terminal"]), ["host_shell_backend"])
-            self.assertEqual(secret_isolation.store_reachability(store, local, mount_sources=[]), ["host_shell_backend"])
+            reach = lambda **kw: secret_isolation.store_reachability(store, local, mount_sources=[], **kw)
+            self.assertEqual(reach(tool_names={"read_file", "patch", "search_files"}), [])
+            self.assertEqual(reach(tool_names={"read_file", "process"}), ["host_shell_backend"])
+            self.assertEqual(reach(tool_names={"read_file", "process_manage"}), ["host_shell_backend"])
+            self.assertEqual(reach(tool_names=None), ["host_shell_backend"])
+            # Computer use and MCP servers reach the host outside both routes.
+            self.assertEqual(reach(tool_names={"read_file", "computer_use"}), ["computer_use_tool"])
+            self.assertEqual(reach(tool_names={"read_file"}, mcp_servers=["filesystem"]), ["mcp_server_enabled"])
+            sandboxed = {"TERMINAL_ENV": "docker"}
+            self.assertEqual(secret_isolation.store_reachability(store, sandboxed, mount_sources=[], mcp_servers=["x"]),
+                             ["mcp_server_enabled"])
             instance = object.__new__(adapter.SyntheticSocialityAdapter)
             instance._state_file = store / "state.json"
             with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "TERMINAL_ENV": "local"}), \
-                    mock.patch.object(adapter, "_disabled_toolsets", lambda: ["web", "Terminal", "code_execution"]):
+                    mock.patch.object(adapter, "_core_tool_selection", lambda: ({"read_file", "patch"}, [])):
                 self.assertEqual(instance._secret_store_reasons(), [])
-            config = types.SimpleNamespace(load_config_readonly=lambda: {"agent": {"disabled_toolsets": "terminal, code_execution"}})
-            with mock.patch.dict("sys.modules", {"hermes_cli.config": config}):
-                self.assertEqual(adapter._disabled_toolsets(), ["terminal", "code_execution"])
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "TERMINAL_ENV": "local"}), \
+                    mock.patch.object(adapter, "_core_tool_selection", lambda: (None, [])):
+                self.assertEqual(instance._secret_store_reasons(), ["host_shell_backend"])
+
+        # The config forms from the OP-12 review, through the real core (its
+        # parse_config_string_list and get_tool_definitions) in a clean
+        # interpreter: a list and a JSON-array string deny; a comma string is
+        # one name and an off-case name matches nothing, so both stay live.
+        mcp = "mcp_servers:\n  alpha:\n    command: x\n  beta:\n    command: y\n    enabled: false\n"
+        forms = {
+            "list": ("agent:\n  disabled_toolsets:\n    - terminal\n    - code_execution\n", True),
+            "json_string": ("agent:\n  disabled_toolsets: '[\"terminal\", \"code_execution\"]'\n", True),
+            "comma_string": ("agent:\n  disabled_toolsets: terminal, code_execution\n", False),
+            "wrong_case": ("agent:\n  disabled_toolsets:\n    - Terminal\n    - code_execution\n", False),
+        }
+        for label, (agent, denied) in forms.items():
+            with self.subTest(form=label):
+                result = core_selection(agent + mcp)
+                self.assertEqual(result["mcp"], ["alpha"])
+                self.assertIsNotNone(result["names"], result)
+                self.assertEqual(not (set(result["names"]) & {"terminal", "process", "process_manage", "execute_code"}),
+                                 denied, result["names"])
 
 
 if __name__ == "__main__":

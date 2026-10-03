@@ -34,9 +34,12 @@ ISOLATING_BACKENDS = frozenset({
     "docker", "singularity", "modal", "managed_modal", "daytona", "vercel_sandbox",
 })
 SHELL_TOOLS = frozenset({"terminal", "process", "process_manage", "execute_code"})
-# Contract P3-7: the toolsets whose denial isolates the store without a
-# sandbox (terminal = terminal + process_manage, code_execution = execute_code).
-DENIED_TOOLSETS_FOR_ISOLATION = frozenset({"terminal", "code_execution"})
+# Contract P3-7: the tools that reach the host filesystem. With core's own
+# tool selection none of the shell/code tools may remain for the denied route
+# (process is process_manage on newer cores); computer use runs on the host
+# desktop in either route.
+HOST_SHELL_TOOL_NAMES = frozenset({"terminal", "process", "process_manage", "execute_code"})
+HOST_DESKTOP_TOOL_NAMES = frozenset({"computer_use"})
 # Contract P3-6: path arguments always resolved, whatever their shape.
 KNOWN_PATH_KEYS = frozenset({"path", "file_path", "file", "cwd", "dir", "directory", "root", "workdir"})
 SEARCH_TOOLS = frozenset({"search_files"})
@@ -94,21 +97,37 @@ def _sandbox_mount_sources() -> list[str]:
     return sources
 
 
-def shell_tools_denied(disabled_toolsets: Iterable[str] | None) -> bool:
-    """Contract P3-7: terminal and code_execution disabled for the profile."""
-    disabled = {str(item).strip().lower() for item in (disabled_toolsets or [])}
-    return DENIED_TOOLSETS_FOR_ISOLATION <= disabled
+def shell_tools_denied(tool_names: Iterable[str] | None) -> bool:
+    """Contract P3-7: core's own tool selection holds no shell or code tool.
+
+    ``tool_names`` is the set core selects for the profile (None when core
+    cannot report it, which denies nothing).
+    """
+    return tool_names is not None and not (HOST_SHELL_TOOL_NAMES & set(tool_names))
 
 
 def store_reachability(store_dir: str | os.PathLike[str], environ: Mapping[str, str] | None = None,
                        mount_sources: Iterable[str] | None = None,
-                       disabled_toolsets: Iterable[str] | None = None) -> list[str]:
+                       tool_names: Iterable[str] | None = None,
+                       mcp_servers: Iterable[str] = ()) -> list[str]:
     """Reason codes for which the agent's tools can reach the store; [] if none."""
     environ = os.environ if environ is None else environ
+    names = None if tool_names is None else set(tool_names)
+    reasons = _shell_route_reasons(store_dir, environ, mount_sources, names)
+    # Host-side tools outside both routes (P3-7).
+    if names is not None and HOST_DESKTOP_TOOL_NAMES & names:
+        reasons.append("computer_use_tool")
+    if list(mcp_servers):
+        reasons.append("mcp_server_enabled")
+    return reasons
+
+
+def _shell_route_reasons(store_dir: str | os.PathLike[str], environ: Mapping[str, str],
+                         mount_sources: Iterable[str] | None, names: set[str] | None) -> list[str]:
     store = _resolved(store_dir)
     reasons: list[str] = []
     backend = (environ.get("TERMINAL_ENV") or "local").strip().lower() or "local"
-    if shell_tools_denied(disabled_toolsets):
+    if shell_tools_denied(names):
         # No shell or code tool exists for the agent; the file tools are fenced
         # by the pre_tool_call hook (P2c-1, P3-7).
         return reasons

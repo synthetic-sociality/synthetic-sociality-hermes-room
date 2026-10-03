@@ -5,6 +5,11 @@ audit record keys, confirmation token and record digest. Nothing here writes a
 cursor, an acknowledgement, an intent or a quarantine. A closure is an
 append-only audit record; the running connector applies it through its normal
 acknowledgement path after re-checking the Room's proof.
+
+The record digest is an unkeyed sha256 and the operator name is not
+authenticated: anyone who can write the journal can write a well-formed record.
+Safety rests on the Room's proof being checked again when the record is
+applied (contract P3-4) and on the store fence that keeps agents out of it.
 """
 
 from __future__ import annotations

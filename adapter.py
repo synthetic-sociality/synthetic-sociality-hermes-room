@@ -436,17 +436,40 @@ def _on_pre_tool_call(
     return {"action": "block", "message": ROOM_ORIGIN_POST_BLOCK_MESSAGE}
 
 
-def _disabled_toolsets() -> list[str]:
-    """The profile's agent.disabled_toolsets (contract P3-7), [] if unreadable."""
+def _core_tool_selection() -> tuple[set[str] | None, list[str]]:
+    """Contract P3-7, as core resolves it: the tool names core selects for this
+    profile with its agent.disabled_toolsets (parsed by core's own
+    parse_config_string_list, exact names), and the enabled MCP servers.
+
+    Tool names are None when core cannot report its selection; that denies
+    nothing, so the shell route is then judged by the terminal backend alone.
+    """
     try:
         from hermes_cli.config import load_config_readonly  # Hermes core
 
-        value = ((load_config_readonly() or {}).get("agent") or {}).get("disabled_toolsets")
-    except Exception:  # noqa: BLE001 - unreadable config denies nothing
-        return []
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    return [str(item) for item in value] if isinstance(value, (list, tuple)) else []
+        config = load_config_readonly() or {}
+    except Exception:  # noqa: BLE001 - unreadable config: nothing denied
+        config = {}
+    servers = config.get("mcp_servers")
+    mcp = sorted(
+        str(name) for name, entry in servers.items()
+        if not (isinstance(entry, dict) and entry.get("enabled") is False)
+    ) if isinstance(servers, dict) else []
+    try:
+        from agent.skill_utils import parse_config_string_list  # Hermes core
+        import model_tools  # Hermes core
+
+        disabled = parse_config_string_list((config.get("agent") or {}).get("disabled_toolsets"))
+        definitions = model_tools.get_tool_definitions(
+            enabled_toolsets=None, disabled_toolsets=disabled or None, quiet_mode=True,
+        )
+        names = {
+            str(((item or {}).get("function") or {}).get("name") or (item or {}).get("name") or "")
+            for item in definitions or []
+        }
+        return {name for name in names if name}, mcp
+    except Exception:  # noqa: BLE001 - core cannot report its selection
+        return None, mcp
 
 
 def _tool_cwd(kwargs: dict[str, Any]) -> str:
@@ -1143,13 +1166,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _secret_store_reasons(self) -> list[str]:
         reasons: list[str] = []
-        disabled = _disabled_toolsets()
+        tool_names, mcp_servers = _core_tool_selection()
         directories = [self._state_file.parent, *_secret_store_dirs()]
         for index, directory in enumerate(directories):
             if directory in directories[:index]:
                 continue
             reasons.extend(
-                code for code in secret_isolation.store_reachability(directory, disabled_toolsets=disabled)
+                code for code in secret_isolation.store_reachability(
+                    directory, tool_names=tool_names, mcp_servers=mcp_servers,
+                )
                 if code not in reasons
             )
         return reasons
@@ -5308,7 +5333,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 recovery.read_records(recovery.journal_path(state_file)),
                 binding.room_id, binding.membership_id, binding.installation_id,
             )
-        except OSError:
+        except OSError as error:
+            if not getattr(self, "_journal_unreadable_logged", False):
+                self._journal_unreadable_logged = True
+                logger.warning("Room recovery journal could not be read: %s", type(error).__name__)
             return
         refused = getattr(self, "_refused_closures", None)
         if refused is None:
@@ -5316,31 +5344,55 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         for seq in sorted(records):
             record = records[seq]
             marker = (binding.room_id, seq, record["recordDigest"])
-            if str(seq) in binding.recovery_closures or seq <= binding.acknowledged_cursor or marker in refused:
+            recorded = str(seq) in binding.recovery_closures
+            if seq <= binding.acknowledged_cursor or marker in refused:
                 continue
             try:
-                recovery.prior_state(binding, seq)
-                proven = await self._call(binding, lambda api, record=record: recovery.server_proof(
-                    api, binding.room_id, binding.membership_id, record["seq"], record["reason"], record["evidenceRef"],
-                ))
-                if proven["eventId"] != record["eventId"]:
-                    raise recovery.RecoveryRefused("evidence_mismatch", "the Room's event differs from the record")
-            except (recovery.RecoveryRefused, ProtocolError) as error:
-                refused.add(marker)
-                logger.warning("Room %s recovery closure for seq %s not applied: %s",
-                               binding.room_id, seq, getattr(error, "code", "") or "unavailable")
+                if not recorded:
+                    recovery.prior_state(binding, seq)
+                    proven = await self._call(binding, lambda api, record=record: recovery.server_proof(
+                        api, binding.room_id, binding.membership_id, record["seq"], record["reason"], record["evidenceRef"],
+                    ))
+                    if proven["eventId"] != record["eventId"]:
+                        raise recovery.RecoveryRefused("evidence_mismatch", "the Room's event differs from the record")
+                    # Recorded before completion: a transient acknowledgement
+                    # failure is then retried without proving it again, and the
+                    # closed source never trips the orphaned-intent stop.
+                    binding.recovery_closures[str(seq)] = {
+                        "recordDigest": record["recordDigest"],
+                        "appliedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    }
+                    self._persist_binding(binding)
+                await self._complete_event(
+                    binding, seq, terminal_status="ignored", source_id=record["eventId"],
+                    reason=f"{recovery.CLOSURE_EVIDENCE_PREFIX}{record['reason']}", preserve_intents=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - one record never stalls the watch loop
+                # OP-12 P3 F2/F3: a refusal or a final error retires the record;
+                # a network, timeout or retryable Room error is tried again at
+                # the next iteration. Each outcome is logged once.
+                transient = isinstance(error, (OSError, asyncio.TimeoutError, TimeoutError)) or (
+                    isinstance(error, ProtocolError) and error.retryable
+                )
+                code = getattr(error, "code", "") or type(error).__name__
+                notice = (binding.room_id, seq, record["recordDigest"], "transient" if transient else "refused")
+                logged = getattr(self, "_closure_notices", None)
+                if logged is None:
+                    logged = self._closure_notices = set()
+                if notice not in logged:
+                    logged.add(notice)
+                    logger.warning(
+                        "Room %s recovery closure for seq %s not applied%s: %s", binding.room_id, seq,
+                        " yet (retrying)" if transient else "", code,
+                    )
+                if not transient:
+                    refused.add(marker)
                 continue
-            await self._complete_event(
-                binding, seq, terminal_status="ignored", source_id=record["eventId"],
-                reason=f"{recovery.CLOSURE_EVIDENCE_PREFIX}{record['reason']}", preserve_intents=True,
-            )
-            binding.recovery_closures[str(seq)] = {
-                "recordDigest": record["recordDigest"],
-                "appliedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            }
-            self._persist_binding(binding)
-            logger.warning("Room %s recovery closure applied: seq %s, reason %s, operator %s",
-                           binding.room_id, seq, record["reason"], record["operator"])
+            if not recorded:
+                logger.warning("Room %s recovery closure applied: seq %s, reason %s, operator %s",
+                               binding.room_id, seq, record["reason"], record["operator"])
 
     async def _release_cycle_attempt_after_failure(
         self, binding: RoomBinding, event_id: str, reason: str,
