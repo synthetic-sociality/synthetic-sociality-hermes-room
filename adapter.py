@@ -72,7 +72,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.78"
+CONNECTOR_VERSION = "1.0.79"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -716,6 +716,11 @@ _REFUSAL_CODE = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")
 # missed source. A discussion start is not one: it is never a trigger (L1-16)
 # and its topic reaches the agent as "Current discussion".
 MISSED_SOURCE_EVENT_TYPES = frozenset({"message.posted", "human.command"})
+# Contract P5-1: the event types a cycle's source can be (a message, a human
+# command, or the discussion start of P1a-5), and how many resolved cycle
+# sources are remembered (same in OpenClaw).
+CYCLE_DOCUMENT_SOURCE_TYPES = ("message.posted", "human.command", "discussion.started")
+CYCLE_DOCUMENT_SOURCE_CACHE = 32
 
 
 def _is_cycle_start_refusal(error: ProtocolError) -> bool:
@@ -1564,7 +1569,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         )
         if seq < 1:
             return
-        await self._complete_event(
+        await self._complete_event_durably(
             binding,
             seq,
             terminal_status=status,
@@ -2613,8 +2618,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     or 0
                 )
                 if source_seq > 0:
-                    await self._complete_event(
-                        binding, source_seq, terminal_status="failed", source_id=source_id, reason="message_too_large",
+                    # OP-12 P4 r3 finding 1: a failed acknowledgement after the
+                    # durable write aborts neither the attempt release, the
+                    # activity nor the terminal result.
+                    await self._complete_event_durably(
+                        binding, source_seq, terminal_status="failed", source_id=source_id,
+                        reason="message_too_large",
                     )
                 else:
                     self._persist_binding(binding)
@@ -4699,6 +4708,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
         except Exception as error:
             logger.warning("Room %s handover context unavailable: %s", binding.room_id, error)
+        cycle_attempt = getattr(self, "_cycle_attempts", {}).get(event_id)
+        # Contract P5-1: the cycle's source message keeps its attachments on
+        # every turn of the cycle; never a failed or delayed turn.
+        cycle_source = await self._cycle_document_source(
+            binding, cycle_attempt, [prompt_event, event, *context_events], seq, starts_at,
+        )
         try:
             artifact_context = await self._call(
                 binding,
@@ -4707,11 +4722,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     context_events,
                     lambda artifact_id: api.artifact(binding.room_id, artifact_id),
                     list((api.artifacts(binding.room_id).get("items") or [])),
+                    cycle_source=cycle_source,
                 ),
             )
         except Exception as error:
             logger.warning("Room %s document context unavailable: %s", binding.room_id, error)
-        cycle_attempt = getattr(self, "_cycle_attempts", {}).get(event_id)
         cycle_context = ""
         if cycle_attempt:
             cycle, attempt = cycle_attempt["cycle"], cycle_attempt["attempt"]
@@ -4796,6 +4811,59 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             room_keys[binding.room_id] = session_key
         await self.handle_message(message_event)
         return True
+
+    async def _cycle_document_source(
+        self,
+        binding: RoomBinding,
+        cycle_attempt: dict[str, Any] | None,
+        loaded: list[dict[str, Any]],
+        before_seq: int,
+        starts_at: int,
+    ) -> dict[str, Any] | None:
+        """The source message of the claimed cycle, for its attachments (P5-1).
+
+        The claim response's ``cycle.sourceEventId`` names the message that
+        started the cycle (Room server 772ca32 ``cycles.go`` ``Cycle``, written
+        once at cycle start). It is taken from the loaded context, otherwise
+        from the bounded epoch scan, and remembered per cycle. When it cannot
+        be resolved the turn proceeds without it and one coded line is logged.
+        """
+        cycle = (cycle_attempt or {}).get("cycle") or {}
+        source_id = str(cycle.get("sourceEventId") or "").strip() if isinstance(cycle, dict) else ""
+        if not source_id:
+            return None
+        for item in loaded:
+            if isinstance(item, dict) and str(item.get("id") or "") == source_id:
+                return item
+        cache = getattr(self, "_cycle_source_events", None)
+        if cache is None:
+            cache = self._cycle_source_events = {}
+        key = (binding.room_id, str(cycle.get("id") or ""), source_id)
+        if key in cache:
+            return cache[key]
+        reason = "not_found"
+        found = None
+        try:
+            found = await self._call(
+                binding,
+                lambda api: _cycle_source_message(
+                    lambda after: api.events(binding.room_id, after, 0), source_id,
+                    before_seq=before_seq, active_epoch_starts_at=starts_at,
+                    types=CYCLE_DOCUMENT_SOURCE_TYPES,
+                ),
+            )
+        except Exception as error:
+            reason = type(error).__name__
+        if not isinstance(found, dict):
+            logger.warning(
+                "Room %s cycle source documents unavailable: code cycle_source_unresolved cycle %s source %s reason %s",
+                binding.room_id, cycle.get("id") or "-", source_id, reason,
+            )
+            return None
+        cache[key] = found
+        while len(cache) > CYCLE_DOCUMENT_SOURCE_CACHE:
+            cache.pop(next(iter(cache)))
+        return found
 
     def _note_missed_source(self, binding: RoomBinding, source_id: str, source_seq: int = 0) -> None:
         """Record a source whose turn never reached the model (P2a-3)."""
@@ -5261,6 +5329,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         canonical_event_id: str = "",
         reason: str = "",
         preserve_intents: bool = False,
+        defer_ack_failure: bool = False,
     ) -> None:
         ledger_locks = getattr(self, "_ledger_locks", None)
         if ledger_locks is None:
@@ -5276,7 +5345,31 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 canonical_event_id=canonical_event_id,
                 reason=reason,
                 preserve_intents=preserve_intents,
+                defer_ack_failure=defer_ack_failure,
             )
+
+    async def _complete_event_durably(
+        self,
+        binding: RoomBinding,
+        seq: int,
+        *,
+        terminal_status: str,
+        source_id: str,
+        canonical_event_id: str = "",
+        reason: str = "",
+    ) -> None:
+        """``_complete_event`` whose acknowledgement may fail after the durable write.
+
+        OP-12 P4 r3 finding 1: the terminal evidence is persisted before the
+        acknowledgement. When only that acknowledgement fails, the caller's
+        release, activity and terminal result still follow, and the next
+        acknowledgement covers the contiguous frontier. A failure before or
+        during the write is raised as before.
+        """
+        await self._complete_event(
+            binding, seq, terminal_status=terminal_status, source_id=source_id,
+            canonical_event_id=canonical_event_id, reason=reason, defer_ack_failure=True,
+        )
 
     @staticmethod
     def _terminal_evidence_valid(status: str, evidence: dict[str, Any]) -> bool:
@@ -5302,6 +5395,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         canonical_event_id: str,
         reason: str,
         preserve_intents: bool = False,
+        defer_ack_failure: bool = False,
     ) -> None:
         key = str(seq)
         if (
@@ -5438,13 +5532,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             cursor += 1
         if cursor == binding.acknowledged_cursor:
             return
-        response = await self._call(binding, lambda api: api.acknowledge(binding.room_id, cursor))
-        authoritative = (response or {}).get("acknowledgedSeq")
-        if type(authoritative) is not int or authoritative != cursor:
-            raise ProtocolError(
-                "Room acknowledgement did not confirm the locally proven contiguous frontier",
-                code="ack_frontier_mismatch", retryable=True,
+        try:
+            response = await self._call(binding, lambda api: api.acknowledge(binding.room_id, cursor))
+            authoritative = (response or {}).get("acknowledgedSeq")
+            if type(authoritative) is not int or authoritative != cursor:
+                raise ProtocolError(
+                    "Room acknowledgement did not confirm the locally proven contiguous frontier",
+                    code="ack_frontier_mismatch", retryable=True,
+                )
+        except Exception as error:
+            if not defer_ack_failure:
+                raise
+            # The completion evidence above is durable; the acknowledgement
+            # is retried with the next contiguous frontier (OP-12 P4 r3 #1).
+            logger.warning(
+                "Room %s acknowledgement deferred at seq %s after durable evidence: %s code %s",
+                binding.room_id, cursor, type(error).__name__, getattr(error, "code", "") or "-",
             )
+            return
         binding.acknowledged_cursor = cursor
         binding.cursor = max(binding.cursor, cursor)
         binding.inbox = {

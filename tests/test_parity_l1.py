@@ -1192,5 +1192,99 @@ class L1R2LinkTests(LinkTestCase):
         self.assertNotIn(FAKE_PAIRING_SECRET, out)
 
 
+
+# Every shape of a bad link-pending.json (OP-12 P4 r3 finding 3): the state
+# as a list or an object, deeply nested JSON, other JSON, bytes that are not
+# UTF-8, and a symlink.
+BAD_PENDING_SHAPES = {
+    "state_list": json.dumps({"schema": link.LINK_SCHEMA, "state": ["pending"]}).encode(),
+    "state_object": json.dumps({"schema": link.LINK_SCHEMA, "state": {"pending": True}}).encode(),
+    "deeply_nested": b"[" * 100_000 + b"]" * 100_000,
+    "top_level_list": b"[1, 2, 3]",
+    "not_utf8": b"\xff\xfe{",
+}
+
+
+class P5LinkTests(LinkTestCase):
+    """OP-12 P4 r3 findings 3, 5 and 7 (carried into P5)."""
+
+    def bad_pending(self, shape):
+        pending_file = link.pending_path(self.record_path)
+        pending_file.parent.mkdir(parents=True, exist_ok=True)
+        if shape == "symlink":
+            target = self.scratch / "elsewhere.json"
+            target.write_bytes(b"{}")
+            pending_file.symlink_to(target)
+        else:
+            pending_file.write_bytes(BAD_PENDING_SHAPES[shape])
+        return pending_file
+
+    async def test_no_bad_pending_shape_stops_a_valid_link(self):
+        for shape in (*BAD_PENDING_SHAPES, "symlink"):
+            with self.subTest(shape=shape):
+                async with Harness() as harness:
+                    self.active_record(harness.audience)
+                    pending_file = self.bad_pending(shape)
+                    self.status_path.unlink(missing_ok=True)
+                    task = await self.running(self.service())
+                    ws, _ = await harness.accept()
+                    await until(lambda: self.status_link()["state"] == "connected")
+                    await ws.close()
+                    await self._stop(task)
+                    pending_file.unlink()
+
+    def test_unlink_with_any_bad_pending_shape(self):
+        for shape in (*BAD_PENDING_SHAPES, "symlink"):
+            with self.subTest(shape=shape):
+                self.active_record("https://rooms.example/tokenwerk/room/v1/local-devices/connect")
+                pending_file = self.bad_pending(shape)
+                code, out, err, _prompt = run_cli("unlink")
+                self.assertEqual(code, 0, err)
+                self.assertFalse(self.record_path.exists())
+                self.assertFalse(pending_file.exists() or pending_file.is_symlink())
+                self.assertNotIn("Traceback", out + err)
+        # A symlinked pending file is removed, never its target.
+        self.assertEqual((self.scratch / "elsewhere.json").read_bytes(), b"{}")
+
+    def test_bad_pending_digest_is_bounded_and_follows_no_symlink(self):
+        self.store.mkdir(parents=True, exist_ok=True)
+        pending_file = link.pending_path(self.record_path)
+        big = os.urandom(link.BAD_FILE_DIGEST_BYTES) + b"tail beyond the bound"
+        pending_file.write_bytes(big)
+        expected = hashlib.sha256(f"{len(big)}:".encode() + big[:link.BAD_FILE_DIGEST_BYTES]).hexdigest()
+        self.assertEqual(link._bad_file_digest(pending_file), expected)
+        reads = []
+        real_read = os.read
+        with mock.patch.object(link.os, "read", side_effect=lambda fd, n: reads.append(n) or real_read(fd, n)):
+            link._bad_file_digest(pending_file)
+        self.assertEqual(reads, [link.BAD_FILE_DIGEST_BYTES])
+        # A symlink is not followed: a regular target is not read, and a FIFO
+        # target (which would block a reader) is not opened.
+        pending_file.unlink()
+        target = self.scratch / "target.json"
+        target.write_bytes(b"target content")
+        pending_file.symlink_to(target)
+        followed = hashlib.sha256(b"14:target content").hexdigest()
+        self.assertNotEqual(link._bad_file_digest(pending_file), followed)
+        pending_file.unlink()
+        fifo = self.scratch / "fifo"
+        os.mkfifo(fifo)
+        pending_file.symlink_to(fifo)
+        first = link._bad_file_digest(pending_file)
+        self.assertEqual(first, link._bad_file_digest(pending_file))
+        self.assertEqual(len(first), 64)
+        # The service's own read takes that path without blocking.
+        record, pending, digest = link.LinkService(plugin_version="t", status=None, record_path=self.record_path)._read()
+        self.assertEqual((record, pending), (None, None))
+        self.assertTrue(digest.startswith("bad:"))
+
+    def test_out_of_range_dashboard_port_is_a_coded_refusal(self):
+        # OP-12 P4 r3 finding 7: never an uncaught ValueError.
+        for url in ("http://127.0.0.1:99999", "http://[::1]:70000", "http://127.0.0.1:-1"):
+            with self.assertRaises(link.LocalGatewayError) as caught:
+                link.resolve_local_gateway(url)
+            self.assertEqual(caught.exception.code, "local_gateway_auth_unavailable", url)
+
+
 if __name__ == "__main__":
     unittest.main()

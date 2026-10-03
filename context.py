@@ -196,12 +196,18 @@ def source_artifact_context(
     current_event: dict[str, Any], events: list[dict[str, Any]],
     fetch_artifact: Callable[[str], dict[str, Any]],
     library: list[dict[str, Any]] | None = None,
+    cycle_source: dict[str, Any] | None = None,
 ) -> str:
     """Resolve exact attachments and the authorized Room document library.
 
     Artifact IDs originate in canonical Room records, while access and derived
     text are resolved by the authenticated Room API. Raw document bytes are
     never downloaded or executed by the connector.
+
+    Contract P5-1: on a turn of a discussion cycle, ``cycle_source`` is the
+    cycle's source message; its attachments come first, then those of the
+    turn's own source when that is another message. Each exact version is
+    rendered once (same in OpenClaw).
     """
     payload = current_event.get("payload") or {}
     source_id = str(payload.get("sourceEventId") or "").strip()
@@ -212,11 +218,18 @@ def source_artifact_context(
             None,
         )
     attachments = list((source.get("payload") or {}).get("attachments") or []) if source else []
-    entries: list[tuple[dict[str, Any], dict[str, Any] | None]] = [(item, None) for item in attachments]
-    known = {
-        (str(item.get("artifactId") or ""), str(item.get("versionId") or ""))
-        for item in attachments
-    }
+    if isinstance(cycle_source, dict):
+        attachments = list((cycle_source.get("payload") or {}).get("attachments") or []) + attachments
+    entries: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    known: set[tuple[str, str]] = set()
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        key = (str(item.get("artifactId") or ""), str(item.get("versionId") or ""))
+        if all(key) and key in known:
+            continue
+        known.add(key)
+        entries.append((item, None))
     entries = entries[:MAX_SOURCE_ATTACHMENTS]
     catalog = library_catalog_context(library, exclude=known)
     if not entries:

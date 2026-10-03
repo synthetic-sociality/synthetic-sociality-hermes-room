@@ -31,6 +31,7 @@ import platform
 import random
 import re
 import secrets
+import stat
 import tempfile
 import time
 import urllib.error
@@ -331,7 +332,7 @@ def _validate_record(record: Any) -> dict[str, Any]:
     if not isinstance(record, dict) or record.get("schema") != LINK_SCHEMA:
         raise ValueError("unsupported link record")
     state = record.get("state")
-    if state not in _RECORD_STATES:
+    if not isinstance(state, str) or state not in _RECORD_STATES:
         raise ValueError("link record state is invalid")
     for key in ("deviceId", "audience", "deviceLabel", "privateKeyBase64", "publicKeySpkiBase64", "fingerprintSha256"):
         if not isinstance(record.get(key), str) or not record[key]:
@@ -399,19 +400,43 @@ def delete_link(path: Path | None = None) -> dict[str, Any] | None:
     if pending.exists() or pending.is_symlink():
         try:
             pending_view = public_view(read_link(pending) or {})
-        except (ValueError, OSError, json.JSONDecodeError):
+        except Exception:  # noqa: BLE001 - OP-12 P4 r3 finding 3: no shape blocks unlink
             pending_view = {}
         pending.unlink()
         pending_view["pendingOnly"] = True
     try:
         record = read_link(target)
-    except (ValueError, OSError, json.JSONDecodeError):
+    except Exception:  # noqa: BLE001 - an unreadable record is still deleted
         record = {}
     if not target.exists() and not target.is_symlink():
         # Only a pending (never confirmed) link was there (r2 item 10).
         return pending_view or None
     target.unlink()
     return public_view(record or {})
+
+
+# OP-12 P4 r3 finding 5: the digest of an unreadable pending file reads at
+# most this many bytes and never follows a symlink.
+BAD_FILE_DIGEST_BYTES = 64 * 1024
+
+
+def _bad_file_digest(path: Path) -> str:
+    """A change marker for an unreadable file: bounded, no symlink followed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as error:
+        return hashlib.sha256(f"unopenable:{error.errno}".encode()).hexdigest()
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return hashlib.sha256(f"irregular:{stat.S_IFMT(info.st_mode)}".encode()).hexdigest()
+        digest = hashlib.sha256(f"{info.st_size}:".encode())
+        digest.update(os.read(fd, BAD_FILE_DIGEST_BYTES))
+        return digest.hexdigest()
+    except OSError as error:
+        return hashlib.sha256(f"unreadable:{error.errno}".encode()).hexdigest()
+    finally:
+        os.close(fd)
 
 
 def public_view(record: dict[str, Any]) -> dict[str, Any]:
@@ -661,7 +686,11 @@ def resolve_local_gateway(configured_url: str = "", *,
         # Contract L1-7: only a loopback dashboard; a gated one has no
         # non-interactive credential. No userinfo (OP-12 P4 r2 item 8).
         raise LocalGatewayError("local_gateway_auth_unavailable")
-    port = parts.port or 80
+    try:
+        port = parts.port or 80
+    except ValueError:
+        # OP-12 P4 r3 finding 7: a port out of range is a coded refusal.
+        raise LocalGatewayError("local_gateway_auth_unavailable") from None
     request = urllib.request.Request(urlunsplit(("http", f"{_loopback_url_host(host)}:{port}", "/", "", "")), method="GET")
     try:
         with (opener or _no_proxy_opener()).open(request, timeout=3.0) as response:
@@ -997,12 +1026,8 @@ class LinkService:
         try:
             pending = read_link(pending_file)
             return record, pending, record_digest(pending)
-        except (ValueError, OSError, json.JSONDecodeError):
-            try:
-                raw = pending_file.read_bytes()
-            except OSError:
-                raw = b""
-            return record, None, "bad:" + hashlib.sha256(raw).hexdigest()
+        except Exception:  # noqa: BLE001 - OP-12 P4 r3 finding 3: any shape
+            return record, None, "bad:" + _bad_file_digest(pending_file)
 
     async def _current(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
         try:

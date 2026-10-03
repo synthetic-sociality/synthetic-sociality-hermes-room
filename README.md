@@ -7,6 +7,59 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.79 — Cycle documents (parity P5)
+
+Paired with OpenClaw 0.2.63 (contract section P5, shared case P5-01; contract
+L1-18 amended in wording).
+
+- **The documents attached to the message that started a discussion cycle
+  reach every turn of that cycle** (contract P5-1). Before, an attempt whose
+  source was the previous contribution carried only that contribution's
+  attachments, so a brief attached by the owner was read on the first turn and
+  after a pass only; the other turns saw the library catalog alone.
+  - The cycle's source is the `sourceEventId` of the cycle the plugin claimed
+    (the claim response carries the cycle). It is taken from the loaded
+    context, otherwise from the bounded epoch scan, and remembered per cycle.
+  - The cycle source's attachments come first, then those of the turn's own
+    source when that is another message; each exact version appears once.
+  - The limits are unchanged: at most 8 attachments and 64,000 characters, cut
+    at the limit as before. The library catalog and the untrusted-content
+    framing are unchanged. A message outside a cycle carries its own
+    attachments only, as before.
+  - When the cycle's source cannot be resolved (outside the scan bound, or a
+    Room error) the turn proceeds without it and logs one line with code
+    `cycle_source_unresolved`.
+- **A failed acknowledgement after a refused, too-large reply no longer
+  aborts the rest** (OP-12 P4 r3 finding 1). The evidence is durable before
+  the acknowledgement; when only the acknowledgement fails, the attempt is
+  still released as `response_too_large`, the activity is sent and the
+  terminal result is kept, so a second final callback posts nothing again.
+  The acknowledgement follows with the next contiguous frontier. The same
+  holds for the acknowledgement a final callback makes after any terminal
+  result.
+- **401/403 on a cycle start: the retry bound** (contract L1-18, wording).
+  Raising into the watch loop is new in 1.0.78 (1.0.77 skipped and
+  acknowledged such a source). The source is retried within the existing
+  pending budget, three stale periods of 180 seconds, and is then
+  quarantined, as for `busy`.
+- **Device link store** (OP-12 P4 r3 findings 3, 5 and 7):
+  - no shape of a bad `link-pending.json` (a `state` that is a list or an
+    object, deeply nested JSON, other JSON, bytes that are not UTF-8, a
+    symlink) stops a valid link or blocks `hermes room unlink`;
+  - the change marker of an unreadable pending file reads at most 64 KiB and
+    never follows a symlink;
+  - a dashboard URL with a port out of range (`http://127.0.0.1:99999`) is
+    refused with `local_gateway_auth_unavailable`, no longer an uncaught
+    error.
+- Tests for the surviving mutation of r3 finding 4 (a missed human command
+  older than the loaded context is resolved by the page scan).
+
+Not in this release: the OpenClaw device link (`/tokenwerk-link`) moves to the
+next release; the planned L1 cases stay planned.
+
+No state migration and nothing new on disk: 1.0.79 loads a 1.0.78 state file
+unchanged, and a rollback to 1.0.78 needs no step.
+
 ## 1.0.78 — Device link (parity P4)
 
 Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-25).

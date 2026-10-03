@@ -487,5 +487,65 @@ class L1R2Tests(unittest.TestCase):
             self.assertIs(adapter._is_human_cycle_source({"type": "message.posted", "actorRole": role}), expected, role)
 
 
+
+class L1R3Tests(unittest.TestCase):
+    """OP-12 P4 r3 (carried into P5): findings 1 and 4."""
+
+    def test_too_large_with_a_failing_acknowledgement_still_releases_and_settles(self):
+        # Finding 1: once the evidence is durable, an acknowledgement failure
+        # aborts neither the attempt release, the activity nor the terminal
+        # result; a second final callback posts nothing again.
+        for mode, attempt in (("open", None), ("coordinated", cycle_attempt())):
+            with self.subTest(mode=mode):
+                async def run(mode=mode, attempt=attempt):
+                    instance, binding, api, published, _dispatched = room_instance(attempt, mode=mode)
+                    api.post_error = lambda _n: too_large()
+                    room_state = api.room_state
+                    api.room_state = lambda room: {**room_state(room), "serverLimits": {"messageMaxBytes": 16}}
+
+                    def failing_ack(_room, _seq):
+                        raise adapter.ProtocolError("Room unavailable", status=503, code="", retryable=True)
+
+                    api.acknowledge = failing_ack
+                    first = await instance._send_final("room-1", source_ref(), REPLY)
+                    second = await instance._send_final("room-1", source_ref(), REPLY)
+                    return instance, binding, api, published, first, second
+
+                instance, binding, api, published, first, second = asyncio.run(run())
+                self.assertTrue(first.success)
+                self.assertTrue(second.success)
+                self.assertEqual(len(api.posts), 1)
+                terminal = instance._terminal_results[source_ref()]
+                self.assertEqual((terminal["status"], terminal["reason"]), ("failed", "message_too_large"))
+                self.assertEqual(binding.terminal_evidence["5"]["reason"], "message_too_large")
+                self.assertEqual(binding.acknowledged_cursor, 4)  # acknowledged on a later pass
+                self.assertIn(("evt-5", "terminal", "failed"), published)
+                self.assertEqual(binding.kept_reply["text"], REPLY)
+                if attempt is None:
+                    self.assertEqual(api.completions, [])
+                else:
+                    self.assertEqual(len(api.completions), 1)
+                    payload = api.completions[0][1]
+                    self.assertEqual(payload["action"], "fail")
+                    self.assertEqual(payload["executionFailure"]["code"], "response_too_large")
+
+    def test_a_missed_command_older_than_the_loaded_context_is_found_by_the_page_scan(self):
+        # Finding 4 (context.py cycle_source_message): a missed human command
+        # that is not in the loaded context is resolved by the bounded scan.
+        import types
+        ask = {"id": "cmd-2965", "seq": 2965, "type": "human.command", "actorRole": "human_owner", "actorId": "owner-1",
+               "ts": "2026-10-02T09:50:00Z", "payload": {"epochId": "epoch-2", "command": {"command": "ask"}}}
+        newer = [message(seq, "paula-1", "participant_agent", f"Note {seq}.") for seq in (2966, 2967)]
+        instance, binding, _starts, _completed, _persisted = consume_instance()
+        binding.missed_sources = [{"source_event_id": "cmd-2965", "source_seq": 2965}]
+        api = types.SimpleNamespace(events=lambda _room, after, _wait: {
+            "events": [item for item in (ask, *newer) if item["seq"] > after]})
+        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        facts, offered, _mark = asyncio.run(instance._missed_source_facts(
+            binding, {"roster": ROSTER}, 2968, list(newer), 2900, set()))
+        self.assertEqual(offered, ["cmd-2965"])
+        self.assertEqual(facts, ["Missed earlier: #2965 TJE, 09:50 UTC; 2 newer messages since."])
+
+
 if __name__ == "__main__":
     unittest.main()

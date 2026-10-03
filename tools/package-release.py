@@ -55,6 +55,7 @@ PAYLOAD = (
     "tests/test_parity_p2a.py",
     "tests/test_parity_p2c.py",
     "tests/test_parity_p3.py",
+    "tests/test_parity_p5.py",
     "tests/test_prior_epoch_system_terminal.py",
     "tests/test_protocol_artifacts.py",
     "tests/test_recovery_fence_transport.py",
