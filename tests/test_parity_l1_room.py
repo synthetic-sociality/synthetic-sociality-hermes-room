@@ -324,6 +324,168 @@ class L1RoomServerTests(unittest.TestCase):
                 error = adapter.ProtocolError("refused", status=status, code=code, retryable=retryable)
                 self.assertFalse(adapter._is_cycle_start_refusal(error))
 
+    def test_l1_25_an_authorisation_refusal_is_not_a_skipped_source(self):
+        mention = message(2964, "owner-1", "human_owner", "@Agent your view?", resolvedRecipientMembershipIds=["member-1"])
+
+        def refuse(status, code):
+            return lambda _r: (_ for _ in ()).throw(adapter.ProtocolError("refused", status=status, code=code, retryable=False))
+
+        # 401 and 403, whatever the code: the session path (raised), never skipped or acknowledged.
+        for status, code in ((401, "unauthorized"), (403, "forbidden"), (401, "a_code_no_list_names")):
+            with self.subTest(status=status, code=code):
+                instance, binding, starts, completed, _persisted = consume_instance(start=refuse(status, code))
+                with self.assertRaises(adapter.ProtocolError):
+                    asyncio.run(instance._consume(binding, mention))
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(completed, [])
+                self.assertEqual(binding.missed_sources, [])
+        # Every other refusal stays terminal for its source (404, 409 room_closed).
+        for status, code in ((404, "not_found"), (409, "room_closed")):
+            with self.subTest(status=status, code=code):
+                instance, binding, _starts, completed, _persisted = consume_instance(start=refuse(status, code))
+                asyncio.run(instance._consume(binding, mention))
+                self.assertEqual((completed[-1]["terminal_status"], completed[-1]["reason"]), ("skipped", code))
+        # A skipped human command stays a missed source and is offered.
+        ask = {"id": "cmd-2965", "seq": 2965, "type": "human.command", "actorRole": "human_owner", "actorId": "owner-1",
+               "ts": "2026-10-02T09:50:00Z",
+               "payload": {"epochId": "epoch-2", "command": {"command": "ask", "arguments": {"instruction": "Your view?"},
+                                                             "resolvedTargetMembershipIds": ["member-1"],
+                                                             "targetSelectors": [{"kind": "membership", "membershipId": "member-1"}]}}}
+        instance, binding, starts, completed, _persisted = consume_instance(start=refuse(409, "source_not_eligible"))
+        asyncio.run(instance._consume(binding, ask))
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(completed[-1]["terminal_status"], "skipped")
+        self.assertEqual(binding.missed_sources, [{"source_event_id": "cmd-2965", "source_seq": 2965}])
+        newer = [message(seq, "paula-1", "participant_agent", f"Note {seq}.") for seq in (2966, 2967)]
+        import types
+        api = types.SimpleNamespace(events=lambda _room, after, _wait: {
+            "events": [item for item in (ask, *newer) if item["seq"] > after]})
+        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        facts, offered, _mark = asyncio.run(instance._missed_source_facts(
+            binding, {"roster": ROSTER}, 2968, [ask, *newer], 2900, set()))
+        self.assertEqual(offered, ["cmd-2965"])
+        self.assertEqual(len(facts), 1)
+        self.assertTrue(facts[0].startswith("Missed earlier: #2965 "), facts)
+        # A discussion start is never recorded as missed (L1-16).
+        self.assertNotIn("discussion.started", adapter.MISSED_SOURCE_EVENT_TYPES)
+
+
+
+class _Crash(BaseException):
+    """A process crash at an exact point (never caught by connector code)."""
+
+
+class L1R2Tests(unittest.TestCase):
+    """OP-12 P4 r2 (Hermes items 1 and 11)."""
+
+    def _run_too_large(self, mode, attempt, path, *, crash_on=""):
+        import types
+        log: list = []
+
+        async def run():
+            instance, binding, api, published, _dispatched = room_instance(attempt, mode=mode)
+            api.post_error = lambda _n: too_large()
+            room_state = api.room_state
+
+            def state_read(room):
+                log.append("room_state")
+                if crash_on == "room_state":
+                    raise _Crash()
+                return {**room_state(room), "serverLimits": {"messageMaxBytes": 16}}
+
+            api.room_state = state_read
+            acknowledge, complete = api.acknowledge, api.complete_discussion_attempt
+
+            def ack(room, seq):
+                log.append("ack")
+                if crash_on == "ack":
+                    raise _Crash()
+                return acknowledge(room, seq)
+
+            def completion(*args):
+                log.append("complete")
+                return complete(*args)
+
+            api.acknowledge, api.complete_discussion_attempt = ack, completion
+            publish = instance._publish
+
+            async def activity(*args, **kwargs):
+                log.append("activity")
+                return await publish(*args, **kwargs)
+
+            instance._publish = activity
+            state_module.save(adapter.PluginState(bindings=[binding]), path)
+            instance._state_file = path
+            instance._renewing_rooms = set()
+            real = types.MethodType(adapter.SyntheticSocialityAdapter._persist_binding, instance)
+
+            def persist(current):
+                result = real(current)
+                disk = state_module.load(path).bindings[0]
+                fenced = any(isinstance(item, dict) and item.get("state") == "superseded"
+                             for item in disk.delivery_authority.values())
+                log.append(("write", bool(disk.kept_reply), (disk.terminal_evidence.get("5") or {}).get("status"), fenced))
+                return result
+
+            instance._persist_binding = persist
+            with state_module.state_path_scope(path):
+                await instance._send_final("room-1", source_ref(), REPLY)
+
+        try:
+            asyncio.run(run())
+        except _Crash:
+            pass
+        return log
+
+    def test_too_large_one_write_before_any_room_call(self):
+        # OP-12 P4 r2 item 1, contract L1-12: fence, kept reply and evidence in
+        # one durable write; the only Room call before it is the read-only
+        # room_state; acknowledgement, attempt release and activity follow.
+        for mode, attempt in (("open", None), ("coordinated", cycle_attempt())):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as scratch:
+                path = Path(scratch) / ".hermes" / "synthetic-sociality-room" / "state.json"
+                log = self._run_too_large(mode, attempt, path)
+                # The first write holding any of kept reply, evidence or fence
+                # holds all of them, and it comes right after the read-only
+                # room_state (the byte ceiling); earlier writes (the frozen
+                # intent) and reads (the head checks) carry none of it, and no
+                # Room write happens before it.
+                first = next(index for index, item in enumerate(log)
+                             if isinstance(item, tuple) and item[1:] != (False, None, False))
+                self.assertEqual(log[first], ("write", True, "failed", attempt is not None), log)
+                self.assertEqual(log[first - 1], "room_state", log)
+                self.assertTrue(all(item not in ("ack", "complete", "activity") for item in log[:first]), log)
+                calls = [item for item in log[first:] if isinstance(item, str)]
+                self.assertEqual(calls[0], "ack", log)
+                self.assertIn("activity", calls)
+                if attempt is not None:
+                    self.assertIn("complete", calls)
+
+    def test_too_large_crash_between_write_and_room_calls(self):
+        for mode, attempt in (("open", None), ("coordinated", cycle_attempt())):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as scratch:
+                path = Path(scratch) / ".hermes" / "synthetic-sociality-room" / "state.json"
+                # A crash at the first Room call after the write: nothing is lost.
+                self._run_too_large(mode, attempt, path, crash_on="ack")
+                disk = state_module.load(path).bindings[0]  # the real loader accepts it
+                self.assertEqual(disk.kept_reply["text"], REPLY)
+                self.assertEqual(disk.kept_reply["reason"], "message_too_large (limit 16 bytes)")
+                self.assertEqual((disk.terminal_evidence["5"]["status"], disk.terminal_evidence["5"]["reason"]),
+                                 ("failed", "message_too_large"))
+                self.assertEqual(disk.acknowledged_cursor, 4)  # acknowledged on the next pass
+                # A crash before the write (at the read-only call) writes nothing:
+                # the frozen post replays and is refused again.
+                path.unlink()
+                self._run_too_large(mode, attempt, path, crash_on="room_state")
+                disk = state_module.load(path).bindings[0]
+                self.assertEqual((disk.kept_reply, disk.terminal_evidence), ({}, {}))
+
+    def test_human_role_prefix_is_exact(self):
+        # OP-12 P4 r2 item 11: "human_" exactly, never any role starting with "human".
+        for role in ("humanoid", "human-owner", "humans", "human_owner_x"):
+            expected = role == "human_owner_x"
+            self.assertIs(adapter._is_human_cycle_source({"type": "message.posted", "actorRole": role}), expected, role)
+
 
 if __name__ == "__main__":
     unittest.main()

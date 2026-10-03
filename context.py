@@ -339,6 +339,7 @@ def cycle_source_message(
     before_seq: int,
     active_epoch_starts_at: int,
     max_scan: int = CONTEXT_SCAN_LIMIT,
+    types: Any = ("message.posted",),
 ) -> dict[str, Any] | None:
     """Find a cycle attempt's source message older than the loaded context.
 
@@ -358,7 +359,7 @@ def cycle_source_message(
         for event in page.get("events") or []:
             seq = int(event.get("seq") or 0)
             if start <= seq < before and str(event.get("id") or "") == wanted:
-                return event if event.get("type") == "message.posted" else None
+                return event if event.get("type") in types else None
         scanned += width
         before = start
     return None

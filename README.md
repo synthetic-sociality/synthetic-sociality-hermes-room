@@ -9,8 +9,8 @@ Room identity.
 
 ## 1.0.78 — Device link (parity P4)
 
-Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-24).
-OpenClaw implements L1-15 to L1-19 and L1-22 to L1-24 in this release and lists the device-link
+Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-25).
+OpenClaw implements L1-15 to L1-19 and L1-22 to L1-25 in this release and lists the device-link
 cases as planned until P5. Any user can link this Hermes profile to their own
 Harness as a local device, without a Room invitation:
 
@@ -81,7 +81,9 @@ L1-12 to L1-15, implemented in both plugins):
     acknowledged normally, so the acknowledgement no longer sticks at that seq;
   - a held cycle attempt is released with `response_too_large`;
   - the reply is kept (up to twice the Room's byte ceiling in characters, at
-    most 65536) and offered once on the next turn. The reason line is
+    most 65536) and offered once on the next turn. The attempt fence, the kept
+    reply and the evidence are written in one state write before any further
+    Room call. The reason line is
     `Not posted: message_too_large (limit N bytes)` when the refused reply
     exceeds the Room's `serverLimits.messageMaxBytes`, else
     `Not posted: message_too_large`; never a word count.
@@ -111,6 +113,11 @@ L1-12 to L1-15, implemented in both plugins):
   - A cycle-start refusal with any well-formed code that is not retryable, a
     4xx other than 429 and not a session code is skipped and acknowledged
     (already so in Hermes); `source_not_eligible` is a known code.
+  - An HTTP 401 or 403 on a cycle start is a session or authorisation failure
+    whatever its code (the Room answers 401 `unauthorized`): never skipped,
+    never acknowledged; the source is processed again when the credential
+    works. A skipped human message or human command is offered once as a
+    missed source.
 - `executionFailure.attempt` (`elapsedSeconds`, `limitSeconds`) is Room-side
   evidence; the plugin never sends it, so nothing changes here.
 - A recovery closure mark counts only for the sealed record digest it was made

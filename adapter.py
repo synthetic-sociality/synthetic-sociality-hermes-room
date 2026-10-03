@@ -712,14 +712,21 @@ _CYCLE_START_SESSION_CODES = frozenset({
     "credential_expired", "credential_revoked", "connector_not_active", "busy", "credential_renewal_pending",
 })
 _REFUSAL_CODE = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")
+# Contract L1-18: the human sources whose refused cycle start is offered as a
+# missed source. A discussion start is not one: it is never a trigger (L1-16)
+# and its topic reaches the agent as "Current discussion".
+MISSED_SOURCE_EVENT_TYPES = frozenset({"message.posted", "human.command"})
 
 
 def _is_cycle_start_refusal(error: ProtocolError) -> bool:
+    # Contract L1-18: 401 and 403 are session/authorisation failures whatever
+    # their code (the Room answers 401 `unauthorized`); they take the session
+    # path and the source is processed again when the credential works.
     return (
         bool(_REFUSAL_CODE.match(str(error.code or "")))
         and not error.retryable
         and 400 <= int(error.status or 0) < 500
-        and int(error.status or 0) != 429
+        and int(error.status or 0) not in {401, 403, 429}
         and error.code not in _CYCLE_START_SESSION_CODES
     )
 
@@ -2580,20 +2587,42 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     terminal_status="skipped", reason="reply_cap_reached",
                 )
             if refusal == "too_large":
-                # Contract L1-12: terminal evidence failed/message_too_large,
-                # the normal acknowledgement, the attempt released with
-                # response_too_large, and the reply kept for one offer. The
-                # attempt is fenced first so a restart cannot replay the post.
+                # Contract L1-12: the byte ceiling is read first (read-only);
+                # then the attempt fence, the kept reply and the terminal
+                # evidence failed/message_too_large go into ONE durable state
+                # write, before any further Room call; then the normal
+                # acknowledgement, the attempt release (response_too_large)
+                # and the activity. A crash before that write replays the
+                # refused post (refused again); after it, nothing is lost.
+                message_max_bytes = await self._message_max_bytes(binding)
+                await self._stop_attempt_renewal(source_id)
+                if cycle_attempt:
+                    authority_key = _attempt_authority_key(binding, source_id, cycle_attempt)
+                    authority = binding.delivery_authority.get(authority_key)
+                    if isinstance(authority, dict) and authority.get("state") != "superseded":
+                        authority["state"] = "superseded"
+                        binding.delivery_authority[authority_key] = authority
+                self._keep_late_reply(
+                    binding, source_id, responds_to_id, observed_epoch, body,
+                    too_large_kept_reason(body, message_max_bytes), limit=kept_reply_bound(message_max_bytes),
+                    persist=False,
+                )
+                source_seq = int(
+                    binding.turn_sequences.get(source_id)
+                    or (getattr(self, "_event_seq", None) or {}).get(binding.room_id, {}).get(source_id, 0)
+                    or 0
+                )
+                if source_seq > 0:
+                    await self._complete_event(
+                        binding, source_seq, terminal_status="failed", source_id=source_id, reason="message_too_large",
+                    )
+                else:
+                    self._persist_binding(binding)
                 await self._supersede_refused_post(
                     binding, source_id, cycle_attempt, execution_failure=response_too_large_failure(),
                 )
                 await self._publish(binding, source_id, "terminal", status="failed", suppress_errors=True)
                 self._log_outcome(binding, "failed", source_id, error.code, cycle_attempt)
-                message_max_bytes = await self._message_max_bytes(binding)
-                self._keep_late_reply(
-                    binding, source_id, responds_to_id, observed_epoch, body,
-                    too_large_kept_reason(body, message_max_bytes), limit=kept_reply_bound(message_max_bytes),
-                )
                 return self._successful_terminal(
                     source_ref, dispatch_generation, f"failed:{source_id}",
                     terminal_status="failed", reason="message_too_large",
@@ -4103,8 +4132,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             cycle = await self._ensure_discussion_cycle(binding, event, state=state)
             if isinstance(cycle, dict) and cycle.get("refused"):
                 self._log_outcome(binding, "skipped", event_id, str(cycle["refused"]))
-                if event_type == "message.posted":
-                    # Refused before the model ran: offered next turn (P2a-3).
+                if event_type in MISSED_SOURCE_EVENT_TYPES:
+                    # Refused before the model ran: offered next turn (P2a-3,
+                    # L1-18: a skipped human source is never lost silently).
                     self._note_missed_source(binding, event_id, seq)
                 await self._complete_event(
                     binding, seq, terminal_status="skipped", source_id=event_id,
@@ -4813,12 +4843,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             try:
                 source = next((
                     item for item in context_events
-                    if item.get("type") == "message.posted" and str(item.get("id") or "") == source_id
+                    if item.get("type") in MISSED_SOURCE_EVENT_TYPES and str(item.get("id") or "") == source_id
                 ), None)
                 if source is None:
                     source = await self._call(binding, lambda api, source_id=source_id: _cycle_source_message(
                         lambda after: api.events(binding.room_id, after, 0), source_id,
                         before_seq=current_seq, active_epoch_starts_at=starts_at,
+                        types=MISSED_SOURCE_EVENT_TYPES,
                     ))
                 offered.append(source_id)
                 source_seq = int((source or {}).get("seq") or 0)
@@ -4852,7 +4883,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _keep_late_reply(
         self, binding: RoomBinding, source_id: str, responds_to_id: str, epoch_id: str,
-        body: Any, reason: str, *, limit: int = KEPT_REPLY_CHARACTER_LIMIT,
+        body: Any, reason: str, *, limit: int = KEPT_REPLY_CHARACTER_LIMIT, persist: bool = True,
     ) -> None:
         """Keep a produced reply whose turn's authority ended (contract P2c-2).
 
@@ -4869,7 +4900,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # Latest wins: an older kept reply is not offered in its place.
                 if binding.kept_reply:
                     binding.kept_reply = {}
-                    self._persist_binding(binding)
+                    if persist:
+                        self._persist_binding(binding)
                 logger.info("Room %s reply not kept: code late_reply_too_large", binding.room_id)
                 return
             seq = int(
@@ -4885,7 +4917,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "reason": str(reason or "superseded"),
                 "text": text,
             }
-            self._persist_binding(binding)
+            if persist:
+                self._persist_binding(binding)
             logger.info("Room %s kept a reply that was not posted: code %s", binding.room_id, reason or "-")
         except Exception as error:  # noqa: BLE001 - keeping is best effort
             logger.warning("Room %s reply could not be kept: %s", binding.room_id, type(error).__name__)

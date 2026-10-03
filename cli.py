@@ -308,10 +308,11 @@ def _link(args: argparse.Namespace, *, sleep=None) -> int:
             # A re-link is confirmed here or not at all: the working link stays.
             device_link.discard_pending()
             print(f"Not confirmed ({code}); your existing link (device {old.get('deviceId', '')}) is unchanged. "
-                  "Create a new token in the Harness and try again.", file=sys.stderr)
+                  f"If device {record['deviceId']} appears in the Harness anyway (the confirmation may have reached "
+                  "the server), revoke it there. Create a new token in the Harness and try again.", file=sys.stderr)
             return 1
-        print(f"Not confirmed yet ({code}). The Hermes gateway keeps trying until the token expires "
-              f"at {record['expiresAt']}.", file=sys.stderr)
+        print(f"Not confirmed yet ({code}). Start or restart the Hermes gateway: it retries the confirmation "
+              f"until the token expires at {record['expiresAt']}.", file=sys.stderr)
         return 1
     unchanged = f" Your existing link (device {old.get('deviceId', '')}) is unchanged." if old else ""
     if state == "expired":
@@ -360,6 +361,11 @@ def _unlink() -> int:
         removed = device_link.delete_link()
     if removed is None:
         print("Not linked; nothing to delete.")
+        return 0
+    if removed.get("pendingOnly"):
+        print(f"Deleted the pending, never confirmed link of device {removed.get('deviceId', '')} (its key and "
+              "pairing secret).")
+        print("If this device appears in the Harness anyway, revoke it there.")
         return 0
     print(f"Deleted the local link key of device {removed.get('deviceId', '')}.")
     print("Revoke this device in the Harness to end it on the server.")

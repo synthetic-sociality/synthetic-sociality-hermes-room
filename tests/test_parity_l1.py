@@ -331,7 +331,7 @@ class LinkTestCase(unittest.IsolatedAsyncioTestCase):
 class L1ConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityL1Cases"]
-        self.assertEqual(len(cases), 24)
+        self.assertEqual(len(cases), 25)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"L1-{index:02d} "), name)
@@ -462,6 +462,10 @@ class L1TokenAndSignatureTests(LinkTestCase):
             record = link.read_link(self.record_path)
             self.assertEqual(record["state"], "active")
             self.assertNotIn("pairingSecret", record)
+            # r2 items 3 and 13: the pending file (with its secret) is gone after
+            # the 201, and link.json is 0600.
+            self.assertFalse(link.pending_path(self.record_path).exists())
+            self.assertEqual(stat.S_IMODE(self.record_path.stat().st_mode), 0o600)
             self.assertIn(record["fingerprintSha256"], out)
             self.assertNotIn(FAKE_PAIRING_SECRET, out + err)
             self.assertNotIn(record["privateKeyBase64"], out + err)
@@ -1061,12 +1065,21 @@ class L1ReviewR1Tests(LinkTestCase):
             calls.append(1)
             raise KeyError("deviceLabel")
 
-        guarded = self.service()
+        sleeps = []
+
+        async def recording_sleep(seconds):
+            sleeps.append(seconds)
+            await asyncio.sleep(0.01)
+
+        guarded = self.service(sleep=recording_sleep)
         guarded._step = failing_step
         with self.assertLogs(link.logger, level="WARNING"):
             await self.running(guarded)
-            await until(lambda: len(calls) >= 2)
+            await until(lambda: len(calls) >= 3)
         self.assertEqual(guarded.snapshot()["code"], "link_service_error")
+        # r2 item 4: the guard backs off, never below its floor (half the first step).
+        self.assertGreaterEqual(len(sleeps), 2)
+        self.assertTrue(all(seconds >= link.BACKOFF_INITIAL_SECONDS / 2 for seconds in sleeps), sleeps)
 
     def test_rendezvous_host_and_literal_loopback(self):
         # H4: a rendezvous record on a non-loopback host is not used.
@@ -1110,6 +1123,73 @@ class L1ReviewR1Tests(LinkTestCase):
         self.assertTrue(instance._start_link_service())
         instance._link_task.cancel()
         await asyncio.gather(instance._link_task, return_exceptions=True)
+
+
+
+class L1R2LinkTests(LinkTestCase):
+    """OP-12 P4 r2 (Hermes items 2, 8, 9, 10)."""
+
+    async def test_a_bad_pending_file_never_stops_a_valid_link(self):
+        for label, content in (("corrupt", b"{not json"), ("invalid", None)):
+            with self.subTest(form=label):
+                async with Harness() as harness:
+                    self.active_record(harness.audience)
+                    pending_file = link.pending_path(self.record_path)
+                    if content is None:
+                        record = link.pending_record({"deviceId": DEVICE, "audience": harness.audience,
+                                                      "pairingSecret": FAKE_PAIRING_SECRET, "expiresAt": _iso(300)},
+                                                     label="L", seed=SEED)
+                        del record["deviceLabel"]
+                        link.write_link(record, pending_file)
+                    else:
+                        pending_file.write_bytes(content)
+                    self.status_path.unlink(missing_ok=True)
+                    task = await self.running(self.service())
+                    ws, _ = await harness.accept()
+                    await until(lambda: self.status_link()["state"] == "connected")
+                    await ws.close()
+                    await self._stop(task)
+                    pending_file.unlink()
+        # Without a working link, an unreadable pending file is reported.
+        self.record_path.unlink()
+        link.pending_path(self.record_path).write_bytes(b"{not json")
+        self.status_path.unlink(missing_ok=True)
+        await self.running(self.service())
+        await until(lambda: self.status_link()["code"] == "link_store_unreadable")
+
+    def test_dashboard_url_without_userinfo(self):
+        # r2 item 8: userinfo before a loopback host is refused, never requested.
+        for url in ("http://evil.example@127.0.0.1:9", "http://user:pw@127.0.0.1:9"):
+            with self.assertRaises(link.LocalGatewayError) as caught:
+                link.resolve_local_gateway(url)
+            self.assertEqual(caught.exception.code, "local_gateway_auth_unavailable", url)
+
+    def test_retire_never_overwrites_an_unreadable_link(self):
+        # r2 item 9: a refused re-link leaves an unreadable link.json as it was.
+        self.store.mkdir(parents=True, exist_ok=True)
+        self.record_path.write_bytes(b"{unreadable")
+        record = link.pending_record({"deviceId": DEVICE, "audience": "https://rooms.example/tokenwerk/room/v1/local-devices/connect",
+                                      "pairingSecret": FAKE_PAIRING_SECRET, "expiresAt": _iso(300)}, label="L", seed=SEED)
+        link.write_link(record, link.pending_path(self.record_path))
+
+        def refuse(_record):
+            raise link.ConfirmationRefused()
+
+        self.assertEqual(link.confirm_pending(path=self.record_path, sender=refuse), ("refused", "link_pairing_refused"))
+        self.assertEqual(self.record_path.read_bytes(), b"{unreadable")
+        self.assertFalse(link.pending_path(self.record_path).exists())
+
+    def test_unlink_of_a_pending_link(self):
+        # r2 item 10: unlink with only a pending file says what it deleted.
+        record = link.pending_record({"deviceId": DEVICE, "audience": "https://rooms.example/tokenwerk/room/v1/local-devices/connect",
+                                      "pairingSecret": FAKE_PAIRING_SECRET, "expiresAt": _iso(300)}, label="L", seed=SEED)
+        link.write_link(record, link.pending_path(self.record_path))
+        code, out, _err, _prompt = run_cli("unlink")
+        self.assertEqual(code, 0)
+        self.assertIn(f"Deleted the pending, never confirmed link of device {DEVICE}", out)
+        self.assertNotIn("Not linked", out)
+        self.assertFalse(link.pending_path(self.record_path).exists())
+        self.assertNotIn(FAKE_PAIRING_SECRET, out)
 
 
 if __name__ == "__main__":

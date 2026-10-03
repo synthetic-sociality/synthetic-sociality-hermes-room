@@ -395,14 +395,21 @@ def delete_link(path: Path | None = None) -> dict[str, Any] | None:
     """Delete the local key, record and any pending re-link (L1-9); the deleted record's public view."""
     target = path or link_path()
     pending = pending_path(target)
+    pending_view: dict[str, Any] = {}
     if pending.exists() or pending.is_symlink():
+        try:
+            pending_view = public_view(read_link(pending) or {})
+        except (ValueError, OSError, json.JSONDecodeError):
+            pending_view = {}
         pending.unlink()
+        pending_view["pendingOnly"] = True
     try:
         record = read_link(target)
     except (ValueError, OSError, json.JSONDecodeError):
         record = {}
     if not target.exists() and not target.is_symlink():
-        return None
+        # Only a pending (never confirmed) link was there (r2 item 10).
+        return pending_view or None
     target.unlink()
     return public_view(record or {})
 
@@ -602,7 +609,8 @@ def _retire(record: dict[str, Any], state: str, target: Path) -> None:
     try:
         current = read_link(target)
     except (ValueError, OSError, json.JSONDecodeError):
-        current = None
+        # An unreadable link.json is left as it is (OP-12 P4 r2 item 9).
+        return
     if current is not None and current.get("state") == "active":
         return
     retired = {key: value for key, value in record.items() if key not in {"pairingSecret", "expiresAt"}}
@@ -649,12 +657,12 @@ def resolve_local_gateway(configured_url: str = "", *,
     url = (configured_url or DEFAULT_LOCAL_GATEWAY_URL).strip()
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
-    if parts.scheme != "http" or host not in LOOPBACK_HOSTS:
+    if parts.scheme != "http" or host not in LOOPBACK_HOSTS or parts.username is not None or parts.password is not None:
         # Contract L1-7: only a loopback dashboard; a gated one has no
-        # non-interactive credential.
+        # non-interactive credential. No userinfo (OP-12 P4 r2 item 8).
         raise LocalGatewayError("local_gateway_auth_unavailable")
     port = parts.port or 80
-    request = urllib.request.Request(urlunsplit(("http", parts.netloc, "/", "", "")), method="GET")
+    request = urllib.request.Request(urlunsplit(("http", f"{_loopback_url_host(host)}:{port}", "/", "", "")), method="GET")
     try:
         with (opener or _no_proxy_opener()).open(request, timeout=3.0) as response:
             page = response.read(4 * 1024 * 1024).decode("utf-8", "replace")
@@ -980,15 +988,28 @@ class LinkService:
     def snapshot(self) -> dict[str, Any]:
         return dict(self._link)
 
-    def _read(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        return read_link(self.record_path), read_link(pending_path(self.record_path))
+    def _read(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
+        """(link record, pending record, pending digest). A corrupt or invalid
+        pending file never hides a valid link.json (OP-12 P4 r2 item 2): it
+        reads as None with its own digest, so a change is still noticed."""
+        record = read_link(self.record_path)
+        pending_file = pending_path(self.record_path)
+        try:
+            pending = read_link(pending_file)
+            return record, pending, record_digest(pending)
+        except (ValueError, OSError, json.JSONDecodeError):
+            try:
+                raw = pending_file.read_bytes()
+            except OSError:
+                raw = b""
+            return record, None, "bad:" + hashlib.sha256(raw).hexdigest()
 
     async def _current(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
         try:
-            record, pending = await asyncio.to_thread(self._read)
+            record, pending, pending_digest = await asyncio.to_thread(self._read)
         except (ValueError, OSError, json.JSONDecodeError):
             return None, None, "unreadable"
-        return record, pending, f"{record_digest(record)}:{record_digest(pending)}"
+        return record, pending, f"{record_digest(record)}:{pending_digest}"
 
     async def _link_digest(self) -> str:
         """The active record alone: a pending re-link does not touch the socket."""
@@ -1037,6 +1058,11 @@ class LinkService:
             # A pending re-link is confirmed by the CLI; this link serves on.
             self._set(deviceId=str(record["deviceId"]))
             await self._serve_record(record)
+            return
+        if pending is None and ":bad:" in digest:
+            # No working link, and the pending first link cannot be read.
+            self._set(state="stopped", code="link_store_unreadable", channels=0)
+            await self._wait_for_change(digest)
             return
         if pending is not None:
             # A first link the CLI could not confirm in time: retried here
