@@ -311,14 +311,17 @@ fields. It refuses a token whose `expiresAt` lies more than 60 seconds in the pa
 expiry check stays authoritative. `audience` must be an `https:` URL whose path ends in `/local-devices/connect`, with
 no query and no fragment. The connect URL is `audience` with `https:` replaced by `wss:`, plus `?deviceId=<deviceId>`;
 the confirmation URL is `audience` with the trailing `/connect` replaced by `/pairing-confirmations`. `http:` and `ws:`
-are refused, except to a loopback host in a test build.
+are refused, except to a literal loopback address in a test build. Before anything is written, the connector shows the
+server host from `audience` and asks the user to confirm. No request of the link (the confirmation, the device socket,
+the two local Gateway requests) follows a redirect; a redirect is answered as the refusal it is.
 
 L1-2 Pairing confirmation. The connector creates one Ed25519 key pair and sends one `POST` to the confirmation URL
 with no query, no cookie and no `Authorization`, a JSON body of at most 4096 bytes and exactly one key spelled
 `deviceId` (spec §3.1; addendum G2.4). The label is the machine name and the agent profile, trimmed and within the spec
 limits, and is trimmed before it is signed. Only `201` links. `404` means the token is spent, expired or invalid: the
-connector stops and asks for a fresh token. Any other failure leaves the link pending and is retried, with bounded
-backoff, until the token expires. The pairing secret is kept only while the link is pending.
+connector stops and asks for a fresh token, and says that a device which already appears in the Harness (a lost `201`)
+is revoked there and linked again. Any other failure leaves the link pending and is retried, with bounded backoff,
+until the token expires. The pairing secret is kept only while the link is pending.
 
 L1-3 Signature input. Both signature inputs (pairing, spec §3.1; handshake, spec §4.3) are the exact bytes of
 ECMAScript `JSON.stringify` of an object built in the documented key order: separators `,` and `:` without spaces,
@@ -337,7 +340,8 @@ L1-4 Signed connect. The connector opens one WebSocket per agent profile to the 
 inside the running agent host. It sends exactly one proof per socket, echoing `handshakeId`, `connectionId`,
 `deviceId`, `audience`, `nonce` and `expiresAt` from the challenge, and may add `pluginVersion`. A challenge whose
 `audience` or `deviceId` differs from the stored link is not answered: the connector closes the socket. The link is
-connected only after `authentication-complete`.
+connected only after `authentication-complete`. The connector starts this socket when the
+agent host starts with a link record present; a link made while the host runs starts with the host's next start.
 
 Several devices (G18, owner decision 2026-10-03). A user may link several agent installations; the Harness routes
 seats to the most recently connected one, as L2 does. A connector keeps one device identity per agent profile. Its
@@ -363,7 +367,8 @@ it is closed.
 
 L1-7 Local Gateway. The connector reaches the agent's own local Gateway with that machine's own local credential,
 which never leaves the machine and is never shown to the agent's tools. For Hermes the endpoint is the dashboard's
-Gateway WebSocket `/api/ws` on a loopback address, default `127.0.0.1:9119`, authenticated with the dashboard's
+Gateway WebSocket `/api/ws` on a literal loopback address (`127.0.0.1` or `::1`, never a name), default
+`127.0.0.1:9119`, authenticated with the dashboard's
 per-process session token: from the core's host rendezvous record where the core has one, otherwise from the
 dashboard's own loopback page. A dashboard that is gated (not loopback-bound) has no non-interactive credential and is
 not supported: its channels fail with `local_gateway_auth_unavailable`.
@@ -384,9 +389,11 @@ connection.
 
 A stopped link stays stopped until the host restarts, the user links again or unlinks.
 
-L1-9 Unlink and revoke. Unlinking on the device deletes the local key and link record and reports that; it does not
-reach the server. Revoking the device is done in the Harness. Linking again replaces the local key and record, and the
-connector tells the user to revoke the old device in the Harness. There is no key rotation in v1.
+L1-9 Unlink and revoke. Unlinking on the device deletes the local key, the link record and any pending re-link, and
+reports that; it does not reach the server. Revoking the device is done in the Harness. Linking again (G5) keeps the
+new key and pairing secret in a separate pending record and replaces the working key and record only after the `201`;
+a refused, expired or unconfirmed re-link leaves the working link and its key unchanged, and the connector says so.
+After a replacement it tells the user to revoke the old device in the Harness. There is no key rotation in v1.
 
 L1-10 Secret custody. The private key and the pending pairing secret live only in the connector's fenced credential
 store (P2c-1), in a file of mode 0600. They, and the local Gateway credential, are removed from every tool result, and
@@ -395,7 +402,7 @@ never appear in a prompt, tool result, environment variable, log line or the sta
 L1-11 Status. The status file (Appendix) gains one object, `link`, with codes only: `state` (`not_linked`, `pending`,
 `connecting`, `connected`, `reconnecting` or `stopped`), `code` (the last status code from L1-8, or `link_pending`,
 `link_pairing_refused`, `link_pairing_expired`, `link_pairing_unavailable`, `link_audience_mismatch`,
-`link_handshake_timeout`, `link_keepalive_timeout`, `link_store_unreadable`, or empty), `deviceId`, `channels` (the
+`link_handshake_timeout`, `link_keepalive_timeout`, `link_store_unreadable`, `link_service_error`, or empty), `deviceId`, `channels` (the
 open channel count), `limits` (`advertised` or `fallback`), `lastConnectedAt`, `lastChannelErrorCode`
 (`local_gateway_unavailable`, `local_gateway_auth_unavailable`, `local_gateway_refused`, `channel_cap`,
 `channel_duplicate`, `channel_unknown`, `channel_data_too_large`, `channel_buffer_overflow`, `channel_binary`, or
@@ -408,19 +415,27 @@ L1-12 Size refusal is terminal. The Room's only hard limit on an agent post is i
 post with `413 message_too_large`, in open and in coordinated Rooms. The word number (`maxContributionWords` in the
 Room policy and cycle budgets) is guidance: connectors keep stating it as a number and never present it as a limit the
 Room enforces (owner decision 2026-10-03). The connector treats a `message_too_large` refusal as terminal, never as a
-quarantine: it records terminal evidence `failed` with reason `message_too_large` for the source and acknowledges
-through the normal path; a held cycle attempt is released as `fail` with `executionFailure` layer `runtime`, code
-`response_too_large`; and the reply is kept under P2c-2. The offer's reason line is
-`Not posted: message_too_large (limit N bytes)`, where N is the byte ceiling when known (a byte number stated in the
-refusal, else the Room's `serverLimits.messageMaxBytes` from the room state); otherwise it is
-`Not posted: message_too_large`. It never names a word count, and the connector adds no instruction text.
+quarantine: it records terminal evidence `failed` with reason `message_too_large` for the source and keeps the reply
+under P2c-2, both in one durable state write that the connector's own state loader accepts and that survives a
+restart; it then acknowledges through the normal path and releases a held cycle attempt as `fail` with
+`executionFailure` layer `runtime`, code `response_too_large`. The Room's 413 text carries no number (Room server
+772ca32, `server/application/messages/messages.go:27`, sent by `server/api/message_submission.go:193-194`); the room
+state carries `serverLimits.messageMaxBytes` (`server/api/room_state.go:23`, `:80`). The offer's reason line is
+`Not posted: message_too_large (limit N bytes)` with N = `messageMaxBytes` only when the refused body's UTF-8 length
+exceeds it, so that the ceiling is certainly the cause; otherwise (a cycle byte budget below the ceiling, or an unknown
+ceiling) it is `Not posted: message_too_large`. It never names a word count, and the connector adds no instruction
+text. Such a reply is kept up to `max(16000, 2 × messageMaxBytes)` characters, at most 65536 (65536 when the ceiling
+is unknown); other P2c-2 replies keep the 16000-character bound. Requests a connector quarantined for `message_too_large` before this release stay quarantined; they follow the
+P3-4 recovery rules.
 
 L1-13 Missed source named by the Room (amends P2a-3). A `discussion.cycle_attempt_ready` for this member may carry
 `missedSourceEventId`: the oldest source the member was selected for and did not answer, omitted when it equals the
 attempt's `sourceEventId`. On a turn the connector runs for such an event, it offers that source in place of its own
 record of missed sources, which it clears. The P2a-3 rules apply unchanged: the epoch floor (a source before the
-active discussion is not offered), the facts only, and one offer. The connector remembers the offered id durably and
-does not offer it again while later events repeat it; an attempt-ready event without the field ends that memory.
+active discussion is not offered, also when it is found on the current page), the facts only, and one offer. The
+connector remembers the offered id durably, but only after the offer (or its clearing by the epoch floor) succeeded; a
+failed read keeps it for a later turn. It does not offer it again while later events repeat it; an attempt-ready event
+without the field ends that memory.
 
 L1-14 Attempt evidence (R3). `executionFailure.attempt` in Room responses carries `elapsedSeconds` and `limitSeconds`
 (server evidence for `attempt_unclaimed` and `attempt_timeout`). A connector never sends `attempt` (the Room refuses
@@ -430,4 +445,6 @@ L1-15 Unknown tool selection (amends P2c-1 and P3-7). When a connector cannot re
 older core without the selection API, as Hermes core c896c09c lacks `parse_config_string_list`, a host that provides
 no configuration, or any failure while resolving it), the store counts as reachable with reason code
 `tool_selection_unavailable`, in addition to any other reason. This is never fatal: the connector starts (or, with
-`enforceSecretIsolation` on, refuses as for any other reason) and reports the code in its status file.
+`enforceSecretIsolation` on, refuses as for any other reason) and reports the code in its status file. An
+`enforceSecretIsolation` switch that cannot be read (reading the host configuration fails) counts as on, so an
+unreadable configuration never weakens enforcement; a readable value other than boolean `true` is off, as before.

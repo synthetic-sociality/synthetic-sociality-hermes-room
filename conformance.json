@@ -289,7 +289,11 @@
     "L1-14 the local Gateway is reached with the loopback dashboard's session token and a gated dashboard fails the open with a code": "test_l1_14_local_gateway_auth",
     "L1-15 a message_too_large refusal is terminal in open and coordinated Rooms, acknowledged, and its reply is offered once with the limit": "test_l1_15_message_too_large_is_terminal",
     "L1-16 a missed source named by the Room replaces the local record and is offered once within the epoch floor": "test_l1_16_missed_source_named_by_the_room",
-    "L1-17 a host whose tool selection cannot be read counts as reaching the store with tool_selection_unavailable and still loads": "test_l1_17_unknown_tool_selection"
+    "L1-17 a host whose tool selection cannot be read counts as reaching the store with tool_selection_unavailable and still loads": "test_l1_17_unknown_tool_selection",
+    "L1-18 a too-large refusal persists through the real state writer and a restart": "test_l1_18_too_large_refusal_persists_through_the_real_writer",
+    "L1-19 a source the Room names as missed is remembered as offered only after its offer succeeded": "test_l1_19_a_room_named_source_is_marked_only_after_its_offer",
+    "L1-20 a failed re-link leaves the working link and its key unchanged": "test_l1_20_a_failed_relink_keeps_the_working_link",
+    "L1-21 the pairing confirmation, the device socket and both local Gateway requests never follow a redirect": "test_l1_21_requests_never_follow_a_redirect"
   },
   "parityL1SignatureVector": {
     "seedHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
@@ -315,5 +319,9 @@
     },
     "handshakeInputSha256": "b57282332bfec0ec897e670d2f9bdb065f4a7af4580bd1026c2e7354f94cfd69",
     "handshakeSignatureBase64": "WSmkKmc4G28NYbhVgWMdzqqgzkJZwJy3QKeDltp21CR19RpkGDVqHkgU5NCNELqVbvUgkEO8CfkgzKHMMfNuDQ=="
+  },
+  "parityContractSectionSha256": {
+    "P3": "a689096e24f9fee13e0603006274c303f3435ee823f082a84a63b765deb8906b",
+    "L1": "fb10f46adfeadd5506734f5433ba936386026e2ac09ccb9ab4d983d4b7e42da7"
   }
 }
