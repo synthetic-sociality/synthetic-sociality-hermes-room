@@ -295,7 +295,7 @@ fenced. An enabled MCP server runs outside both routes and counts as reaching th
 ## L1 — Device link (2026-10-03)
 
 A user links their own agent runtime to their Harness as a local device, without a Room invitation. Hermes implements
-this first (1.0.78); the OpenClaw translation follows in P5, and until then its L1 cases are planned. The wire is fixed
+this first (1.0.78); the OpenClaw translation follows in a later release, and until then its L1 cases are planned. The wire is fixed
 by two specification files in the operations outputs, which hold the field-level tables and the server code references.
 This section does not copy them; it pins them and states the connector rules on top of them.
 
@@ -491,10 +491,59 @@ cycle source's attachments come first, then the turn source's, cut at the limit 
 and the untrusted-content framing are unchanged.
 
 P5-2 Unresolvable cycle source. The connector takes the cycle's source message from the loaded context, otherwise from
-the bounded epoch scan of P1a-8 (at most 2000 sequence numbers, never before the epoch start), and remembers it per
-cycle. When it cannot be resolved (outside the scan bound, or a Room error), the turn proceeds without it, and one log
-line with code `cycle_source_unresolved` says so (Room, cycle and source ids only). The turn is never failed or retried
-for it.
+the bounded epoch scan of P1a-8 (at most 2000 sequence numbers, never before the epoch start), under one overall time
+bound of 10 seconds for the whole lookup (Hermes `CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS`, OpenClaw
+`CYCLE_DOCUMENT_SOURCE_TIMEOUT_MS`). It remembers the outcome per cycle, a found source and an unresolved one alike, for
+at most 32 cycles, so that a slow or unresolvable source costs at most one bounded lookup per cycle and process; a
+remembered outcome counts only for the same epoch start, and a remembered source never below it. When the source
+cannot be resolved (outside the scan bound, a Room error, or the time bound), the turn proceeds without it, and one log
+line with code `cycle_source_unresolved` says so (Room, cycle and source ids and a reason code, never content). The
+turn is never failed, retried or delayed beyond that bound for it.
 
 P5-3 Outside a cycle. A message outside a cycle (an open Room turn without a claimed cycle attempt) is unchanged: its
 own attachments only.
+
+## P6 — Clean start and bounds (2026-10-04)
+
+Owner, ISSUE-015/016: "/start-discussion should also reset the tokens in the room"; "start causes new token consumption
+but the old tokens should not be carried forward". Across a start the context was already clean (report
+`REPORT-20261004-ISSUE-015-discussion-context-facts.md`); this section states it as a rule and closes its edges. It
+does not address the growth inside one discussion.
+
+P6-1 Clean start. Nothing from before the active discussion's start (the active epoch's `startsAtSeq`) enters a
+prompt, except: the Room title and purpose, the Room guidance and policy lines, the library catalog (metadata only), a
+handover that the start command explicitly carried, and the documents of the current cycle's source. Every block that
+holds Room events (the transcript window, the current item, a missed source, a kept reply, the cycle source, and the
+messages whose attachments form the document context) holds only events at or above the epoch start. Each discussion
+runs in a new host session (Hermes thread `room-epoch-v1:` + sha256 of the epoch id, OpenClaw peer `<roomId>:epoch:` +
+the first 32 hex digits of that sha256); the session of an earlier discussion is neither replayed nor deleted. Earlier
+discussions stay reachable only through the history tool, on the model's own call. The one exception is the legacy
+session of P6-3.
+
+P6-2 Unknown epoch start. When the active epoch has no start (missing, or below 1), the connector never widens a window
+to the Room's history and never refuses the turn for it: the prompt holds no earlier event (no transcript entry, no
+missed source, no kept reply, no scanned source; the current event and its own attachments only), the turn proceeds,
+and one log line with code `epoch_start_unknown` says so (Room id only). The durable missed sources and kept reply are
+neither offered nor cleared on such a turn. Refusing the turn would stop the agent until the Room repaired its data;
+therefore an event page whose active epoch has a valid id and no valid start is processed with the start unknown, while
+a page without a valid active epoch id still fails closed.
+
+P6-3 Legacy session rotation. The epoch that was active when a connector first initialised epoch routing keeps the
+older per-Room host session. Both connectors offer the operator command `rotate-current-epoch-session` for one Room
+membership: Hermes `hermes room rotate-current-epoch-session ROOM_ID [--yes]`, OpenClaw `openclaw-room-recovery
+rotate-current-epoch-session (--state FILE | --account ID) [--yes]`. Without `--yes` it is a dry run: it prints the
+membership's routing (initialised or not, whether its recorded epoch uses the legacy session, whether a rotation is
+already authorised) and changes nothing. With `--yes` it authorises, durably and for that membership only, that the
+epoch active at the connector's next start gets a fresh epoch session instead of the legacy one. The authorisation is
+consumed once at that start. It never deletes or edits a host session, a cursor, an acknowledgement, an intent or a
+quarantine, and a running connector does not overwrite it (Hermes merges it into its next state write; OpenClaw reads it
+from a request file beside the state, `<state>.rotate-epoch-session.json`, which it consumes at its next start).
+
+P6-4 Guidance bound. The saved Room guidance (rules with enforcement `guidance`, each text trimmed, empty texts and the
+open-exchange preamble left out) is rendered in Room order as one line per rule, `- ` followed by the text. The joined
+lines hold at most 3,000 characters, counted in Unicode code points. The bound is a connector constant (Hermes and
+OpenClaw `GUIDANCE_CHARACTER_LIMIT`), not a Room policy value. Lines are kept whole while they fit, the newline between
+two lines counting as one character. The first line that does not fit is cut to the remaining room and its last kept
+character is replaced by `…`, so that the joined lines hold exactly 3,000 characters; when fewer than two characters
+remain, it is dropped instead. Every later line is dropped. Both repositories pin the same vector,
+`parityP6GuidanceVector` in `conformance.json`.
