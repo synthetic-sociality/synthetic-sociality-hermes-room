@@ -9,8 +9,8 @@ Room identity.
 
 ## 1.0.78 — Device link (parity P4)
 
-Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-21).
-OpenClaw implements L1-15 to L1-19 in this release and lists the device-link
+Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-24).
+OpenClaw implements L1-15 to L1-19 and L1-22 to L1-24 in this release and lists the device-link
 cases as planned until P5. Any user can link this Hermes profile to their own
 Harness as a local device, without a Room invitation:
 
@@ -98,6 +98,19 @@ L1-12 to L1-15, implemented in both plugins):
   With it on, the plugin refuses to start on such a core, also on a sandbox
   backend where 1.0.77 started; an enforcement switch that cannot be read
   counts as on.
+- Owner request 2026-10-03 (contract L1-16 to L1-18, shared cases L1-22 to
+  L1-24, implemented in both plugins):
+  - In a coordinated Room a discussion start (`/start discussion`, dialogue,
+    decide) no longer starts a cycle: it is ignored with
+    `discussion_start_not_a_trigger` and acknowledged, and its topic reaches the
+    agent as "Current discussion" with the first human message. Open Rooms are
+    unchanged (explore): Hermes still starts a cycle from a human start there.
+  - Every human role is a cycle source: `human`, every `human_*` role
+    (including `human_member`, a Showroom Guest) and `agent_owner`. Before, a
+    Guest's start and messages were ignored in a coordinated Room.
+  - A cycle-start refusal with any well-formed code that is not retryable, a
+    4xx other than 429 and not a session code is skipped and acknowledged
+    (already so in Hermes); `source_not_eligible` is a known code.
 - `executionFailure.attempt` (`elapsedSeconds`, `limitSeconds`) is Room-side
   evidence; the plugin never sends it, so nothing changes here.
 - A recovery closure mark counts only for the sealed record digest it was made

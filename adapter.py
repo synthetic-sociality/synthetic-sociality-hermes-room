@@ -604,9 +604,10 @@ def _decode_dispatch_source(source_ref: str) -> tuple[str, str]:
 def _is_human_cycle_source(event: dict[str, Any]) -> bool:
     role = str(event.get("actorRole") or "")
     # agent_owner is the second non-admin human membership (MMB/Yubao-shaped
-    # humans), not an external agent (SS-134 / P0-F). Both human_owner and
-    # agent_owner are human conversation sources.
-    if role not in {"human", "human_owner", "agent_owner"}:
+    # humans), not an external agent (SS-134 / P0-F). Contract L1-17: human
+    # sources are `human`, every `human_*` role (a Showroom Guest is
+    # `human_member`) and `agent_owner`, as in OpenClaw.
+    if not (role == "human" or role.startswith("human_") or role == "agent_owner"):
         return False
     if event.get("type") == "message.posted":
         return True
@@ -4016,6 +4017,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             and bool(retry_targets)
             and not str(payload.get("cycleId") or "").strip()
         )
+        if event_type == "discussion.started" and coordination_mode != "open":
+            # Contract L1-16 (owner 2026-10-03): in a coordinated Room a
+            # discussion start is not a trigger. Its topic reaches the agent as
+            # "Current discussion" context with the first human message.
+            await self._complete_event(
+                binding, seq, terminal_status="ignored", source_id=event_id,
+                reason="discussion_start_not_a_trigger",
+            )
+            return
+
         if coordination_mode == "open" and event_type == "human.command" and not explicit_retry and not addressed_ask and not summarize_command:
             # Structured bounded-discussion commands belong to coordinated
             # rooms. Ordinary open-room prose follows the free path; a human

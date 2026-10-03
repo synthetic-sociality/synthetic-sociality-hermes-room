@@ -16,7 +16,7 @@ from unittest import mock
 from test_delivery_lifecycle import adapter
 from test_parity_p1 import cycle_attempt, room_instance, source_ref
 from test_parity_p1a import DENY_PATTERN, START, attempt_ready, build_message, cycle
-from test_parity_p2a import ROSTER, message
+from test_parity_p2a import ROSTER, consume_instance, message
 
 state_module = __import__(adapter.__name__.rsplit(".", 1)[0] + ".state", fromlist=["state"])
 
@@ -276,6 +276,53 @@ class L1RoomServerTests(unittest.TestCase):
                 self.assertEqual((reloaded.kept_reply["reason"], reloaded.kept_reply["text"]),
                                  ("message_too_large (limit 16 bytes)", REPLY))
                 self.assertEqual(len(api.posts), 1)
+
+    # Owner request 2026-10-03 (contract L1-16 to L1-18).
+    def test_l1_22_a_coordinated_discussion_start_is_not_a_trigger(self):
+        start = {**START, "seq": 2964}
+        instance, binding, starts, completed, _persisted = consume_instance(mode="coordinated")
+        asyncio.run(instance._consume(binding, start))
+        self.assertEqual(starts, [])
+        self.assertEqual((completed[-1]["terminal_status"], completed[-1]["reason"]),
+                         ("ignored", "discussion_start_not_a_trigger"))
+        # Open Rooms are unchanged: Hermes starts a cycle from a human start.
+        instance, binding, starts, completed, _persisted = consume_instance(mode="open")
+        asyncio.run(instance._consume(binding, start))
+        self.assertEqual(len(starts), 1)
+        # The topic reaches the agent with the first human message.
+        text = build_message({**message(2965, "owner-1", "human_owner", "Should the doctor disclose it?")},
+                             context=(START, message(2965, "owner-1", "human_owner", "Should the doctor disclose it?")),
+                             starts_at=41, topic={"title": "Disclosure of a diagnosis"}).text
+        self.assertIn("Current discussion: Disclosure of a diagnosis", text)
+
+    def test_l1_23_every_human_role_is_a_cycle_source(self):
+        for role in ("human", "human_owner", "human_member", "human_admin", "agent_owner"):
+            self.assertTrue(adapter._is_human_cycle_source({"type": "message.posted", "actorRole": role}), role)
+        for role in ("participant_agent", "room_master", "system", ""):
+            self.assertFalse(adapter._is_human_cycle_source({"type": "message.posted", "actorRole": role}), role)
+        # A Showroom Guest's message starts a cycle in a coordinated Room.
+        guest = message(2964, "guest-1", "human_member", "@Agent your view?", resolvedRecipientMembershipIds=["member-1"])
+        instance, binding, starts, completed, _persisted = consume_instance(mode="coordinated")
+        asyncio.run(instance._consume(binding, guest))
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0]["sourceEventId"], guest["id"])
+
+    def test_l1_24_an_unknown_cycle_start_refusal_is_skipped(self):
+        mention = message(2964, "owner-1", "human_owner", "@Agent your view?", resolvedRecipientMembershipIds=["member-1"])
+        for code, status in (("source_not_eligible", 409), ("a_code_no_list_names", 422)):
+            with self.subTest(code=code):
+                instance, binding, starts, completed, _persisted = consume_instance(
+                    start=lambda _r, code=code, status=status: (_ for _ in ()).throw(
+                        adapter.ProtocolError("refused", status=status, code=code, retryable=False)))
+                asyncio.run(instance._consume(binding, mention))
+                self.assertEqual(len(starts), 1)
+                self.assertEqual((completed[-1]["terminal_status"], completed[-1]["reason"]), ("skipped", code))
+        # Retryable, 429 and session codes keep the retry path (raised, not skipped).
+        for code, status, retryable in (("a_code_no_list_names", 422, True), ("a_code_no_list_names", 429, False),
+                                        ("busy", 409, False), ("credential_renewal_pending", 409, False)):
+            with self.subTest(code=code, status=status, retryable=retryable):
+                error = adapter.ProtocolError("refused", status=status, code=code, retryable=retryable)
+                self.assertFalse(adapter._is_cycle_start_refusal(error))
 
 
 if __name__ == "__main__":
