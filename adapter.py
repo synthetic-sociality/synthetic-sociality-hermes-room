@@ -478,7 +478,8 @@ def _core_tool_selection() -> tuple[set[str] | None, list[str]]:
     parse_config_string_list, exact names), and the enabled MCP servers.
 
     Tool names are None when core cannot report its selection; that denies
-    nothing, so the shell route is then judged by the terminal backend alone.
+    nothing, and the store counts as reachable (tool_selection_unavailable,
+    contract L1-15). Never raises.
     """
     try:
         from hermes_cli.config import load_config_readonly  # Hermes core
@@ -1219,6 +1220,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
                 if code not in reasons
             )
+        if tool_names is None and secret_isolation.TOOL_SELECTION_UNAVAILABLE not in reasons:
+            # Contract L1-15: a core whose tool selection cannot be read (an
+            # older core without parse_config_string_list, or an import or
+            # resolution failure) counts as reaching the store.
+            reasons.append(secret_isolation.TOOL_SELECTION_UNAVAILABLE)
         return reasons
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:

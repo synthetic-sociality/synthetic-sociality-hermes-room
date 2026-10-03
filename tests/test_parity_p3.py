@@ -125,8 +125,20 @@ import json, sys
 sys.path.insert(0, sys.argv[1])
 from support import load_module
 adapter = load_module("adapter")
+import importlib, os
+from pathlib import Path
 names, mcp = adapter._core_tool_selection()
-print("RESULT " + json.dumps({"names": sorted(names) if names is not None else None, "mcp": mcp}))
+missing = []
+for module, attribute in (("agent.skill_utils", "parse_config_string_list"), ("model_tools", "get_tool_definitions")):
+    try:
+        if not hasattr(importlib.import_module(module), attribute):
+            missing.append(f"{module}.{attribute}")
+    except ImportError:
+        missing.append(f"{module}.{attribute}")
+instance = object.__new__(adapter.SyntheticSocialityAdapter)
+instance._state_file = Path(os.environ["HERMES_HOME"]) / "synthetic-sociality-room" / "state.json"
+print("RESULT " + json.dumps({"names": sorted(names) if names is not None else None, "mcp": mcp,
+                              "missing": missing, "reasons": instance._secret_store_reasons()}))
 """
 
 
@@ -574,7 +586,12 @@ class P3Tests(unittest.TestCase):
                 self.assertEqual(instance._secret_store_reasons(), [])
             with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "TERMINAL_ENV": "local"}), \
                     mock.patch.object(adapter, "_core_tool_selection", lambda: (None, [])):
-                self.assertEqual(instance._secret_store_reasons(), ["host_shell_backend"])
+                self.assertEqual(instance._secret_store_reasons(), ["host_shell_backend", "tool_selection_unavailable"])
+            # Contract L1-15: unknown selection is reachable on a sandbox backend too.
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "TERMINAL_ENV": "docker", "TERMINAL_DOCKER_VOLUMES": "[]"}), \
+                    mock.patch.object(adapter, "_core_tool_selection", lambda: (None, [])), \
+                    mock.patch.object(secret_isolation, "_sandbox_mount_sources", lambda: []):
+                self.assertEqual(instance._secret_store_reasons(), ["tool_selection_unavailable"])
 
         # The config forms from the OP-12 review, through the real core (its
         # parse_config_string_list and get_tool_definitions) in a clean
@@ -591,7 +608,15 @@ class P3Tests(unittest.TestCase):
             with self.subTest(form=label):
                 result = core_selection(agent + mcp)
                 self.assertEqual(result["mcp"], ["alpha"])
+                if result["missing"]:
+                    # Contract L1-15: a core that genuinely lacks the API (core
+                    # c896c09c has no parse_config_string_list) reports no
+                    # selection, and the store counts as reachable.
+                    self.assertIsNone(result["names"], result)
+                    self.assertIn("tool_selection_unavailable", result["reasons"], result)
+                    self.skipTest(f"core lacks {', '.join(result['missing'])}: exact selection not checkable")
                 self.assertIsNotNone(result["names"], result)
+                self.assertNotIn("tool_selection_unavailable", result["reasons"], result)
                 self.assertEqual(not (set(result["names"]) & {"terminal", "process", "process_manage", "execute_code"}),
                                  denied, result["names"])
 

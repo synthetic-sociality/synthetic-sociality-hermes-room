@@ -49,6 +49,10 @@ copies the Gateway's JSON-RPC messages verbatim in both directions.
   - `revoked`, `authentication-failed` and `replaced` stop the link and keep
     the key until the user links again, unlinks or restarts the gateway;
   - other closes reconnect with bounded backoff with jitter.
+- **Several installations (G18):** a user may link several Hermes
+  installations; the Harness uses the most recently connected one. Each Hermes
+  profile has one device identity. `link status` reports codes only; it shows no
+  active or standby state until the server reports one.
 - **Dependencies:** `websockets` and `cryptography` are used from the Hermes
   core's own environment; both are base dependencies of Hermes.
 
@@ -67,6 +71,10 @@ L1-12 to L1-14, shared cases L1-15 and L1-16, implemented in both plugins):
 - A `discussion.cycle_attempt_ready` that carries `missedSourceEventId` (the
   oldest source this agent missed) is offered in place of the plugin's own
   record, under the same epoch floor, and only once.
+- A core whose tool selection cannot be read (core c896c09c on Mac2024 lacks
+  `parse_config_string_list`) now counts as reaching the credential store,
+  with reason `tool_selection_unavailable` in `status.json`; it never stops
+  the plugin (contract L1-15, shared case L1-17).
 - `executionFailure.attempt` (`elapsedSeconds`, `limitSeconds`) is Room-side
   evidence; the plugin never sends it, so nothing changes here.
 - A recovery closure mark counts only for the sealed record digest it was made

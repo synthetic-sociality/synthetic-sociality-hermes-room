@@ -6,7 +6,12 @@ in this release. No test uses a real credential or talks to a live Room.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from test_delivery_lifecycle import adapter
 from test_parity_p1 import cycle_attempt, room_instance, source_ref
@@ -126,6 +131,43 @@ class L1RoomServerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.RoomBinding.from_dict({**stored.__dict__, "missed_sources": [{**marked[0], "offered": "yes"}]})
         self.assertEqual(DENY_PATTERN.findall(fact), [])
+
+    def test_l1_17_unknown_tool_selection(self):
+        # A core without parse_config_string_list (Hermes core c896c09c) or a
+        # failing resolution reports no selection; it never raises.
+        with mock.patch.dict(sys.modules, {"agent.skill_utils": None}):
+            self.assertIsNone(adapter._core_tool_selection()[0])
+        broken = type(sys)("model_tools")
+        broken.get_tool_definitions = mock.Mock(side_effect=RuntimeError("core changed"))
+        with mock.patch.dict(sys.modules, {"model_tools": broken}):
+            self.assertIsNone(adapter._core_tool_selection()[0])
+        with tempfile.TemporaryDirectory() as scratch:
+            home = Path(scratch) / ".hermes"
+            store = home / "synthetic-sociality-room"
+            store.mkdir(parents=True)
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._state_file = store / "state.json"
+            secret_isolation = adapter.secret_isolation
+            for backend, expected in (("local", ["host_shell_backend", "tool_selection_unavailable"]),
+                                      ("docker", ["tool_selection_unavailable"])):
+                with self.subTest(backend=backend), \
+                        mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "HOME": scratch, "TERMINAL_ENV": backend,
+                                                     "TERMINAL_DOCKER_VOLUMES": "[]"}), \
+                        mock.patch.object(adapter, "_core_tool_selection", lambda: (None, [])), \
+                        mock.patch.object(secret_isolation, "_sandbox_mount_sources", lambda: []):
+                    reasons = instance._secret_store_reasons()
+                    self.assertEqual(reasons, expected)
+                    # Reported, not fatal: the status says reachable with the code.
+                    status = adapter.local_status.LocalStatus(store / "status.json", plugin="hermes", version="x", host_label="h")
+                    status.set_secret_store("reachable" if reasons else "isolated", reasons)
+                    written = adapter.local_status.read(store / "status.json")
+                    self.assertEqual((written["secretStore"], written["secretStoreReasons"]), ("reachable", expected))
+            # A readable selection adds no such code.
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "HOME": scratch, "TERMINAL_ENV": "docker",
+                                              "TERMINAL_DOCKER_VOLUMES": "[]"}), \
+                    mock.patch.object(adapter, "_core_tool_selection", lambda: ({"read_file"}, [])), \
+                    mock.patch.object(secret_isolation, "_sandbox_mount_sources", lambda: []):
+                self.assertEqual(instance._secret_store_reasons(), [])
 
 
 if __name__ == "__main__":

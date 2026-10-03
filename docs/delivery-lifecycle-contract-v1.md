@@ -425,3 +425,9 @@ does not offer it again while later events repeat it; an attempt-ready event wit
 L1-14 Attempt evidence (R3). `executionFailure.attempt` in Room responses carries `elapsedSeconds` and `limitSeconds`
 (server evidence for `attempt_unclaimed` and `attempt_timeout`). A connector never sends `attempt` (the Room refuses
 a report that carries it); no connector change.
+
+L1-15 Unknown tool selection (amends P2c-1 and P3-7). When a connector cannot read the host's tool selection (an
+older core without the selection API, as Hermes core c896c09c lacks `parse_config_string_list`, a host that provides
+no configuration, or any failure while resolving it), the store counts as reachable with reason code
+`tool_selection_unavailable`, in addition to any other reason. This is never fatal: the connector starts (or, with
+`enforceSecretIsolation` on, refuses as for any other reason) and reports the code in its status file.

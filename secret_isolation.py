@@ -45,6 +45,9 @@ KNOWN_PATH_KEYS = frozenset({"path", "file_path", "file", "cwd", "dir", "directo
 SEARCH_TOOLS = frozenset({"search_files"})
 STORE_DIRECTORY_NAME = "synthetic-sociality-room"
 REFUSAL_CODE = "secret_store_reachable"
+# Contract L1-15: the core's tool selection could not be read; unknown counts
+# as reaching the store.
+TOOL_SELECTION_UNAVAILABLE = "tool_selection_unavailable"
 # The per-installation switch: off reports and keeps running, on refuses.
 ENFORCEMENT_SETTING = "enforceSecretIsolation"
 BLOCK_MESSAGE = (
