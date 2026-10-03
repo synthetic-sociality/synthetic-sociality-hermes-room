@@ -402,11 +402,11 @@ never appear in a prompt, tool result, environment variable, log line or the sta
 L1-11 Status. The status file (Appendix) gains one object, `link`, with codes only: `state` (`not_linked`, `pending`,
 `connecting`, `connected`, `reconnecting` or `stopped`), `code` (the last status code from L1-8, or `link_pending`,
 `link_pairing_refused`, `link_pairing_expired`, `link_pairing_unavailable`, `link_audience_mismatch`,
-`link_handshake_timeout`, `link_keepalive_timeout`, `link_store_unreadable`, `link_service_error`, or empty), `deviceId`, `channels` (the
-open channel count), `limits` (`advertised` or `fallback`), `lastConnectedAt`, `lastChannelErrorCode`
-(`local_gateway_unavailable`, `local_gateway_auth_unavailable`, `local_gateway_refused`, `channel_cap`,
-`channel_duplicate`, `channel_unknown`, `channel_data_too_large`, `channel_buffer_overflow`, `channel_binary`, or
-empty) and `updatedAt`.
+`link_handshake_timeout`, `link_keepalive_timeout`, `link_store_unreadable`, `link_service_error`, or empty),
+`deviceId`, `channels` (the open channel count), `limits` (`advertised` or `fallback`), `lastConnectedAt`,
+`lastChannelErrorCode` (`local_gateway_unavailable`, `local_gateway_auth_unavailable`, `local_gateway_refused`,
+`channel_cap`, `channel_duplicate`, `channel_unknown`, `channel_data_too_large`, `channel_buffer_overflow`,
+`channel_binary`, or empty) and `updatedAt`.
 
 The following clauses were added to P4 after the Room server release joint-772ca32 (live 2026-10-03 07:46Z; receipt
 `RECEIPT-20261003T0746Z-room-server-joint-772ca32.md`). Both connectors implement them in this release.
@@ -420,13 +420,13 @@ under P2c-2, both in one durable state write that the connector's own state load
 restart; it then acknowledges through the normal path and releases a held cycle attempt as `fail` with
 `executionFailure` layer `runtime`, code `response_too_large`. The Room's 413 text carries no number (Room server
 772ca32, `server/application/messages/messages.go:27`, sent by `server/api/message_submission.go:193-194`); the room
-state carries `serverLimits.messageMaxBytes` (`server/api/room_state.go:23`, `:80`). The offer's reason line is
-`Not posted: message_too_large (limit N bytes)` with N = `messageMaxBytes` only when the refused body's UTF-8 length
-exceeds it, so that the ceiling is certainly the cause; otherwise (a cycle byte budget below the ceiling, or an unknown
-ceiling) it is `Not posted: message_too_large`. It never names a word count, and the connector adds no instruction
-text. Such a reply is kept up to `max(16000, 2 × messageMaxBytes)` characters, at most 65536 (65536 when the ceiling
-is unknown); other P2c-2 replies keep the 16000-character bound. Requests a connector quarantined for `message_too_large` before this release stay quarantined; they follow the
-P3-4 recovery rules.
+state carries `serverLimits.messageMaxBytes` (`server/api/room_state.go:23`, `:80`). The offer's reason line is `Not
+posted: message_too_large (limit N bytes)` with N = `messageMaxBytes` only when the refused body's UTF-8 length
+exceeds it, so that the ceiling is certainly the cause; otherwise (a cycle byte budget below the ceiling, or an
+unknown ceiling) it is `Not posted: message_too_large`. It never names a word count, and the connector adds no
+instruction text. Such a reply is kept up to `max(16000, 2 × messageMaxBytes)` characters, at most 65536 (65536 when
+the ceiling is unknown); other P2c-2 replies keep the 16000-character bound. Requests a connector quarantined for
+`message_too_large` before this release stay quarantined; they follow the P3-4 recovery rules.
 
 L1-13 Missed source named by the Room (amends P2a-3). A `discussion.cycle_attempt_ready` for this member may carry
 `missedSourceEventId`: the oldest source the member was selected for and did not answer, omitted when it equals the
@@ -448,3 +448,23 @@ no configuration, or any failure while resolving it), the store counts as reacha
 `enforceSecretIsolation` on, refuses as for any other reason) and reports the code in its status file. An
 `enforceSecretIsolation` switch that cannot be read (reading the host configuration fails) counts as on, so an
 unreadable configuration never weakens enforcement; a readable value other than boolean `true` is off, as before.
+
+The following clauses were added to P4 on the owner's request of 2026-10-03 ("when starting a new discussion the
+agents should not use the start as a trigger; same applies to dialogue and decide; explore is fine").
+
+L1-16 Discussion start is not a trigger. In a coordinated Room a connector does not start a cycle from
+`discussion.started`: it records the start as ignored with reason `discussion_start_not_a_trigger` and acknowledges
+it. The topic reaches the agent as the "Current discussion" context with the first human message. P1a-5 applies only
+to a `discussion.cycle_attempt_ready` that the Room itself issues with a start as its source. In an open Room nothing
+changes: Hermes starts a cycle from a human `discussion.started` (the Room may refuse it, L1-18); OpenClaw never
+starts a cycle from a start. That difference is an open parity question, not decided here.
+
+L1-17 Human cycle sources. The human sources of a cycle are the role `human`, every `human_*` role (including
+`human_member`, a Showroom Guest) and `agent_owner`, in both connectors.
+
+L1-18 Unknown cycle-start refusal. A refusal of a cycle start that carries a well-formed code
+(`^[a-z][a-z0-9_]{0,63}$`), is not retryable and has an HTTP status 4xx other than 429 is terminal for that source,
+whether or not the connector knows the code, unless the code is a session code (`busy`, `connector_not_active`,
+`credential_expired`, `credential_renewal_pending`, `credential_revoked`), which keeps the retry path. The source is
+recorded as skipped with that code and acknowledged; such a refusal never stops the channel. `source_not_eligible`
+(the Room's refusal of a start source) is a known code in both connectors.
