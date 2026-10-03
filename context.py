@@ -125,9 +125,8 @@ def canonical_room_context(
         description = str(topic.get("description") or "").strip()
         if description:
             lines.append(description)
-    guidance: list[str] = []
+    texts: list[str] = []
     preamble = ""
-    guidance_size = 0
     for rule in state.get("rules") or []:
         if str(rule.get("enforcement") or "").strip() != "guidance":
             continue
@@ -137,14 +136,8 @@ def canonical_room_context(
         if hashlib.sha256(text.encode("utf-8")).hexdigest() == OPEN_EXCHANGE_PREAMBLE_SHA256:
             preamble = text
             continue
-        available = GUIDANCE_CHARACTER_LIMIT - guidance_size
-        if available <= 1:
-            break
-        rendered = f"- {text}"
-        if len(rendered) > available:
-            rendered = rendered[: available - 1] + "…"
-        guidance.append(rendered)
-        guidance_size += len(rendered) + 1
+        texts.append(text)
+    guidance = bounded_guidance(texts)
     policy = policy or {}
     policy = policy.get("policy") if isinstance(policy.get("policy"), dict) else policy
     topic_drift = str(policy.get("topicDrift") or "").strip()
@@ -363,7 +356,10 @@ def cycle_source_message(
     """
     wanted = str(source_id or "").strip()
     before = int(before_seq or 0)
-    floor = max(1, int(active_epoch_starts_at or 1))
+    # Contract P6-2: no epoch start, no floor, no scan (same in OpenClaw).
+    floor = int(active_epoch_starts_at or 0)
+    if floor < 1:
+        return None
     scanned = 0
     while wanted and before > floor and scanned < max_scan:
         width = min(CONTEXT_SCAN_CHUNK, before - floor, max_scan - scanned)
@@ -481,6 +477,31 @@ def discussion_handover_context(start_event: dict[str, Any] | None) -> str:
     return header + "\n" + body + "\n" + footer
 
 
+def bounded_guidance(texts: list[str]) -> list[str]:
+    """Saved guidance lines under the contract P6-4 bound (same in OpenClaw).
+
+    Each rule is one line ``- <text>``. The joined lines hold at most
+    GUIDANCE_CHARACTER_LIMIT characters (code points), a connector constant,
+    not a Room policy value. Whole lines are kept while they fit; the first
+    line that does not fit is cut to the remaining room ending in ``…``, or
+    dropped when fewer than two characters remain; later lines are dropped.
+    """
+    lines: list[str] = []
+    size = 0
+    for text in texts:
+        available = GUIDANCE_CHARACTER_LIMIT - size
+        if available <= 1:
+            break
+        rendered = f"- {text}"
+        if len(rendered) > available:
+            rendered = rendered[: available - 1] + "…"
+            lines.append(rendered)
+            break
+        lines.append(rendered)
+        size += len(rendered) + 1
+    return lines
+
+
 def _clean_block(value: Any) -> str:
     return " ".join(str(value or "").split())
 
@@ -505,7 +526,11 @@ def recent_room_messages(
 	Transport acknowledgement state is deliberately not an input.
     """
     before = max(1, int(before_seq))
-    floor = max(1, int(active_epoch_starts_at or 1))
+    # Contract P6-2: an epoch without a start never widens the window to the
+    # Room's history; there is no earlier message (same in OpenClaw).
+    floor = int(active_epoch_starts_at or 0)
+    if floor < 1:
+        return []
     scanned = 0
     messages: dict[str, dict[str, Any]] = {}
     while before > floor and scanned < max_scan:

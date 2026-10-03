@@ -72,7 +72,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.79"
+CONNECTOR_VERSION = "1.0.80"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -721,6 +721,9 @@ MISSED_SOURCE_EVENT_TYPES = frozenset({"message.posted", "human.command"})
 # sources are remembered (same in OpenClaw).
 CYCLE_DOCUMENT_SOURCE_TYPES = ("message.posted", "human.command", "discussion.started")
 CYCLE_DOCUMENT_SOURCE_CACHE = 32
+# Contract P5-2: one overall time bound on the cycle-source lookup of a turn
+# (OpenClaw CYCLE_DOCUMENT_SOURCE_TIMEOUT_MS, the same 10 seconds).
+CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS = 10
 
 
 def _is_cycle_start_refusal(error: ProtocolError) -> bool:
@@ -4636,15 +4639,22 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         except Exception as error:
             logger.warning("Room %s guidance refresh unavailable: %s", binding.room_id, error)
         context_events: list[dict[str, Any]] = []
+        # Contract P6-2: an active epoch without a start (missing or below 1)
+        # never widens the window to the Room's history; the prompt carries no
+        # earlier event and the turn proceeds (same in OpenClaw).
+        start_known = starts_at >= 1
+        if not start_known:
+            logger.warning("Room %s epoch start unknown: code epoch_start_unknown", binding.room_id)
         try:
-            context_events = await self._call(
-                binding,
-                lambda api: _recent_room_messages(
-                    lambda after: api.events(binding.room_id, after, 0),
-                    before_seq=seq,
-                    active_epoch_starts_at=starts_at,
-                ),
-            )
+            if start_known:
+                context_events = await self._call(
+                    binding,
+                    lambda api: _recent_room_messages(
+                        lambda after: api.events(binding.room_id, after, 0),
+                        before_seq=seq,
+                        active_epoch_starts_at=starts_at,
+                    ),
+                )
         except Exception as error:
             # Canonical delivery remains available if the bounded enrichment
             # read fails; the next Room event gets another chance to refresh.
@@ -4668,7 +4678,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     logger.warning("Room %s discussion start unavailable: %s", binding.room_id, error)
             if isinstance(start_event, dict) and str(start_event.get("id") or "") == source_id:
                 prompt_event = start_event
-            elif source_id:
+            elif source_id and start_known:
                 # Contract P1a-8: a source message older than the bounded
                 # context is read by a bounded scan and is still the current item.
                 source_message = None
@@ -4693,14 +4703,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             state, context_events, prompt_event_id, _policy_view(context_policy),
         )
         attempt_ready = event.get("type") == "discussion.cycle_attempt_ready"
-        missed_facts, missed_offered, missed_mark = await self._missed_source_facts(
-            binding, state, seq, context_events, starts_at,
-            {event_id, prompt_event_id, str(payload.get("sourceEventId") or "")},
-            server_missed=_server_missed_source(payload) if attempt_ready else "",
-        )
-        kept_block, kept_cleared = await self._kept_reply_block(
-            binding, state, context_events, str(active_epoch_id or ""), starts_at, seq,
-        )
+        missed_facts, missed_offered, missed_mark = [], [], ""
+        kept_block, kept_cleared = "", False
+        if start_known:
+            missed_facts, missed_offered, missed_mark = await self._missed_source_facts(
+                binding, state, seq, context_events, starts_at,
+                {event_id, prompt_event_id, str(payload.get("sourceEventId") or "")},
+                server_missed=_server_missed_source(payload) if attempt_ready else "",
+            )
+            kept_block, kept_cleared = await self._kept_reply_block(
+                binding, state, context_events, str(active_epoch_id or ""), starts_at, seq,
+            )
         handover_context = ""
         try:
             handover_context = await self._epoch_handover_context(
@@ -4772,7 +4785,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         )
         # Offered once, then cleared durably before core runs the turn (P2a-3,
         # P2c-2).
-        self._clear_missed_sources(binding, missed_offered, mark=missed_mark, attempt_ready=attempt_ready)
+        if start_known:
+            self._clear_missed_sources(binding, missed_offered, mark=missed_mark, attempt_ready=attempt_ready)
         if kept_cleared:
             self._clear_kept_reply(binding)
         # Bounded size telemetry for the pilot: character counts only, never
@@ -4835,35 +4849,68 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         for item in loaded:
             if isinstance(item, dict) and str(item.get("id") or "") == source_id:
                 return item
+        if starts_at < 1:
+            # Contract P6-2: without an epoch start there is no floor to scan to.
+            return None
         cache = getattr(self, "_cycle_source_events", None)
         if cache is None:
             cache = self._cycle_source_events = {}
         key = (binding.room_id, str(cycle.get("id") or ""), source_id)
+        # Contract P5-2: a found source and an unresolved one are both
+        # remembered per cycle, so the bounded lookup runs at most once. A hit
+        # counts only for the same epoch floor and never below it.
         if key in cache:
-            return cache[key]
+            floor, cached = cache[key]
+            if floor == starts_at and (cached is None or int(cached.get("seq") or 0) >= starts_at):
+                return cached
         reason = "not_found"
         found = None
         try:
-            found = await self._call(
-                binding,
-                lambda api: _cycle_source_message(
-                    lambda after: api.events(binding.room_id, after, 0), source_id,
-                    before_seq=before_seq, active_epoch_starts_at=starts_at,
-                    types=CYCLE_DOCUMENT_SOURCE_TYPES,
-                ),
-            )
+            found = await self._bounded_cycle_source_lookup(binding, source_id, before_seq, starts_at)
         except Exception as error:
             reason = type(error).__name__
         if not isinstance(found, dict):
+            found = None
             logger.warning(
                 "Room %s cycle source documents unavailable: code cycle_source_unresolved cycle %s source %s reason %s",
                 binding.room_id, cycle.get("id") or "-", source_id, reason,
             )
-            return None
-        cache[key] = found
+        cache.pop(key, None)
+        cache[key] = (starts_at, found)
         while len(cache) > CYCLE_DOCUMENT_SOURCE_CACHE:
             cache.pop(next(iter(cache)))
         return found
+
+    async def _bounded_cycle_source_lookup(
+        self, binding: RoomBinding, source_id: str, before_seq: int, starts_at: int,
+    ) -> dict[str, Any] | None:
+        """The P5-2 epoch scan under one overall time bound.
+
+        The turn waits at most CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS. A read
+        still running then is abandoned, and the walk starts no further page
+        read after the deadline.
+        """
+        deadline = time.monotonic() + CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS
+
+        def scan(api: RoomProtocol) -> dict[str, Any] | None:
+            def page(after: int) -> dict[str, Any]:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("cycle source lookup deadline")
+                return api.events(binding.room_id, after, 0)
+
+            return _cycle_source_message(
+                page, source_id, before_seq=before_seq, active_epoch_starts_at=starts_at,
+                types=CYCLE_DOCUMENT_SOURCE_TYPES,
+            )
+
+        worker = asyncio.ensure_future(self._call(binding, scan))
+        done, _pending = await asyncio.wait({worker}, timeout=CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS)
+        if not done:
+            # Not cancelled: _call waits for its thread on cancellation, which
+            # would hold the turn. The abandoned read's outcome is discarded.
+            worker.add_done_callback(lambda task: task.cancelled() or task.exception())
+            raise TimeoutError("cycle source lookup timed out")
+        return worker.result()
 
     def _note_missed_source(self, binding: RoomBinding, source_id: str, source_seq: int = 0) -> None:
         """Record a source whose turn never reached the model (P2a-3)."""

@@ -44,7 +44,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     rotate_session.add_argument("room_id")
     rotate_session.add_argument(
         "--yes", action="store_true",
-        help="Confirm the one-binding current-epoch transcript rotation (required)",
+        help="Apply the one-binding current-epoch transcript rotation (without it: dry run)",
     )
     fence = commands.add_parser(
         "fence",
@@ -362,6 +362,9 @@ def _unlink() -> int:
     if removed is None:
         print("Not linked; nothing to delete.")
         return 0
+    if removed.get("pendingNotRemoved"):
+        print(f"A directory with content stands at {device_link.pending_path(device_link.link_path())}; "
+              "it was left in place.")
     if removed.get("pendingOnly"):
         print(f"Deleted the pending, never confirmed link of device {removed.get('deviceId', '')} (its key and "
               "pairing secret).")
@@ -475,11 +478,24 @@ def _toggle(room_id: str, enabled: bool) -> int:
 
 
 def _rotate_current_epoch_session(room_id: str, *, confirmed: bool) -> int:
-    """Authorize one binding to leave its legacy baseline on restart."""
-    if not confirmed:
-        raise ValueError("--yes is required for current-epoch session rotation")
-    if load().binding(room_id) is None:
+    """Authorize one binding to leave its legacy baseline on restart.
+
+    Contract P6-3: without ``--yes`` a dry run that changes nothing (same
+    name and semantics as OpenClaw ``openclaw-room-recovery``).
+    """
+    current = load().binding(room_id)
+    if current is None:
         raise ValueError(f"room {room_id!r} is not configured")
+    if not confirmed:
+        routing = "initialized" if current.epoch_session_routing_initialized else "not initialized"
+        legacy = "the legacy Room session" if current.legacy_session_epoch_id else "an epoch session"
+        pending = " A rotation is already authorized." if current.rotate_current_epoch_session else ""
+        print(
+            f"{room_id}: dry run. Epoch session routing is {routing}; the epoch recorded at "
+            f"initialization uses {legacy}.{pending} With --yes, the epoch active at the next gateway "
+            "start gets a fresh epoch session for this binding only; nothing else changes."
+        )
+        return 0
 
     def authorize(current):
         latest = current.binding(room_id)

@@ -7,6 +7,56 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.80 — Clean start and bounds (parity P6)
+
+Paired with OpenClaw 0.2.64 (contract section P6, shared cases P6-01 to P6-04;
+P5-2 amended, shared case P5-02).
+
+- **A new discussion starts clean** (contract P6-1). This was already the
+  behaviour and is now a rule with a shared case: nothing from before the
+  discussion start enters a prompt except the Room title and purpose, the
+  guidance and policy lines, the library catalog, a handover the start command
+  carried, and the documents of the current cycle's source. Each discussion
+  runs in a new Hermes session. This release does not change the growth of
+  input tokens inside one discussion (the host replays each earlier prompt);
+  that is designed separately.
+- **An epoch without a start** (`startsAtSeq` missing or below 1, contract
+  P6-2). Before, the window fell back to sequence 1 and could reach 2,000
+  sequence numbers into earlier discussions. Now the prompt holds no earlier
+  event, the turn proceeds, and one line with code `epoch_start_unknown` is
+  logged. Missed sources and a kept reply are neither offered nor cleared on
+  such a turn.
+- **`hermes room rotate-current-epoch-session ROOM_ID` is a dry run without
+  `--yes`** (contract P6-3). It prints the binding's routing and changes
+  nothing; before, it refused without `--yes`. With `--yes` it behaves as
+  before. OpenClaw now has the same command.
+- **Cycle-source lookup bounded** (contract P5-2, OP-12 P5 review item 1): an
+  unresolved cycle source is remembered per cycle like a found one (32 cycles),
+  and the whole lookup of a turn has one time bound,
+  `CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS` (10 seconds). A slow or unresolvable
+  source costs at most one bounded lookup per cycle; the turn proceeds with the
+  coded line `cycle_source_unresolved`. A remembered outcome counts only for
+  the same epoch start.
+- **Room guidance bound stated** (contract P6-4): 3,000 characters, counted in
+  code points, cut by one rule shared with OpenClaw (whole lines while they
+  fit, the first line that does not fit cut with `…`, later lines dropped),
+  pinned by a shared vector. Hermes cut this way already. The open-exchange
+  preamble is now recognised wherever it stands among the rules; before, a
+  preamble listed after the bound was reached was not.
+- **Device link** (OP-12 P5 review items 3 and 4): a `link-pending.json` that is
+  a directory no longer blocks `hermes room unlink` (an empty one is removed,
+  one with content is left in place and named); a malformed dashboard address
+  such as `http://[::1` is refused with `local_gateway_auth_unavailable`
+  instead of an uncaught error.
+- `plugin.yaml` declares `transform_tool_result`, which the plugin registers
+  (Plugin Doctor warned on 1.0.78 and 1.0.79); a test keeps the declared and
+  registered hooks equal.
+- Tests for the mutations the P5 review found surviving (cache key, epoch
+  floor and cache bound of the cycle-source lookup).
+
+No state migration and nothing new on disk: 1.0.80 loads a 1.0.79 state file
+unchanged, and a rollback to 1.0.79 needs no step.
+
 ## 1.0.79 — Cycle documents (parity P5)
 
 Paired with OpenClaw 0.2.63 (contract section P5, shared case P5-01; contract

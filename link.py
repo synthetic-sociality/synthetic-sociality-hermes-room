@@ -402,7 +402,16 @@ def delete_link(path: Path | None = None) -> dict[str, Any] | None:
             pending_view = public_view(read_link(pending) or {})
         except Exception:  # noqa: BLE001 - OP-12 P4 r3 finding 3: no shape blocks unlink
             pending_view = {}
-        pending.unlink()
+        if pending.is_dir() and not pending.is_symlink():
+            # OP-12 P5 review item 3: a hand-made directory in its place does
+            # not block unlink. An empty one is removed; one with content is
+            # left as it is (never a recursive delete) and reported.
+            try:
+                pending.rmdir()
+            except OSError:
+                pending_view = {"pendingNotRemoved": True}
+        else:
+            pending.unlink()
         pending_view["pendingOnly"] = True
     try:
         record = read_link(target)
@@ -412,7 +421,10 @@ def delete_link(path: Path | None = None) -> dict[str, Any] | None:
         # Only a pending (never confirmed) link was there (r2 item 10).
         return pending_view or None
     target.unlink()
-    return public_view(record or {})
+    view = public_view(record or {})
+    if pending_view.get("pendingNotRemoved"):
+        view["pendingNotRemoved"] = True
+    return view
 
 
 # OP-12 P4 r3 finding 5: the digest of an unreadable pending file reads at
@@ -680,8 +692,13 @@ def resolve_local_gateway(configured_url: str = "", *,
                 secret_isolation.remember_values([token])
                 return str(record.host), int(record.port), token
     url = (configured_url or DEFAULT_LOCAL_GATEWAY_URL).strip()
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        # OP-12 P5 review note 4: a malformed address (``http://[::1``) is a
+        # coded refusal, as an unusable dashboard URL.
+        raise LocalGatewayError("local_gateway_auth_unavailable") from None
     if parts.scheme != "http" or host not in LOOPBACK_HOSTS or parts.username is not None or parts.password is not None:
         # Contract L1-7: only a loopback dashboard; a gated one has no
         # non-interactive credential. No userinfo (OP-12 P4 r2 item 8).

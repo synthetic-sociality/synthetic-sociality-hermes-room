@@ -190,7 +190,7 @@ class ParityP5Tests(unittest.TestCase):
 
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP5Cases"]
-        self.assertEqual(len(cases), 1)
+        self.assertEqual(len(cases), 2)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P5-{index:02d} "), name)
