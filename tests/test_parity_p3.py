@@ -479,6 +479,7 @@ class P3Tests(unittest.TestCase):
             journal.write_bytes(b'{"version": 1, "verb": "close", "operator": "\xff\xfe"}\n'
                                 + (json.dumps(not_object) + "\n").encode()
                                 + b"\xc3\x28 not utf-8\n"
+                                + b"[" * 200000 + b"\n"
                                 + (recovery.canonical(good) + "\n").encode())
             self.assertEqual([record["recordDigest"] for record in recovery.read_records(journal)], [good["recordDigest"]])
             with self.assertRaises(ValueError):
