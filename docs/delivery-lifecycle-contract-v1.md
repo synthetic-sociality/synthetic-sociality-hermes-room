@@ -273,7 +273,8 @@ discussion epoch is no longer active (`epoch_closed`), its cycle is terminal (`c
 newer generation (`cycle_superseded`); the evidence reference names the proven object. An applied closure is an
 append-only audit record (who, when, why, and the proof fetched); the connector then records terminal evidence for
 that seq and acknowledges through the normal path. No closure edits a cursor, an acknowledgement, an intent or a
-quarantine directly.
+quarantine directly. The record's digest is unkeyed and its operator is not authenticated: a closure is safe because
+the Room's proof is checked again when it is applied, not because of the record itself.
 
 P3-5 Status path. The local status file (P2c-4) is written next to the state the connector actually uses; the
 connector creates that directory with mode 0700 when it is missing.
@@ -281,6 +282,7 @@ connector creates that directory with mode 0700 when it is missing.
 P3-6 Path arguments. A known path argument of a tool call (`path`, `file_path`, `file`, `cwd`, `dir`, `directory`,
 `root`, `workdir`) is always resolved and checked against the credential store, whatever its shape.
 
-P3-7 Isolation routes. The store counts as isolated (P2c-1) when the agent's shell, process and code-execution
-tools are denied for the installation, or when they run in a sandbox that does not contain the store; in both
-routes the file tools are fenced.
+P3-7 Isolation routes. The store counts as isolated (P2c-1) when the agent's shell, process, code-execution and
+computer-use or remote-command tools are denied for the installation, as the host itself resolves its tool
+selection, or when they run in a sandbox that does not contain the store; in both routes the file tools are
+fenced. An enabled MCP server runs outside both routes and counts as reaching the store unless it is disabled.
