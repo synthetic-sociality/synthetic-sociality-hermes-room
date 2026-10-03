@@ -266,5 +266,51 @@
     "do not repeat",
     "force",
     "agree"
-  ]
+  ],
+  "parityL1Contract": "docs/delivery-lifecycle-contract-v1.md#l1--device-link-2026-10-03",
+  "parityL1Specs": {
+    "SPEC-20261003-hermes-link-L1.md": "3bc145d2e0c40f56c4af091d52cbd13977133b75181ad2f8483251cadb17186d",
+    "SPEC-20261003-hermes-link-L1-addendum-G2-G8-G10.md": "c22acadc72e95c168456a745468a18c47e6f5c5a40545093e3c782dbd9d27c64"
+  },
+  "parityL1Cases": {
+    "L1-01 a link token is read at a hidden prompt and accepted only as v1 with every field, an https audience and an unexpired expiry": "test_l1_01_token_parsing",
+    "L1-02 the pairing confirmation is sent to the derived URL with the signed body and only 201 links": "test_l1_02_pairing_confirmation",
+    "L1-03 the signature inputs equal JavaScript JSON.stringify bytes for the shared vector": "test_l1_03_signature_vector",
+    "L1-04 the connect handshake echoes the challenge in one signed proof and refuses a foreign audience": "test_l1_04_signed_handshake",
+    "L1-05 limits are read from authentication-complete and fall back per value when absent": "test_l1_05_limits",
+    "L1-06 hermes-opened is sent when the local Gateway opens and frames pass verbatim both ways until close": "test_l1_06_channel_bridge",
+    "L1-07 an oversize frame or a channel above the cap ends only that channel": "test_l1_07_oversize_and_cap",
+    "L1-08 an unknown channel ends that channel and an unknown type or version closes the socket": "test_l1_08_unknown_frames",
+    "L1-09 revoked and replaced stop the link and keep the key while a pending link retries until the token expires": "test_l1_09_stop_states",
+    "L1-10 reconnects use bounded backoff with jitter and the device sends its own keepalive": "test_l1_10_reconnect_and_keepalive",
+    "L1-11 unlink deletes the local key and record and leaves the server revoke to the Harness": "test_l1_11_unlink",
+    "L1-12 the link key, pairing secret and local Gateway credential are not readable through agent tools and never appear in prompt, tool result, log or status": "test_l1_12_secret_custody",
+    "L1-13 link status is written to the status file as codes only, following the fixed close table": "test_l1_13_status_codes",
+    "L1-14 the local Gateway is reached with the loopback dashboard's session token and a gated dashboard fails the open with a code": "test_l1_14_local_gateway_auth"
+  },
+  "parityL1SignatureVector": {
+    "seedHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "publicKeySpkiBase64": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+    "fingerprintSha256": "a050837d85070582ccf7394b0988847cc312cb88259b894899f6f239cf1791a5",
+    "pairing": {
+      "version": 1,
+      "deviceId": "0f3c2b1a-9d8e-4f7a-8b6c-5d4e3f2a1b0c",
+      "pairingSecret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "deviceLabel": "Mac128 · Hermes claude </&>",
+      "publicKeySpkiBase64": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg="
+    },
+    "pairingInputSha256": "29c2a5f7b3d985365c2d438642dbd708fcf70fd9b0e6b0f0fed24f23c0a7790f",
+    "pairingSignatureBase64": "C1vomGgtLfYkHPmtTRE18Iu+eIXEWU2+Ws52trqhYUmcZE90EhpSe0zpv9HiucZApjx1XWqn40poTSvgr3uXCw==",
+    "handshake": {
+      "version": 1,
+      "handshakeId": "6f1d2c3b-4a59-4e68-9d7c-0b1a2c3d4e5f",
+      "connectionId": "1a2b3c4d-5e6f-4a0b-8c1d-2e3f4a5b6c7d",
+      "deviceId": "0f3c2b1a-9d8e-4f7a-8b6c-5d4e3f2a1b0c",
+      "audience": "https://rooms.tokenwerk.eu/tokenwerk/room/v1/local-devices/connect",
+      "nonce": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "expiresAt": "2026-10-03T12:00:15.000Z"
+    },
+    "handshakeInputSha256": "b57282332bfec0ec897e670d2f9bdb065f4a7af4580bd1026c2e7354f94cfd69",
+    "handshakeSignatureBase64": "WSmkKmc4G28NYbhVgWMdzqqgzkJZwJy3QKeDltp21CR19RpkGDVqHkgU5NCNELqVbvUgkEO8CfkgzKHMMfNuDQ=="
+  }
 }

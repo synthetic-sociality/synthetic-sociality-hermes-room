@@ -274,7 +274,9 @@ newer generation (`cycle_superseded`); the evidence reference names the proven o
 append-only audit record (who, when, why, and the proof fetched); the connector then records terminal evidence for
 that seq and acknowledges through the normal path. No closure edits a cursor, an acknowledgement, an intent or a
 quarantine directly. The record's digest is unkeyed and its operator is not authenticated: a closure is safe because
-the Room's proof is checked again when it is applied, not because of the record itself. When a record cannot be
+the Room's proof is checked again when it is applied, not because of the record itself. A seq counts as already
+closed only when its local mark carries the digest of the sealed record being applied; a mark made for another
+record of that seq does not count, and the proof is checked again. When a record cannot be
 applied, only a refusal of the proof or a final Room error retires it; any other failure (network, timeout, a
 retryable Room error, a local write failure or an unexpected exception) is retried at the connector's next
 iteration. Each outcome is logged once, and an unreadable journal line or record is skipped, never fatal.
@@ -289,3 +291,108 @@ P3-7 Isolation routes. The store counts as isolated (P2c-1) when the agent's she
 computer-use or remote-command tools are denied for the installation, as the host itself resolves its tool
 selection, or when they run in a sandbox that does not contain the store; in both routes the file tools are
 fenced. An enabled MCP server runs outside both routes and counts as reaching the store unless it is disabled.
+
+## L1 — Device link (2026-10-03)
+
+A user links their own agent runtime to their Harness as a local device, without a Room invitation. Hermes implements
+this first (1.0.78); the OpenClaw translation follows in P5, and until then its L1 cases are planned. The wire is fixed
+by two specification files in the operations outputs, which hold the field-level tables and the server code references.
+This section does not copy them; it pins them and states the connector rules on top of them.
+
+| File | sha256 |
+|---|---|
+| `SPEC-20261003-hermes-link-L1.md` | `3bc145d2e0c40f56c4af091d52cbd13977133b75181ad2f8483251cadb17186d` |
+| `SPEC-20261003-hermes-link-L1-addendum-G2-G8-G10.md` | `c22acadc72e95c168456a745468a18c47e6f5c5a40545093e3c782dbd9d27c64` |
+
+L1-1 Token. The token is `twh1.` followed by unpadded base64url of a UTF-8 JSON object (spec §2.2). The connector reads
+it only at a hidden prompt, never from the command line, and accepts at most 4096 characters. It accepts only `v` = 1,
+requires `audience`, `deviceId`, `pairingSecret` and `expiresAt` with the spec's formats, and ignores unknown extra
+fields. It refuses a token whose `expiresAt` lies more than 60 seconds in the past by its own clock; the server's
+expiry check stays authoritative. `audience` must be an `https:` URL whose path ends in `/local-devices/connect`, with
+no query and no fragment. The connect URL is `audience` with `https:` replaced by `wss:`, plus `?deviceId=<deviceId>`;
+the confirmation URL is `audience` with the trailing `/connect` replaced by `/pairing-confirmations`. `http:` and `ws:`
+are refused, except to a loopback host in a test build.
+
+L1-2 Pairing confirmation. The connector creates one Ed25519 key pair and sends one `POST` to the confirmation URL
+with no query, no cookie and no `Authorization`, a JSON body of at most 4096 bytes and exactly one key spelled
+`deviceId` (spec §3.1; addendum G2.4). The label is the machine name and the agent profile, trimmed and within the spec
+limits, and is trimmed before it is signed. Only `201` links. `404` means the token is spent, expired or invalid: the
+connector stops and asks for a fresh token. Any other failure leaves the link pending and is retried, with bounded
+backoff, until the token expires. The pairing secret is kept only while the link is pending.
+
+L1-3 Signature input. Both signature inputs (pairing, spec §3.1; handshake, spec §4.3) are the exact bytes of
+ECMAScript `JSON.stringify` of an object built in the documented key order: separators `,` and `:` without spaces,
+non-ASCII characters as literal UTF-8, and `/`, `<`, `>` and `&` unescaped. In Python that is
+`json.dumps(obj, separators=(',', ':'), ensure_ascii=False).encode('utf-8')`. Both repositories pin the same test
+vector, also listed in both `conformance.json` files as `parityL1SignatureVector`: the Ed25519 seed is the bytes
+0 to 31; the pairing input has `deviceId` `0f3c2b1a-9d8e-4f7a-8b6c-5d4e3f2a1b0c`, `pairingSecret` 43 times `A`,
+`deviceLabel` `Mac128 · Hermes claude </&>` and the seed's public key; the handshake input has `handshakeId`
+`6f1d2c3b-4a59-4e68-9d7c-0b1a2c3d4e5f`, `connectionId` `1a2b3c4d-5e6f-4a0b-8c1d-2e3f4a5b6c7d`, the same `deviceId`,
+`audience` `https://rooms.tokenwerk.eu/tokenwerk/room/v1/local-devices/connect`, `nonce` 43 times `B` and `expiresAt`
+`2026-10-03T12:00:15.000Z`. The SHA-256 of the pairing input is
+`29c2a5f7b3d985365c2d438642dbd708fcf70fd9b0e6b0f0fed24f23c0a7790f` and of the handshake input
+`b57282332bfec0ec897e670d2f9bdb065f4a7af4580bd1026c2e7354f94cfd69`.
+
+L1-4 Signed connect. The connector opens one WebSocket per agent profile to the connect URL, only while it is linked,
+inside the running agent host. It sends exactly one proof per socket, echoing `handshakeId`, `connectionId`,
+`deviceId`, `audience`, `nonce` and `expiresAt` from the challenge, and may add `pluginVersion`. A challenge whose
+`audience` or `deviceId` differs from the stored link is not answered: the connector closes the socket. The link is
+connected only after `authentication-complete`.
+
+L1-5 Limits. The connector reads `limits` `{maxDataBytes, openTimeoutMs, maxChannels, maxFrameBytes, keepaliveMs}`
+from `authentication-complete`. A missing or invalid value takes its fallback: `maxFrameBytes` 6291456,
+`maxDataBytes` 3145728, `openTimeoutMs` 15000, `maxChannels` 4, `keepaliveMs` 25000. Its WebSocket client accepts
+server messages of at least 6291456 + 1024 bytes. It sends its own ping every `keepaliveMs`, and closes the socket when
+nothing (message or pong) has arrived for twice that time.
+
+L1-6 Frames and channels. After `authentication-complete` every frame is one JSON text frame with `version` 1 and the
+exact keys of spec §5.1, sent in that key order and serialized with literal UTF-8. On `hermes-open` the connector opens
+one new local Gateway connection for that channel and sends `hermes-opened` as soon as it is open, without waiting for
+`gateway.ready`, or `hermes-open-failed` within `openTimeoutMs`. Each Gateway text message becomes one `hermes-frame`
+whose `data` is that text verbatim, in order; each server `hermes-frame` is written to the Gateway as one text message.
+The connector parses, injects, drops and synthesizes nothing inside a channel. A `data` above `maxDataBytes`, a carrier
+frame above `maxFrameBytes`, a binary Gateway message or a buffer overflow ends only that channel with `hermes-close`.
+A `hermes-open` beyond `maxChannels` is answered with `hermes-open-failed`. A frame for an unknown `channelId`, or a
+duplicate `hermes-open`, ends that channel. An unknown `type`, a `version` other than 1, a frame that is not a JSON
+object or a binary frame closes the socket as a protocol error. When the socket closes, every Gateway connection of
+it is closed.
+
+L1-7 Local Gateway. The connector reaches the agent's own local Gateway with that machine's own local credential,
+which never leaves the machine and is never shown to the agent's tools. For Hermes the endpoint is the dashboard's
+Gateway WebSocket `/api/ws` on a loopback address, default `127.0.0.1:9119`, authenticated with the dashboard's
+per-process session token: from the core's host rendezvous record where the core has one, otherwise from the
+dashboard's own loopback page. A dashboard that is gated (not loopback-bound) has no non-interactive credential and is
+not supported: its channels fail with `local_gateway_auth_unavailable`.
+
+L1-8 Reconnect and stop. Reconnects use bounded backoff with jitter (P2c-3). The close code and reason map to status
+codes and actions with this fixed table; close reasons are best-effort, and an unlisted close counts as a lost
+connection.
+
+| Close | Reason | Status code | Action |
+|---|---|---|---|
+| 1008 | `revoked` | `link_revoked` | stop, keep the key |
+| 1008 | `authentication-failed` | `link_revoked` | stop, keep the key |
+| 1008 | `replaced` | `link_replaced` | stop, keep the key |
+| 1008 | `protocol-error` or another reason | `link_protocol_error` | reconnect |
+| 1009 | any | `link_frame_too_large` | reconnect |
+| 1006 or any other code | any | `link_connection_lost` | reconnect |
+| upgrade refused with HTTP 400, 401, 403 or 404 | — | `link_route_refused` | reconnect |
+
+A stopped link stays stopped until the host restarts, the user links again or unlinks.
+
+L1-9 Unlink and revoke. Unlinking on the device deletes the local key and link record and reports that; it does not
+reach the server. Revoking the device is done in the Harness. Linking again replaces the local key and record, and the
+connector tells the user to revoke the old device in the Harness. There is no key rotation in v1.
+
+L1-10 Secret custody. The private key and the pending pairing secret live only in the connector's fenced credential
+store (P2c-1), in a file of mode 0600. They, and the local Gateway credential, are removed from every tool result, and
+never appear in a prompt, tool result, environment variable, log line or the status file.
+
+L1-11 Status. The status file (Appendix) gains one object, `link`, with codes only: `state` (`not_linked`, `pending`,
+`connecting`, `connected`, `reconnecting` or `stopped`), `code` (the last status code from L1-8, or `link_pending`,
+`link_pairing_refused`, `link_pairing_expired`, `link_pairing_unavailable`, `link_audience_mismatch`,
+`link_handshake_timeout`, `link_keepalive_timeout`, `link_store_unreadable`, or empty), `deviceId`, `channels` (the
+open channel count), `limits` (`advertised` or `fallback`), `lastConnectedAt`, `lastChannelErrorCode`
+(`local_gateway_unavailable`, `local_gateway_auth_unavailable`, `local_gateway_refused`, `channel_cap`,
+`channel_duplicate`, `channel_unknown`, `channel_data_too_large`, `channel_buffer_overflow`, `channel_binary`, or
+empty) and `updatedAt`.
