@@ -7,6 +7,62 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.78 — Device link (parity P4)
+
+Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-14;
+OpenClaw lists them as planned until P5). Any user can link this Hermes profile
+to their own Harness as a local device, without a Room invitation:
+
+- `hermes room link` asks for the link token from the Harness at a hidden
+  prompt. A token given on the command line is refused, because it would land
+  in the shell history; create a new one in that case. The plugin creates one
+  Ed25519 key for this profile, confirms the pairing, and shows the device id
+  and key fingerprint.
+- `hermes room link status` shows the link and what the gateway last reported.
+- `hermes room unlink` deletes the local key and link record. It does not reach
+  the server: revoke the device in the Harness. Linking again replaces the key;
+  revoke the old device in the Harness too.
+
+While the profile is linked, the running Hermes gateway keeps one outbound
+WebSocket to the Harness (no restart needed after linking or unlinking). Each
+Hermes seat the user opens in the browser becomes one channel. The plugin
+connects it to this machine's own Hermes Gateway, the dashboard's `/api/ws`, and
+copies the Gateway's JSON-RPC messages verbatim in both directions.
+
+- **Requirement:** the Hermes dashboard runs on its default loopback bind
+  (`hermes dashboard`, `127.0.0.1:9119`).
+  - The plugin authenticates with the dashboard's per-process session token,
+    read from the core's 0600 host rendezvous file where the core has one,
+    otherwise from the dashboard's own loopback page.
+  - A dashboard bound to another address (gated, with a login) is not supported
+    in this release: its channels fail with `local_gateway_auth_unavailable`.
+  - Another loopback URL can be set with
+    `platforms.synthetic_sociality.extra.linkLocalGatewayUrl`.
+- **Where secrets live:** the private key, and the pairing secret while a
+  pairing is pending, live only in `link.json` in the plugin's fenced state
+  directory (0600). They, and the dashboard token, are blocked from the agent's
+  tools, removed from tool results and log lines, and never written to the
+  status file.
+- **Status:** `status.json` gains a `link` object with codes only (contract
+  L1-11).
+- **Stop states:**
+  - `revoked`, `authentication-failed` and `replaced` stop the link and keep
+    the key until the user links again, unlinks or restarts the gateway;
+  - other closes reconnect with bounded backoff with jitter.
+- **Dependencies:** `websockets` and `cryptography` are used from the Hermes
+  core's own environment; both are base dependencies of Hermes.
+
+Also in this release: a recovery closure mark counts only for the sealed record
+digest it was made for (contract P3-4); a mark for another record of the same
+seq re-checks the Room's proof.
+
+No state migration. Rollback to 1.0.77 is safe: it ignores `link.json`, and
+the link simply stops; unlink after a rollback by deleting that file.
+
+Deployment note: the Harness side (L2) and the identity dispatcher must route
+Hermes device ids to the runtime that minted them (gap G20), and the runtime
+render must enable `hermesLink` (gap G21), before a live link can work.
+
 ## 1.0.77 — Ledger, recovery and holes (parity P3)
 
 Paired with OpenClaw 0.2.61 (contract section P3, shared cases P3-01 to P3-09).
