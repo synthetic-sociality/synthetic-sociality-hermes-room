@@ -77,7 +77,7 @@ class LocalStatus:
 
     def room(self, room_id: str, membership_id: str = "", *, connection: str | None = None,
              error_code: str | None = None, connected: bool = False,
-             gate_wait_seconds: float | None = None) -> None:
+             gate_wait_seconds: float | None = None, ledger: dict[str, Any] | None = None) -> None:
         """Update one Room entry; write only when something changed."""
         if not room_id:
             return
@@ -91,6 +91,10 @@ class LocalStatus:
                 "lastErrorAt": None,
                 "lastGateWaitSeconds": 0,
                 "lastGateWaitAt": None,
+                "acknowledgedSeq": 0,
+                "holeSeqs": [],
+                "quarantinedSeqs": [],
+                "ledgerCode": "",
             })
             before = json.dumps(entry, sort_keys=True)
             if membership_id:
@@ -104,6 +108,12 @@ class LocalStatus:
                 code = _code(error_code)
                 entry["lastErrorCode"] = code
                 entry["lastErrorAt"] = _now() if code else entry["lastErrorAt"]
+            if ledger is not None:
+                # Contract P3-3: holes and quarantines as codes and seqs only.
+                entry["acknowledgedSeq"] = int(ledger.get("acknowledgedSeq") or 0)
+                entry["holeSeqs"] = [int(seq) for seq in ledger.get("holeSeqs") or []][:32]
+                entry["quarantinedSeqs"] = [int(seq) for seq in ledger.get("quarantinedSeqs") or []][:32]
+                entry["ledgerCode"] = _code(ledger.get("ledgerCode") or "")
             if gate_wait_seconds is not None:
                 entry["lastGateWaitSeconds"] = round(max(0.0, float(gate_wait_seconds)), 1)
                 entry["lastGateWaitAt"] = _now()
@@ -118,7 +128,13 @@ class LocalStatus:
         directory = self.path.parent
         try:
             if not directory.is_dir():
-                return False
+                # Contract P3-5: create the state's directory 0700, never a
+                # filesystem root or top-level directory (P2a-5).
+                from .state import assert_state_directory
+
+                assert_state_directory(directory)
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.chmod(directory, 0o700)
             fd, temporary = tempfile.mkstemp(prefix=".status-", suffix=".tmp", dir=directory)
             try:
                 os.fchmod(fd, 0o600)
@@ -133,7 +149,7 @@ class LocalStatus:
                 except OSError:
                     pass
                 raise
-        except OSError as error:
+        except (OSError, ValueError) as error:
             if not self._failed:
                 self._failed = True
                 logger.warning("Room local status could not be written: %s", type(error).__name__)

@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
-from . import cli, local_status, renewal, secret_isolation
+from . import cli, local_status, recovery, renewal, secret_isolation
 from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
@@ -434,6 +434,19 @@ def _on_pre_tool_call(
     if tool_name != "synthetic_sociality_room_post" or not is_room_context(**kwargs):
         return None
     return {"action": "block", "message": ROOM_ORIGIN_POST_BLOCK_MESSAGE}
+
+
+def _disabled_toolsets() -> list[str]:
+    """The profile's agent.disabled_toolsets (contract P3-7), [] if unreadable."""
+    try:
+        from hermes_cli.config import load_config_readonly  # Hermes core
+
+        value = ((load_config_readonly() or {}).get("agent") or {}).get("disabled_toolsets")
+    except Exception:  # noqa: BLE001 - unreadable config denies nothing
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return [str(item) for item in value] if isinstance(value, (list, tuple)) else []
 
 
 def _tool_cwd(kwargs: dict[str, Any]) -> str:
@@ -1130,11 +1143,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _secret_store_reasons(self) -> list[str]:
         reasons: list[str] = []
+        disabled = _disabled_toolsets()
         directories = [self._state_file.parent, *_secret_store_dirs()]
         for index, directory in enumerate(directories):
             if directory in directories[:index]:
                 continue
-            reasons.extend(code for code in secret_isolation.store_reachability(directory) if code not in reasons)
+            reasons.extend(
+                code for code in secret_isolation.store_reachability(directory, disabled_toolsets=disabled)
+                if code not in reasons
+            )
         return reasons
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -3027,7 +3044,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             "heartbeat",
                             suppress_errors=True,
                         )
+                    await self._apply_recovery_closures(binding)
                     await self._transport_cycle(binding)
+                    self._report_ledger(binding)
                     self._persist_binding(binding)
                     delay = 1.0
                 except asyncio.CancelledError:
@@ -3064,11 +3083,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _overtaken_delivery_intents(binding: RoomBinding) -> list[str]:
-        """Return selected intents whose source is already acknowledged."""
+        """Return selected intents whose source is already acknowledged.
+
+        A source closed by an applied audited closure (contract P3-4) is not
+        overtaken: its intent stays as evidence and never replays.
+        """
         return sorted(
             source_id
             for source_id, intent in binding.delivery_intents.items()
             if isinstance(intent, dict)
+            and str(recovery.intent_source_seq(intent)) not in binding.recovery_closures
             and not (
                 isinstance(binding.delivery_lifecycle.get(source_id), dict)
                 and str(((binding.delivery_lifecycle.get(source_id) or {}).get("receipt") or {}).get("canonical_event_id") or "")
@@ -5032,6 +5056,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         source_id: str = "",
         canonical_event_id: str = "",
         reason: str = "",
+        preserve_intents: bool = False,
     ) -> None:
         ledger_locks = getattr(self, "_ledger_locks", None)
         if ledger_locks is None:
@@ -5046,6 +5071,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 source_id=source_id,
                 canonical_event_id=canonical_event_id,
                 reason=reason,
+                preserve_intents=preserve_intents,
             )
 
     @staticmethod
@@ -5071,6 +5097,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         source_id: str,
         canonical_event_id: str,
         reason: str,
+        preserve_intents: bool = False,
     ) -> None:
         key = str(seq)
         if (
@@ -5182,6 +5209,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         for source_id in completed_sources:
             binding.turn_sequences.pop(source_id, None)
             binding.turn_observed.pop(source_id, None)
+            if preserve_intents:
+                # An audited closure (P3-4) never edits an intent: a closed
+                # quarantine keeps its intent as evidence.
+                continue
             # This removal is justified by the terminal evidence persisted in
             # the same state snapshot, never by cursor advancement alone.
             binding.delivery_intents.pop(source_id, None)
@@ -5235,7 +5266,81 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         for source_id in completed_sources:
             binding.turn_sequences.pop(source_id, None)
             binding.turn_observed.pop(source_id, None)
+        # Contract P3-2: terminal intents beyond the newest 32 are pruned.
+        pruned = recovery.prune_terminal_intents(binding)
+        if pruned:
+            logger.info("Room %s pruned %d terminal delivery intents", binding.room_id, len(pruned))
         self._persist_binding(binding)
+
+    def _report_ledger(self, binding: RoomBinding) -> None:
+        """Contract P3-3: holes and held quarantines as status codes, each hole
+        logged once. Never closes anything."""
+        try:
+            report = recovery.ledger_report(binding)
+        except Exception:  # noqa: BLE001 - diagnostics only
+            return
+        logged = getattr(self, "_logged_holes", None)
+        if logged is None:
+            logged = self._logged_holes = set()
+        for seq in report["holeSeqs"]:
+            if (binding.room_id, seq) not in logged:
+                logged.add((binding.room_id, seq))
+                logger.warning(
+                    "Room %s ack_hole seq %s: no ledger entry and no evidence above the acknowledgement %s; "
+                    "only an audited `room recovery close` can close it",
+                    binding.room_id, seq, report["acknowledgedSeq"],
+                )
+        self._status_room(binding, ledger=report)
+
+    async def _apply_recovery_closures(self, binding: RoomBinding) -> None:
+        """Contract P3-4: apply sealed audit records through the normal ack path.
+
+        Each record must match this binding, still describe a hole or a
+        quarantine above the acknowledgement, and the Room must still prove the
+        event terminal for this member. A record that fails is logged once and
+        left unapplied; nothing else changes.
+        """
+        state_file = getattr(self, "_state_file", None)
+        if state_file is None:
+            return
+        try:
+            records = recovery.closures_for(
+                recovery.read_records(recovery.journal_path(state_file)),
+                binding.room_id, binding.membership_id, binding.installation_id,
+            )
+        except OSError:
+            return
+        refused = getattr(self, "_refused_closures", None)
+        if refused is None:
+            refused = self._refused_closures = set()
+        for seq in sorted(records):
+            record = records[seq]
+            marker = (binding.room_id, seq, record["recordDigest"])
+            if str(seq) in binding.recovery_closures or seq <= binding.acknowledged_cursor or marker in refused:
+                continue
+            try:
+                recovery.prior_state(binding, seq)
+                proven = await self._call(binding, lambda api, record=record: recovery.server_proof(
+                    api, binding.room_id, binding.membership_id, record["seq"], record["reason"], record["evidenceRef"],
+                ))
+                if proven["eventId"] != record["eventId"]:
+                    raise recovery.RecoveryRefused("evidence_mismatch", "the Room's event differs from the record")
+            except (recovery.RecoveryRefused, ProtocolError) as error:
+                refused.add(marker)
+                logger.warning("Room %s recovery closure for seq %s not applied: %s",
+                               binding.room_id, seq, getattr(error, "code", "") or "unavailable")
+                continue
+            await self._complete_event(
+                binding, seq, terminal_status="ignored", source_id=record["eventId"],
+                reason=f"{recovery.CLOSURE_EVIDENCE_PREFIX}{record['reason']}", preserve_intents=True,
+            )
+            binding.recovery_closures[str(seq)] = {
+                "recordDigest": record["recordDigest"],
+                "appliedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            }
+            self._persist_binding(binding)
+            logger.warning("Room %s recovery closure applied: seq %s, reason %s, operator %s",
+                           binding.room_id, seq, record["reason"], record["operator"])
 
     async def _release_cycle_attempt_after_failure(
         self, binding: RoomBinding, event_id: str, reason: str,
@@ -5826,6 +5931,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
             existing.missed_sources = [dict(item) for item in binding.missed_sources]
             existing.kept_reply = dict(binding.kept_reply)
+            existing.recovery_closures = {
+                key: dict(value) for key, value in {**existing.recovery_closures, **binding.recovery_closures}.items()
+            }
             merged_authority = copy.deepcopy(binding.delivery_authority)
             for key, durable_record in existing.delivery_authority.items():
                 if (

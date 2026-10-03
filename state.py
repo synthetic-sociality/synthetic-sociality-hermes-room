@@ -160,6 +160,10 @@ class RoomBinding:
     # Offered once on the next model turn in the same discussion, then cleared.
     # {"source_event_id", "source_seq", "epoch_id", "produced_at", "reason", "text"}.
     kept_reply: dict[str, Any] = field(default_factory=dict)
+    # Contract P3-4: audited closures this connector applied, by seq:
+    # {"recordDigest": str, "appliedAt": str}. The audit records themselves
+    # live in the append-only <state>.recovery-audit.jsonl.
+    recovery_closures: dict[str, dict[str, Any]] = field(default_factory=dict)
     epoch_session_routing_initialized: bool = False
     legacy_session_epoch_id: str = ""
     rotate_current_epoch_session: bool = False
@@ -209,6 +213,12 @@ class RoomBinding:
             or not kept["source_event_id"] or not kept["epoch_id"]
         )):
             raise ValueError("Room kept reply is invalid")
+        if not isinstance(binding.recovery_closures, dict) or any(
+            not str(key).isdigit() or not isinstance(value, dict)
+            or not isinstance(value.get("recordDigest"), str) or not isinstance(value.get("appliedAt"), str)
+            for key, value in binding.recovery_closures.items()
+        ):
+            raise ValueError("Room recovery closures are invalid")
         if not isinstance(binding.delivery_lifecycle, dict):
             raise ValueError("Room delivery lifecycle journal must be an object")
         if not isinstance(binding.resolved_delivery_lifecycle, dict):

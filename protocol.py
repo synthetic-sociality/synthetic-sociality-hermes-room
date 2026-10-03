@@ -423,6 +423,15 @@ class RoomProtocol:
         room = urllib.parse.quote(room_id, safe="")
         return self.request("POST", f"/rooms/{room}/cycles", payload)
 
+    def events_in_epoch(self, room_id: str, after: int, epoch_id: str) -> dict[str, Any]:
+        """Read-only canonical events of one epoch (contract P3-4 proofs).
+
+        An epoch-filtered read never advances the member's delivered seq.
+        """
+        room = urllib.parse.quote(room_id, safe="")
+        query = urllib.parse.urlencode({"after": max(0, after), "limit": 10, "waitSeconds": 0, "epochId": epoch_id})
+        return self.request("GET", f"/rooms/{room}/events?{query}")
+
     def get_discussion_cycle(self, room_id: str, cycle_id: str) -> dict[str, Any]:
         room, cycle = urllib.parse.quote(room_id, safe=""), urllib.parse.quote(cycle_id, safe="")
         return self.request("GET", f"/rooms/{room}/cycles/{cycle}")

@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .protocol import ProtocolError, RoomProtocol, parse_invitation_url, stable_key
-from .state import RoomBinding, binding_renewal_lock, load, remove, update, upsert
+from . import recovery
+from .state import RoomBinding, binding_renewal_lock, load, remove, state_path, update, upsert
 
 
 LEGACY_IDEMPOTENCY_MISMATCH_ERROR = "idempotency key payload mismatch"
@@ -122,6 +123,21 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         "--request-owner", action="store_true",
         help="Create a secret-opaque owner approval request instead of entering a grant",
     )
+    # Contract P3-4: the universal recovery verbs (same in OpenClaw).
+    recovery_parser = commands.add_parser("recovery", help="List or close acknowledgement holes and quarantines (audited)")
+    recovery_verbs = recovery_parser.add_subparsers(dest="recovery_command")
+    recovery_list = recovery_verbs.add_parser("list", help="Read-only: holes, quarantines and stuck intents")
+    recovery_list.add_argument("room_id", nargs="?", default="")
+    recovery_close = recovery_verbs.add_parser(
+        "close", help="Audited closure of one hole or quarantine; a dry run unless --apply --confirm TOKEN",
+    )
+    recovery_close.add_argument("room_id")
+    recovery_close.add_argument("--seq", type=int, required=True)
+    recovery_close.add_argument("--reason", required=True, choices=recovery.REASONS)
+    recovery_close.add_argument("--evidence", required=True, help="cycle:<cycleId> or epoch:<epochId>, as the Room proves")
+    recovery_close.add_argument("--operator", required=True, help="Who signs off this closure")
+    recovery_close.add_argument("--apply", action="store_true", help="Append the audit record (requires --confirm)")
+    recovery_close.add_argument("--confirm", default="", help="The token the dry run printed")
 
 
 def dispatch(args: argparse.Namespace) -> int:
@@ -149,6 +165,8 @@ def dispatch(args: argparse.Namespace) -> int:
             return _reconcile_terminal_lifecycle(args)
         if command == "renew":
             return _renew(args.room_id, request_owner=bool(args.request_owner))
+        if command == "recovery":
+            return _recovery(args)
     except (ValueError, ProtocolError, OSError, json.JSONDecodeError) as error:
         print(f"Room command failed: {error}", file=sys.stderr)
         return 1
@@ -334,6 +352,54 @@ def _rotate_current_epoch_session(room_id: str, *, confirmed: bool) -> int:
         f"{room_id} current-epoch transcript rotation authorized. "
         "Restart the Hermes gateway to apply it to this binding only."
     )
+    return 0
+
+
+def _recovery(args: argparse.Namespace) -> int:
+    """Contract P3-4: `room recovery list|close` (owner-run, audited)."""
+    verb = getattr(args, "recovery_command", None) or "list"
+    path = state_path()
+    current = load()
+    if verb == "list":
+        bindings = [b for b in current.bindings if not args.room_id or b.room_id == args.room_id]
+        if args.room_id and not bindings:
+            raise ValueError(f"room {args.room_id!r} is not configured")
+        print(f"state: {path}")
+        for binding in bindings:
+            print(f"{binding.room_id} membership {binding.membership_id}")
+            recovery.describe(recovery.ledger_report(binding), recovery.stuck_intents(binding), print)
+            applied = sorted(int(seq) for seq in binding.recovery_closures)
+            if applied:
+                print(f"  applied closures: {', '.join(map(str, applied))}")
+        return 0
+    binding = current.binding(args.room_id)
+    if binding is None:
+        raise ValueError(f"room {args.room_id!r} is not configured")
+    prior = recovery.prior_state(binding, args.seq)
+    api = RoomProtocol(binding.base_url, binding.credential)
+    proven = recovery.server_proof(api, binding.room_id, binding.membership_id, args.seq, args.reason, args.evidence)
+    from .adapter import CONNECTOR_VERSION
+
+    record = recovery.build_record(
+        connector=f"hermes/{CONNECTOR_VERSION}", room_id=binding.room_id, membership_id=binding.membership_id,
+        client_instance_id=binding.installation_id, seq=args.seq, reason=args.reason,
+        evidence_ref=args.evidence, proven=proven, prior=prior, operator=str(args.operator).strip(),
+    )
+    if not record["operator"]:
+        raise ValueError("--operator is required")
+    print(f"state: {path}")
+    print(recovery.render_record(record))
+    if not args.apply:
+        print(f"Dry run. The Room proves seq {args.seq} terminal for this member ({args.reason}). "
+              f"To apply: add --apply --confirm {record['confirmToken']}")
+        return 0
+    if args.confirm != record["confirmToken"]:
+        raise ValueError("confirmation token does not match the current state and proof; run the dry run again")
+    sealed = recovery.seal(record)
+    journal = recovery.journal_path(path)
+    recovery.append_record(journal, sealed)
+    print(f"Closure recorded in {journal} (digest {sealed['recordDigest'][:16]}). "
+          "The running connector applies it through its normal acknowledgement path.")
     return 0
 
 
