@@ -274,7 +274,10 @@ newer generation (`cycle_superseded`); the evidence reference names the proven o
 append-only audit record (who, when, why, and the proof fetched); the connector then records terminal evidence for
 that seq and acknowledges through the normal path. No closure edits a cursor, an acknowledgement, an intent or a
 quarantine directly. The record's digest is unkeyed and its operator is not authenticated: a closure is safe because
-the Room's proof is checked again when it is applied, not because of the record itself.
+the Room's proof is checked again when it is applied, not because of the record itself. When a record cannot be
+applied, only a refusal of the proof or a final Room error retires it; any other failure (network, timeout, a
+retryable Room error, a local write failure or an unexpected exception) is retried at the connector's next
+iteration. Each outcome is logged once, and an unreadable journal line or record is skipped, never fatal.
 
 P3-5 Status path. The local status file (P2c-4) is written next to the state the connector actually uses; the
 connector creates that directory with mode 0700 when it is missing.
