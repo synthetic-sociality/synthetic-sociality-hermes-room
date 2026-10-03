@@ -467,4 +467,10 @@ L1-18 Unknown cycle-start refusal. A refusal of a cycle start that carries a wel
 whether or not the connector knows the code, unless the code is a session code (`busy`, `connector_not_active`,
 `credential_expired`, `credential_renewal_pending`, `credential_revoked`), which keeps the retry path. The source is
 recorded as skipped with that code and acknowledged; such a refusal never stops the channel. `source_not_eligible`
-(the Room's refusal of a start source) is a known code in both connectors.
+(the Room's refusal of a start source) is a known code in both connectors. An HTTP 401 or 403 on a cycle start is a
+session or authorisation failure whatever its code (the Room answers 401 `unauthorized`, Room server 772ca32
+`server/api/authz.go:231-243`): it is never recorded skipped and never acknowledged; it takes the connector's existing
+session-failure path, and the source is processed again when the credential works. Every other refusal under this
+rule, including 404 `not_found` and 409 `room_closed`, stays terminal for its source. A skipped human message or human
+command is recorded as a missed source and offered once (P2a-3), so it is never lost silently; a discussion start is
+not, as it is never a trigger (L1-16) and its topic reaches the agent as "Current discussion".
