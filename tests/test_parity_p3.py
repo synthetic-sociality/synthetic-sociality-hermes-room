@@ -139,6 +139,22 @@ class P3ConformanceTests(unittest.TestCase):
             self.assertEqual(sources.count(f"def {method}(self"), 1, method)
         self.assertEqual(CONFORMANCE["parityP3TerminalIntentRetention"], recovery.TERMINAL_INTENT_RETENTION)
 
+    def test_audit_record_is_byte_compatible_with_openclaw(self):
+        # The same vector is pinned in OpenClaw's test/parity-p3.test.mjs.
+        proven = {"eventId": "ev379", "eventType": "discussion.cycle_attempt_ready", "eventEpochId": "epoch-old",
+                  "proof": {"activeEpochId": "epoch-new", "eventEpochStatus": "closed", "cycleId": CYCLE,
+                            "cycleState": "interrupted", "cycleGeneration": 1, "eventGeneration": 1,
+                            "deliveredSeq": 990, "fetchedAt": "2026-10-03T00:00:00Z"}}
+        record = recovery.build_record(
+            connector="shared/vector", room_id="bjqiu9u7dwqptlq", membership_id="member-1", client_instance_id="inst-1",
+            seq=379, reason="cycle_terminal", evidence_ref=f"cycle:{CYCLE}", proven=proven,
+            prior={"kind": "quarantine", "intentKey": "jyj0e25ev0a5hn8", "lastErrorCode": "cycle_superseded"},
+            operator="owner — tjé")
+        record["recordedAt"] = "2026-10-03T00:00:01Z"
+        record["recordDigest"] = recovery.record_digest(record)
+        self.assertEqual(record["confirmToken"], "311dfde5099d1d36")
+        self.assertEqual(record["recordDigest"], "c91b6942a3039f95738450503b6c4c8dd63909c066eefeedabb164ca4f9026ed")
+
 
 class P3Tests(unittest.TestCase):
     def test_p3_01_every_event_read_above_the_acknowledgement_has_a_ledger_entry_before_it_is_processed(self):
