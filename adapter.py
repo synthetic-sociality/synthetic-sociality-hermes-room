@@ -1186,7 +1186,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # that holds the Room credential; refuse to start only when this
         # installation enables enforcement (enforceSecretIsolation, off by
         # default). The path fence and the scrubbing apply in both modes.
-        reasons = self._secret_store_reasons()
+        # Off the event loop: a cold core tool-selection import must not hold it.
+        reasons = await asyncio.to_thread(self._secret_store_reasons)
         enforced = self._secret_isolation_enforced()
         status = getattr(self, "_status", None)
         if status is not None:
@@ -5333,7 +5334,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 recovery.read_records(recovery.journal_path(state_file)),
                 binding.room_id, binding.membership_id, binding.installation_id,
             )
-        except OSError as error:
+        except Exception as error:  # noqa: BLE001 - contract P3-4: never fatal to the watch loop
             if not getattr(self, "_journal_unreadable_logged", False):
                 self._journal_unreadable_logged = True
                 logger.warning("Room recovery journal could not be read: %s", type(error).__name__)
@@ -5370,13 +5371,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - one record never stalls the watch loop
-                # OP-12 P3 F2/F3: a refusal or a final error retires the record;
-                # a network, timeout or retryable Room error is tried again at
-                # the next iteration. Each outcome is logged once.
-                transient = isinstance(error, (OSError, asyncio.TimeoutError, TimeoutError)) or (
-                    isinstance(error, ProtocolError) and error.retryable
+                # Contract P3-4: only a refusal of the proof or a final Room
+                # error retires the record; any other failure (network,
+                # timeout, retryable Room error, local write failure,
+                # unexpected exception) is tried again at the next iteration.
+                # Each outcome is logged once.
+                transient = not (
+                    isinstance(error, recovery.RecoveryRefused)
+                    or (isinstance(error, ProtocolError) and not error.retryable)
                 )
-                code = getattr(error, "code", "") or type(error).__name__
+                code = getattr(error, "code", "") or (
+                    "local_write_failed" if isinstance(error, OSError) and getattr(error, "filename", None) else type(error).__name__
+                )
                 notice = (binding.room_id, seq, record["recordDigest"], "transient" if transient else "refused")
                 logged = getattr(self, "_closure_notices", None)
                 if logged is None:

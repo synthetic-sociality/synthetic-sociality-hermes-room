@@ -216,7 +216,10 @@ def server_proof(api: Any, room_id: str, membership_id: str, seq: int, reason: s
 
 def confirm_token(record: dict[str, Any]) -> str:
     stable = {key: value for key, value in record.items() if key not in _TOKEN_EXCLUDED}
-    stable["proof"] = {key: value for key, value in (record.get("proof") or {}).items() if key != "fetchedAt"}
+    proof = record.get("proof")
+    if not isinstance(proof, dict):
+        raise ValueError("audit record proof must be an object")
+    stable["proof"] = {key: value for key, value in proof.items() if key != "fetchedAt"}
     return hashlib.sha256(canonical(stable).encode()).hexdigest()[:16]
 
 
@@ -262,21 +265,25 @@ def append_record(path: Path, record: dict[str, Any]) -> None:
 
 
 def read_records(path: Path) -> list[dict[str, Any]]:
-    """Valid sealed records; a malformed or altered line is skipped."""
+    """Valid sealed records; a malformed, undecodable or altered line is skipped.
+
+    Contract P3-4: an unreadable journal line or record is never fatal.
+    """
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except FileNotFoundError:
         return []
     records: list[dict[str, Any]] = []
     for line in lines:
         try:
             record = json.loads(line)
-        except json.JSONDecodeError:
+            if (isinstance(record, dict) and record.get("version") == 1 and record.get("verb") == "close"
+                    and isinstance(record.get("proof"), dict) and isinstance(record.get("priorState"), dict)
+                    and record.get("recordDigest") == record_digest(record)
+                    and record.get("confirmToken") == confirm_token(record)):
+                records.append(record)
+        except Exception:  # noqa: BLE001 - one bad line never hides the others
             continue
-        if (isinstance(record, dict) and record.get("version") == 1 and record.get("verb") == "close"
-                and record.get("recordDigest") == record_digest(record)
-                and record.get("confirmToken") == confirm_token(record)):
-            records.append(record)
     return records
 
 

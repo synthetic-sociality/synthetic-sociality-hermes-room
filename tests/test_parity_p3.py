@@ -450,8 +450,51 @@ class P3Tests(unittest.TestCase):
             with self.assertLogs(adapter.logger, level="WARNING") as logs:
                 asyncio.run(instance._apply_recovery_closures(binding))
                 asyncio.run(instance._apply_recovery_closures(binding))
-            self.assertEqual(len([line for line in logs.output if "not applied: KeyError" in line]), 1, logs.output)
+            # Contract P3-4 (delta): an unexpected exception is retried, logged once.
+            self.assertEqual(len([line for line in logs.output if "not applied yet (retrying): KeyError" in line]), 1, logs.output)
             self.assertEqual((broken.acks, binding.recovery_closures), ([], {}))
+            self.assertNotIn((binding.room_id, 379, recovery.read_records(recovery.journal_path(path))[0]["recordDigest"]),
+                             instance._refused_closures)
+            # A final Room error retires the record.
+            final = ProofRoom()
+            final.get_discussion_cycle = lambda *_a: (_ for _ in ()).throw(adapter.ProtocolError("gone", status=404, code="not_found"))
+            instance = ledger_instance(state_module.load(path).bindings[0], final, path)
+            binding = instance_binding = state_module.load(path).bindings[0]
+            with self.assertLogs(adapter.logger, level="WARNING") as logs:
+                asyncio.run(instance._apply_recovery_closures(instance_binding))
+                asyncio.run(instance._apply_recovery_closures(instance_binding))
+            self.assertEqual(len([line for line in logs.output if "not applied: not_found" in line]), 1, logs.output)
+
+        # OP-12 P3 delta: an undecodable line or a record whose proof is not an
+        # object is skipped; a journal read that raises is logged once and the
+        # watch loop goes on.
+        with profile(paula_binding()) as path:
+            journal = recovery.journal_path(path)
+            good = recovery.seal(recovery.build_record(
+                connector="hermes/test", room_id="room-1", membership_id="member-1", client_instance_id="inst-1",
+                seq=379, reason="cycle_terminal", evidence_ref=f"cycle:{CYCLE}", proven=proven,
+                prior={"kind": "quarantine", "intentKey": "ev379", "lastErrorCode": "cycle_superseded"}, operator="o"))
+            not_object = {**good, "proof": "not-an-object"}
+            not_object["recordDigest"] = recovery.record_digest(not_object)
+            journal.write_bytes(b'{"version": 1, "verb": "close", "operator": "\xff\xfe"}\n'
+                                + (json.dumps(not_object) + "\n").encode()
+                                + b"\xc3\x28 not utf-8\n"
+                                + (recovery.canonical(good) + "\n").encode())
+            self.assertEqual([record["recordDigest"] for record in recovery.read_records(journal)], [good["recordDigest"]])
+            with self.assertRaises(ValueError):
+                recovery.confirm_token(not_object)
+            room = ProofRoom()
+            binding = state_module.load(path).bindings[0]
+            instance = ledger_instance(binding, room, path)
+            with self.assertLogs(adapter.logger, level="WARNING"):
+                asyncio.run(instance._apply_recovery_closures(binding))
+            self.assertEqual(room.acks, [382], "the valid record still applies")
+            with mock.patch.object(recovery, "read_records", side_effect=RuntimeError("bad journal")), \
+                    self.assertLogs(adapter.logger, level="WARNING") as logs:
+                fresh = ledger_instance(paula_binding(), ProofRoom(), path)
+                asyncio.run(fresh._apply_recovery_closures(paula_binding()))
+                asyncio.run(fresh._apply_recovery_closures(paula_binding()))
+            self.assertEqual(len([line for line in logs.output if "journal could not be read: RuntimeError" in line]), 1)
 
     def test_p3_08_the_status_file_is_written_next_to_the_state_in_use_and_its_directory_is_created_0700(self):
         with tempfile.TemporaryDirectory() as scratch:
