@@ -259,6 +259,15 @@ def remember_secrets(bindings: Iterable[Any]) -> None:
         _secret_values.update(values)
 
 
+def remember_values(values: Iterable[str]) -> None:
+    """Record further exact secret values (contract L1-10: link key, pairing
+    secret, local Gateway credential) for result scrubbing."""
+    found = {value for value in values if isinstance(value, str) and len(value) >= _MIN_SECRET_LENGTH}
+    if found:
+        with _lock:
+            _secret_values.update(found)
+
+
 def _journal_secrets(value: Any, key: str = "", depth: int = 0) -> set[str]:
     found: set[str] = set()
     if depth > 6:

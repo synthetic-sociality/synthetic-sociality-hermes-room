@@ -121,6 +121,26 @@ class LocalStatus:
         if changed:
             self.write()
 
+    LINK_STATES = frozenset({"not_linked", "pending", "connecting", "connected", "reconnecting", "stopped"})
+
+    def set_link(self, link: dict[str, Any]) -> None:
+        """Contract L1-11: the device link, as codes, an identifier, numbers and times."""
+        state = str(link.get("state") or "")
+        limits = str(link.get("limits") or "")
+        entry = {
+            "state": state if state in self.LINK_STATES else "stopped",
+            "code": _code(link.get("code") or ""),
+            "deviceId": _code(link.get("deviceId") or ""),
+            "channels": max(0, int(link.get("channels") or 0)),
+            "limits": limits if limits in {"advertised", "fallback"} else "fallback",
+            "lastConnectedAt": link.get("lastConnectedAt") if isinstance(link.get("lastConnectedAt"), str) else None,
+            "lastChannelErrorCode": _code(link.get("lastChannelErrorCode") or ""),
+            "updatedAt": _now(),
+        }
+        with self._lock:
+            self._data["link"] = entry
+        self.write()
+
     def write(self) -> bool:
         with self._lock:
             self._data["updatedAt"] = _now()

@@ -21,6 +21,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
 from . import cli, local_status, recovery, renewal, secret_isolation
+from . import link as device_link
 from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
@@ -1033,8 +1034,14 @@ def check_requirements() -> bool:
 
 def validate_config(_config: PlatformConfig) -> bool:
     try:
-        return any((binding.enabled and not binding.revoked) or renewal.eligible(binding)
-                   for binding in load().bindings)
+        if any((binding.enabled and not binding.revoked) or renewal.eligible(binding)
+               for binding in load().bindings):
+            return True
+    except Exception:
+        pass
+    # Contract L1-4: a linked profile runs the platform for its device link.
+    try:
+        return device_link.link_path().is_file()
     except Exception:
         return False
 
@@ -1224,12 +1231,40 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     self._watch(binding, is_reconnect=is_reconnect),
                     name=f"synthetic-sociality:{binding.room_id}",
                 )
-        if not self._tasks and self._renewal_task is None:
+        linked = self._start_link_service()
+        if not self._tasks and self._renewal_task is None and not linked:
             return False
         return True
 
+    def _start_link_service(self) -> bool:
+        """Contract L1-4: one device socket per profile, inside this gateway.
+
+        The service watches the link record next to the state in use; it
+        opens the socket only while the profile is linked. True when linked.
+        """
+        record_path = self._state_file.parent / device_link.LINK_FILE
+        task = getattr(self, "_link_task", None)
+        if task is None or task.done():
+            extra = getattr(getattr(self, "config", None), "extra", None) or {}
+            gateway_url = extra.get("linkLocalGatewayUrl", "") if isinstance(extra, dict) else ""
+            self._link_service = device_link.LinkService(
+                plugin_version=CONNECTOR_VERSION, status=getattr(self, "_status", None),
+                local_gateway_url=gateway_url if isinstance(gateway_url, str) else "",
+                record_path=record_path,
+            )
+            self._link_task = asyncio.create_task(self._link_service.run(), name="room-device-link")
+        try:
+            return record_path.is_file()
+        except OSError:
+            return False
+
     async def disconnect(self) -> None:
         self._stop.set()
+        link_task = getattr(self, "_link_task", None)
+        if link_task is not None:
+            link_task.cancel()
+            await asyncio.gather(link_task, return_exceptions=True)
+            self._link_task = None
         maintenance = getattr(self, "_renewal_task", None)
         if maintenance is not None:
             maintenance.cancel()

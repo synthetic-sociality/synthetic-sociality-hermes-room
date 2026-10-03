@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .protocol import ProtocolError, RoomProtocol, parse_invitation_url, stable_key
+from . import link as device_link
 from . import recovery
 from .state import RoomBinding, binding_renewal_lock, load, remove, state_path, update, upsert
 
@@ -124,6 +125,12 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         help="Create a secret-opaque owner approval request instead of entering a grant",
     )
     # Contract P3-4: the universal recovery verbs (same in OpenClaw).
+    # Contract L1: link this profile to the user's Harness as a local device.
+    link_parser = commands.add_parser(
+        "link", help="Link this Hermes profile to your Harness (token at a hidden prompt); `link status` shows it",
+    )
+    link_parser.add_argument("action", nargs="?", help="status")
+    commands.add_parser("unlink", help="Delete this profile's local link key (revoke the device in the Harness)")
     recovery_parser = commands.add_parser("recovery", help="List or close acknowledgement holes and quarantines (audited)")
     recovery_verbs = recovery_parser.add_subparsers(dest="recovery_command")
     recovery_list = recovery_verbs.add_parser("list", help="Read-only: holes, quarantines and stuck intents")
@@ -167,6 +174,10 @@ def dispatch(args: argparse.Namespace) -> int:
             return _renew(args.room_id, request_owner=bool(args.request_owner))
         if command == "recovery":
             return _recovery(args)
+        if command == "link":
+            return _link(args)
+        if command == "unlink":
+            return _unlink()
     except (ValueError, ProtocolError, OSError, json.JSONDecodeError) as error:
         print(f"Room command failed: {error}", file=sys.stderr)
         return 1
@@ -227,6 +238,111 @@ def _join(args: argparse.Namespace) -> int:
     update(persist_join)
     print(f"Joined {review.get('roomTitle') if review else binding.room_id} as {proposed}.")
     print("Restart the Hermes gateway to activate the Room connector.")
+    return 0
+
+
+# Contract L1-2: the CLI waits at most this long for a confirmation; a link
+# still pending afterwards is confirmed by the gateway until the token expires.
+LINK_CONFIRMATION_WAIT_SECONDS = 60.0
+
+
+def _link(args: argparse.Namespace, *, sleep=None) -> int:
+    action = str(getattr(args, "action", "") or "").strip()
+    if action == "status":
+        return _link_status()
+    if action:
+        if action.startswith(device_link.TOKEN_PREFIX):
+            raise ValueError(
+                "link tokens are secrets; run `hermes room link` and paste the token at the hidden prompt "
+                "(create a new token in the Harness: this one may now be in your shell history)"
+            )
+        raise ValueError("usage: hermes room link | hermes room link status")
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    raw = getpass.getpass("Link token from the Harness (hidden): ")
+    try:
+        token = device_link.parse_token(raw)
+    except device_link.LinkError as error:
+        print(f"Link refused ({error.code}): {error}", file=sys.stderr)
+        return 1
+    finally:
+        del raw
+    previous = None
+    try:
+        previous = device_link.read_link()
+    except (ValueError, OSError, json.JSONDecodeError):
+        previous = None
+    record = device_link.pending_record(token)
+    del token
+    with device_link.link_lock():
+        device_link.write_link(record)
+    print(f"Linking this Hermes profile as {record['deviceLabel']!r} (device {record['deviceId']}).")
+    deadline = _time.monotonic() + LINK_CONFIRMATION_WAIT_SECONDS
+    attempt = 0
+    while True:
+        state, code = device_link.confirm_pending()
+        if state != "pending" or _time.monotonic() >= deadline:
+            break
+        sleep(device_link.backoff_delay(attempt))
+        attempt += 1
+    old = device_link.public_view(previous or {})
+    replaced = old.get("deviceId") and old.get("deviceId") != record["deviceId"]
+    if state == "active":
+        print("Linked.")
+        print(f"Device:      {record['deviceId']}")
+        print(f"Fingerprint: {record['fingerprintSha256']}")
+        print("The Hermes gateway connects within a few seconds; restart it if the Room plugin is not running yet.")
+        if replaced:
+            print(f"This replaced the local key of device {old['deviceId']}. Revoke that device in the Harness.")
+        return 0
+    if state == "pending":
+        print(f"Not confirmed yet ({code}). The Hermes gateway keeps trying until the token expires "
+              f"at {record['expiresAt']}.", file=sys.stderr)
+        return 1
+    if state == "expired":
+        print("Link refused (link_pairing_expired): the token expired. Create a new one in the Harness.", file=sys.stderr)
+        return 1
+    print("Link refused (link_pairing_refused): the token is spent, expired or invalid. "
+          "Create a new one in the Harness.", file=sys.stderr)
+    return 1
+
+
+def _link_status() -> int:
+    record = device_link.read_link()
+    if record is None:
+        print("Not linked.")
+        return 0
+    view = device_link.public_view(record)
+    print(f"Link:        {view.get('state', 'unknown')}")
+    print(f"Device:      {view.get('deviceId', '')}")
+    print(f"Label:       {view.get('deviceLabel', '')}")
+    print(f"Fingerprint: {view.get('fingerprintSha256', '')}")
+    print(f"Server:      {urlsplit(str(view.get('audience') or '')).netloc}")
+    try:
+        from . import local_status
+
+        runtime = local_status.read(state_path().parent / "status.json").get("link") or {}
+    except (OSError, ValueError):
+        runtime = {}
+    if runtime:
+        print(f"Gateway:     {runtime.get('state', '')} {runtime.get('code', '')}".rstrip())
+        print(f"Channels:    {runtime.get('channels', 0)}")
+        if runtime.get("lastChannelErrorCode"):
+            print(f"Last local:  {runtime['lastChannelErrorCode']}")
+    else:
+        print("Gateway:     no status (the Hermes gateway has not reported the link)")
+    return 0
+
+
+def _unlink() -> int:
+    with device_link.link_lock():
+        removed = device_link.delete_link()
+    if removed is None:
+        print("Not linked; nothing to delete.")
+        return 0
+    print(f"Deleted the local link key of device {removed.get('deviceId', '')}.")
+    print("Revoke this device in the Harness to end it on the server.")
     return 0
 
 
