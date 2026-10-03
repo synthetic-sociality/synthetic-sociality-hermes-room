@@ -28,7 +28,14 @@ The first `close` is a dry run: it fetches the Room's proof read-only
 `--apply --confirm TOKEN` the record is appended to
 `<state>.recovery-audit.jsonl`. The running connector re-checks the proof,
 records terminal evidence and acknowledges through its normal path. No command
-edits a cursor, an intent or a quarantine.
+edits a cursor, an intent or a quarantine. The audit record's digest is unkeyed
+and `--operator` is not authenticated: a closure is safe because the Room's
+proof is checked again when it is applied.
+
+**Rollback warning.** After a quarantine has been closed (Paula's 379), do not
+roll back below 1.0.77: 1.0.76 does not know the applied closure, sees the kept
+quarantined intent below the acknowledgement and stops the Room with
+`orphaned_delivery_intent`. Rollback after such a closure needs 1.0.77 or newer.
 
 Behaviour changes:
 
@@ -41,9 +48,13 @@ Behaviour changes:
 - P3-5: the status directory is created 0700 when missing.
 - P3-6: known path arguments (`path`, `file`, `cwd`, `dir`, ...) are always
   checked, whatever their shape (`read_file("state.json")` inside the store).
-- P3-7: `secretStore` is `isolated` without a sandbox when the profile's
-  `agent.disabled_toolsets` contains `terminal` and `code_execution`; the file
-  tools stay fenced. This is the route for hosts without Docker.
+- P3-7: `secretStore` is `isolated` without a sandbox when core's own tool
+  selection for the profile, with its `agent.disabled_toolsets` (a YAML list
+  or a JSON-array string, exact names; a comma-separated string is one name),
+  leaves none of `terminal`, `process`/`process_manage` and `execute_code`; the
+  file tools stay fenced. This is the route for hosts without Docker. In
+  either route `computer_use` in the selection or any enabled MCP server
+  (`mcp_servers` entry without `enabled: false`) counts as reaching the store.
 
 ## 1.0.76 — Secrets, late replies, self-recovery (parity P2c)
 
