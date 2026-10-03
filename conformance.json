@@ -286,7 +286,9 @@
     "L1-11 unlink deletes the local key and record and leaves the server revoke to the Harness": "test_l1_11_unlink",
     "L1-12 the link key, pairing secret and local Gateway credential are not readable through agent tools and never appear in prompt, tool result, log or status": "test_l1_12_secret_custody",
     "L1-13 link status is written to the status file as codes only, following the fixed close table": "test_l1_13_status_codes",
-    "L1-14 the local Gateway is reached with the loopback dashboard's session token and a gated dashboard fails the open with a code": "test_l1_14_local_gateway_auth"
+    "L1-14 the local Gateway is reached with the loopback dashboard's session token and a gated dashboard fails the open with a code": "test_l1_14_local_gateway_auth",
+    "L1-15 a message_too_large refusal is terminal in open and coordinated Rooms, acknowledged, and its reply is offered once with the limit": "test_l1_15_message_too_large_is_terminal",
+    "L1-16 a missed source named by the Room replaces the local record and is offered once within the epoch floor": "test_l1_16_missed_source_named_by_the_room"
   },
   "parityL1SignatureVector": {
     "seedHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",

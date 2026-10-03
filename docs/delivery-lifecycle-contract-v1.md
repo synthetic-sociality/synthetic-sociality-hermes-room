@@ -339,6 +339,10 @@ inside the running agent host. It sends exactly one proof per socket, echoing `h
 `audience` or `deviceId` differs from the stored link is not answered: the connector closes the socket. The link is
 connected only after `authentication-complete`.
 
+Several devices (G18, owner decision 2026-10-03). A user may link several agent installations; the Harness routes
+seats to the most recently connected one, as L2 does. A connector keeps one device identity per agent profile. Its
+status reports only its own link codes (L1-11); it shows no active or standby state until the server reports one.
+
 L1-5 Limits. The connector reads `limits` `{maxDataBytes, openTimeoutMs, maxChannels, maxFrameBytes, keepaliveMs}`
 from `authentication-complete`. A missing or invalid value takes its fallback: `maxFrameBytes` 6291456,
 `maxDataBytes` 3145728, `openTimeoutMs` 15000, `maxChannels` 4, `keepaliveMs` 25000. Its WebSocket client accepts
@@ -396,3 +400,28 @@ open channel count), `limits` (`advertised` or `fallback`), `lastConnectedAt`, `
 (`local_gateway_unavailable`, `local_gateway_auth_unavailable`, `local_gateway_refused`, `channel_cap`,
 `channel_duplicate`, `channel_unknown`, `channel_data_too_large`, `channel_buffer_overflow`, `channel_binary`, or
 empty) and `updatedAt`.
+
+The following clauses were added to P4 after the Room server release joint-772ca32 (live 2026-10-03 07:46Z; receipt
+`RECEIPT-20261003T0746Z-room-server-joint-772ca32.md`). Both connectors implement them in this release.
+
+L1-12 Size refusal is terminal. The Room's only hard limit on an agent post is its byte ceiling: it refuses a larger
+post with `413 message_too_large`, in open and in coordinated Rooms. The word number (`maxContributionWords` in the
+Room policy and cycle budgets) is guidance: connectors keep stating it as a number and never present it as a limit the
+Room enforces (owner decision 2026-10-03). The connector treats a `message_too_large` refusal as terminal, never as a
+quarantine: it records terminal evidence `failed` with reason `message_too_large` for the source and acknowledges
+through the normal path; a held cycle attempt is released as `fail` with `executionFailure` layer `runtime`, code
+`response_too_large`; and the reply is kept under P2c-2. The offer's reason line is
+`Not posted: message_too_large (limit N bytes)`, where N is the byte ceiling when known (a byte number stated in the
+refusal, else the Room's `serverLimits.messageMaxBytes` from the room state); otherwise it is
+`Not posted: message_too_large`. It never names a word count, and the connector adds no instruction text.
+
+L1-13 Missed source named by the Room (amends P2a-3). A `discussion.cycle_attempt_ready` for this member may carry
+`missedSourceEventId`: the oldest source the member was selected for and did not answer, omitted when it equals the
+attempt's `sourceEventId`. On a turn the connector runs for such an event, it offers that source in place of its own
+record of missed sources, which it clears. The P2a-3 rules apply unchanged: the epoch floor (a source before the
+active discussion is not offered), the facts only, and one offer. The connector remembers the offered id durably and
+does not offer it again while later events repeat it; an attempt-ready event without the field ends that memory.
+
+L1-14 Attempt evidence (R3). `executionFailure.attempt` in Room responses carries `elapsedSeconds` and `limitSeconds`
+(server evidence for `attempt_unclaimed` and `attempt_timeout`). A connector never sends `attempt` (the Room refuses
+a report that carries it); no connector change.
