@@ -243,3 +243,44 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `rooms.<id>.lastErrorAt` | string or null | when it was recorded |
 | `rooms.<id>.lastGateWaitSeconds` | number | the last wait on a host gate before dispatch, in seconds |
 | `rooms.<id>.lastGateWaitAt` | string or null | when that wait ended |
+| `rooms.<id>.acknowledgedSeq` | integer | the Room's acknowledged seq (P3-3) |
+| `rooms.<id>.holeSeqs` | array of integers | holes above the acknowledgement, at most 32 (P3-3) |
+| `rooms.<id>.quarantinedSeqs` | array of integers | quarantined seqs above the acknowledgement, at most 32 (P3-3) |
+| `rooms.<id>.ledgerCode` | string | `ack_hole`, `quarantine_held` or empty (P3-3) |
+
+## P3 — Ledger, recovery and holes (2026-10-03)
+
+P3-1 Receive ledger. Every event a connector reads above its acknowledgement gets a durable ledger entry before it
+is processed. The entry ends in a terminal outcome with evidence (posted, skipped, failed, cancelled, superseded,
+ignored) or in quarantine. Acknowledgement advances only over contiguous entries with valid terminal evidence, and
+only through the Room's acknowledgement route. A connector whose stored state predates the ledger upgrades it in
+place, once, without losing data, and keeps a copy of the original.
+
+P3-2 Terminal-intent retention. A delivery intent in a terminal state (posted with its lifecycle complete or not
+required, superseded, skipped) is kept only among the newest 32 terminal intents of its Room; older ones are pruned.
+Quarantined intents and intents that are not terminal are never pruned.
+
+P3-3 Holes. A hole is a seq above the acknowledgement and at or below the highest seq the connector has read, with
+neither a ledger entry nor terminal evidence. A connector reports holes and the quarantines that hold its
+acknowledgement in its local status as codes, logs each hole once, and never closes a hole or a quarantine by
+itself.
+
+P3-4 Audited recovery. Both connectors offer the same operator verbs: `room recovery list` (read-only: holes,
+quarantines, stuck intents) and `room recovery close --seq N --reason <code> --evidence <ref>`. A closure is a dry
+run unless `--apply` is given with the confirmation token the dry run printed. It is refused unless the Room proves,
+through read-only requests made with the member's own credential, that the event is terminal for this member: its
+discussion epoch is no longer active (`epoch_closed`), its cycle is terminal (`cycle_terminal`), or its cycle has a
+newer generation (`cycle_superseded`); the evidence reference names the proven object. An applied closure is an
+append-only audit record (who, when, why, and the proof fetched); the connector then records terminal evidence for
+that seq and acknowledges through the normal path. No closure edits a cursor, an acknowledgement, an intent or a
+quarantine directly.
+
+P3-5 Status path. The local status file (P2c-4) is written next to the state the connector actually uses; the
+connector creates that directory with mode 0700 when it is missing.
+
+P3-6 Path arguments. A known path argument of a tool call (`path`, `file_path`, `file`, `cwd`, `dir`, `directory`,
+`root`, `workdir`) is always resolved and checked against the credential store, whatever its shape.
+
+P3-7 Isolation routes. The store counts as isolated (P2c-1) when the agent's shell, process and code-execution
+tools are denied for the installation, or when they run in a sandbox that does not contain the store; in both
+routes the file tools are fenced.

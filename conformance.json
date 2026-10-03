@@ -242,6 +242,19 @@
   },
   "parityP2cStatusSchema": "synthetic-sociality-room-status-v1",
   "parityP2cEnforcementSetting": "enforceSecretIsolation",
+  "parityP3Contract": "docs/delivery-lifecycle-contract-v1.md#p3--ledger-recovery-and-holes-2026-10-03",
+  "parityP3Cases": {
+    "P3-01 every event read above the acknowledgement has a ledger entry before it is processed": "test_p3_01_every_event_read_above_the_acknowledgement_has_a_ledger_entry_before_it_is_processed",
+    "P3-02 an older state file is upgraded once, in place, without data loss and with a copy of the original": "test_p3_02_an_older_state_file_is_upgraded_once_in_place_without_data_loss_and_with_a_copy_of_the_original",
+    "P3-03 terminal intents beyond the newest 32 are pruned and quarantined or open intents never are": "test_p3_03_terminal_intents_beyond_the_newest_32_are_pruned_and_quarantined_or_open_intents_never_are",
+    "P3-04 a hole is reported as a code, logged once and never closed by the connector": "test_p3_04_a_hole_is_reported_as_a_code_logged_once_and_never_closed_by_the_connector",
+    "P3-05 recovery list is read-only and shows holes, quarantines and stuck intents": "test_p3_05_recovery_list_is_read_only_and_shows_holes_quarantines_and_stuck_intents",
+    "P3-06 a recovery closure is a dry run until applied with its token and acknowledges through the normal path": "test_p3_06_a_recovery_closure_is_a_dry_run_until_applied_with_its_token_and_acknowledges_through_the_normal_path",
+    "P3-07 a recovery closure is refused without the Room's proof that the event is terminal for this member": "test_p3_07_a_recovery_closure_is_refused_without_the_room_s_proof_that_the_event_is_terminal_for_this_member",
+    "P3-08 the status file is written next to the state in use and its directory is created 0700": "test_p3_08_the_status_file_is_written_next_to_the_state_in_use_and_its_directory_is_created_0700",
+    "P3-09 a known path argument is resolved whatever its shape and denied tools count as isolated": "test_p3_09_a_known_path_argument_is_resolved_whatever_its_shape_and_denied_tools_count_as_isolated"
+  },
+  "parityP3TerminalIntentRetention": 32,
   "parityP1aDenyList": [
     "consensus",
     "common ground",
