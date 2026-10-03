@@ -85,6 +85,7 @@ class Harness:
         self.connections: asyncio.Queue = asyncio.Queue()
         self.requests: list = []
         self.refuse: tuple[int, str] | None = None
+        self.redirect_to: str = ""
         self.frames: dict[int, list[int]] = {}
 
     async def __aenter__(self) -> "Harness":
@@ -103,6 +104,10 @@ class Harness:
 
     def _process(self, connection, request):
         self.requests.append(request)
+        if self.redirect_to:
+            response = connection.respond(302, "")
+            response.headers["Location"] = self.redirect_to
+            return response
         if self.refuse is not None:
             status, error = self.refuse
             response = connection.respond(status, json.dumps({"error": error}))
@@ -167,6 +172,8 @@ class Gateway:
         self.received: list[str] = []
         self.sockets: list = []
         self.closed = 0
+        self.requests: list[str] = []
+        self.redirect_to = ""
         self.page = f'<html><script>window.__HERMES_SESSION_TOKEN__="{token}";</script></html>'
 
     async def __aenter__(self) -> "Gateway":
@@ -181,6 +188,11 @@ class Gateway:
         await self.server.wait_closed()
 
     def _process(self, connection, request):
+        self.requests.append(request.path)
+        if self.redirect_to:
+            response = connection.respond(302, "")
+            response.headers["Location"] = self.redirect_to + request.path
+            return response
         if request.path == "/":
             response = connection.respond(200, self.page)
             response.headers["Content-Type"] = "text/html; charset=utf-8"
@@ -241,16 +253,20 @@ def confirmed(fingerprint: str) -> tuple[int, dict]:
                  "state": "active", "confirmedAt": "2026-10-03T12:00:00.000Z"}
 
 
-def run_cli(*argv, token: str | None = None):
+def run_cli(*argv, token: str | None = None, answer: str = "y"):
     parser = __import__("argparse").ArgumentParser()
     cli.setup_cli(parser)
     out, err = io.StringIO(), io.StringIO()
     prompt = mock.Mock(return_value=token or "")
+    # input() only answers the link confirmation (H10); the token is read by getpass.
+    confirm = mock.Mock(return_value=answer)
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
             mock.patch.object(cli.getpass, "getpass", prompt), \
-            mock.patch("builtins.input", side_effect=AssertionError("input() must not read a link token")), \
+            mock.patch("builtins.input", confirm), \
             mock.patch("time.sleep", lambda _s: None):
         code = cli.dispatch(parser.parse_args(list(argv)))
+    for call in confirm.call_args_list:
+        assert "twh1." not in str(call), "input() must never read a link token"
     return code, out.getvalue(), err.getvalue(), prompt
 
 
@@ -315,7 +331,7 @@ class LinkTestCase(unittest.IsolatedAsyncioTestCase):
 class L1ConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityL1Cases"]
-        self.assertEqual(len(cases), 17)
+        self.assertEqual(len(cases), 21)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"L1-{index:02d} "), name)
@@ -325,6 +341,21 @@ class L1ConformanceTests(unittest.TestCase):
         section = contract[contract.index("\n## L1 — Device link (2026-10-03)\n"):]
         for file, digest in CONFORMANCE["parityL1Specs"].items():
             self.assertIn(f"| `{file}` | `{digest}` |", section)
+
+
+class ContractSectionHashTests(unittest.TestCase):
+    def test_p3_and_l1_sections_match_the_pinned_hashes(self):
+        # OP-12 P4 r1 item 9: identical in both repositories (same pins in
+        # OpenClaw's conformance.json); heading through the last non-blank
+        # line before the next "## " heading.
+        lines = (ROOT / "docs" / "delivery-lifecycle-contract-v1.md").read_text(encoding="utf-8").split("\n")
+        for name, digest in CONFORMANCE["parityContractSectionSha256"].items():
+            start = next(index for index, line in enumerate(lines) if line.startswith(f"## {name} "))
+            end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")), len(lines))
+            body = lines[start:end]
+            while body and not body[-1].strip():
+                body.pop()
+            self.assertEqual(hashlib.sha256(("\n".join(body) + "\n").encode("utf-8")).hexdigest(), digest, name)
 
 
 class L1TokenAndSignatureTests(LinkTestCase):
@@ -434,7 +465,9 @@ class L1TokenAndSignatureTests(LinkTestCase):
             self.assertIn(record["fingerprintSha256"], out)
             self.assertNotIn(FAKE_PAIRING_SECRET, out + err)
             self.assertNotIn(record["privateKeyBase64"], out + err)
-        # 404: the token is spent; no retry, the pending secret leaves the store.
+        # 404 on a first link: the token is spent; no retry, the pending secret
+        # leaves the store and the refusal is recorded.
+        self.record_path.unlink()
         with confirmation_server((404, {"error": "local device unavailable"})) as server:
             audience = f"http://127.0.0.1:{server.server_port}/tokenwerk/room/v1/local-devices/connect"
             code, out, err, _prompt = run_cli("link", token=make_token(audience))
@@ -444,6 +477,7 @@ class L1TokenAndSignatureTests(LinkTestCase):
             record = link.read_link(self.record_path)
             self.assertEqual(record["state"], "refused")
             self.assertNotIn("pairingSecret", record)
+            self.assertFalse(link.pending_path(self.record_path).exists())
 
     def test_l1_03_signature_vector(self):
         vector = CONFORMANCE["parityL1SignatureVector"]
@@ -653,11 +687,12 @@ class L1SocketTests(LinkTestCase):
         # Pending: confirmation retried until 201, then the link connects.
         async with Harness() as harness:
             self.status_path.unlink(missing_ok=True)
+            self.record_path.unlink(missing_ok=True)  # a first link: no working link.json
             with confirmation_server() as server:
                 audience = harness.audience
                 pending = link.pending_record({"deviceId": DEVICE, "audience": audience, "pairingSecret": FAKE_PAIRING_SECRET,
                                                "expiresAt": _iso(300)}, label="Test · Hermes test", seed=SEED)
-                link.write_link(pending, self.record_path)
+                link.write_link(pending, link.pending_path(self.record_path))
                 server.responses += [(502, {}), (502, {}), confirmed(pending["fingerprintSha256"])]
                 original = link.send_confirmation
 
@@ -675,7 +710,8 @@ class L1SocketTests(LinkTestCase):
         # Pending past the token's expiry: stopped, the secret removed.
         expired = link.pending_record({"deviceId": DEVICE, "audience": audience, "pairingSecret": FAKE_PAIRING_SECRET,
                                        "expiresAt": _iso(-1)}, label="Test · Hermes test", seed=SEED)
-        link.write_link(expired, self.record_path)
+        self.record_path.unlink(missing_ok=True)
+        link.write_link(expired, link.pending_path(self.record_path))
         self.status_path.unlink(missing_ok=True)
         task = await self.running(self.service())
         await until(lambda: self.status_link()["code"] == "link_pairing_expired")
@@ -800,13 +836,15 @@ class L1LocalTests(LinkTestCase):
             with mock.patch.object(cli, "LINK_CONFIRMATION_WAIT_SECONDS", 0):
                 code, _out, _err, _prompt = run_cli("link", token=make_token(audience))
             self.assertEqual(code, 1)  # still pending: the secret is in the store
-        record = link.read_link(self.record_path)
+        pending_file = link.pending_path(self.record_path)
+        record = link.read_link(pending_file)
         self.assertEqual(record["state"], "pending")
         secrets_in_play = [record["privateKeyBase64"], FAKE_PAIRING_SECRET]
-        # The record is inside the fenced store, 0600 in a 0700 directory.
+        # The records are inside the fenced store, 0600 in a 0700 directory.
         self.assertEqual(link.link_path().parent, self.store)
-        self.assertEqual(self.record_path.parent, self.store)
-        self.assertEqual(stat.S_IMODE(self.record_path.stat().st_mode), 0o600)
+        self.assertEqual(pending_file.parent, self.store)
+        self.assertEqual(stat.S_IMODE(pending_file.stat().st_mode), 0o600)
+        self.assertFalse(self.record_path.exists())  # link.json changes only after the 201
         self.assertEqual(stat.S_IMODE(self.store.stat().st_mode), 0o700)
         for path in self.scratch.rglob("*"):
             if path.is_file() and path.parent != self.store:
@@ -816,6 +854,7 @@ class L1LocalTests(LinkTestCase):
         # The agent's tools cannot reach it.
         with mock.patch.dict(os.environ, {"TERMINAL_CWD": str(self.scratch)}), self.assertLogs(adapter.logger, level="WARNING"):
             for tool, args in {"read_file": {"path": str(self.record_path)},
+                               "read_file (pending)": {"path": str(pending_file)},
                                "search_files": {"path": str(self.home), "pattern": "privateKey"},
                                "terminal": {"command": f"cat {self.record_path}"},
                                "terminal ($HERMES_HOME)": {"command": "cat $HERMES_HOME/synthetic-sociality-room/link.json"}}.items():
@@ -909,6 +948,168 @@ class L1LocalTests(LinkTestCase):
             await ws.send(json.dumps({"version": 1, "type": "hermes-open", "channelId": channel}))
             self.assertEqual(await next_frame(ws), {"version": 1, "type": "hermes-open-failed", "channelId": channel})
             self.assertEqual(self.status_link()["lastChannelErrorCode"], "local_gateway_auth_unavailable")
+
+
+
+class _Redirect(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802 - http.server API
+        self.server.requests.append(self.path)
+        self.send_response(307)
+        self.send_header("Location", self.server.location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_GET = do_POST
+
+    def log_message(self, *_args):
+        pass
+
+
+class L1ReviewR1Tests(LinkTestCase):
+    """OP-12 P4 r1 (Hermes and OpenClaw reviews): link hardening."""
+
+    def test_l1_20_a_failed_relink_keeps_the_working_link(self):
+        with confirmation_server() as server:
+            audience = f"http://127.0.0.1:{server.server_port}/tokenwerk/room/v1/local-devices/connect"
+            working = self.active_record(audience)
+            working_bytes = self.record_path.read_bytes()
+            # A refused re-link (404) and a re-link the CLI could not confirm.
+            for responses, code in (([(404, {"error": "local device unavailable"})], "link_pairing_refused"),
+                                    ([(502, {})] * 3, "")):
+                with self.subTest(code=code or "unconfirmed"):
+                    server.responses[:] = list(responses)
+                    with mock.patch.object(cli, "LINK_CONFIRMATION_WAIT_SECONDS", 0):
+                        result, out, err, _prompt = run_cli("link", "--yes", token=make_token(audience))
+                    self.assertEqual(result, 1)
+                    self.assertEqual(self.record_path.read_bytes(), working_bytes)
+                    self.assertFalse(link.pending_path(self.record_path).exists())
+                    self.assertIn(f"your existing link (device {DEVICE}) is unchanged", err.lower())
+                    self.assertNotIn(FAKE_PAIRING_SECRET, out + err)
+            self.assertEqual(link.read_link(self.record_path)["privateKeyBase64"], working["privateKeyBase64"])
+        # H11: a refusal names the recovery for a lost 201.
+        with confirmation_server((404, {"error": "local device unavailable"})) as server:
+            audience = f"http://127.0.0.1:{server.server_port}/tokenwerk/room/v1/local-devices/connect"
+            self.record_path.unlink()
+            result, _out, err, _prompt = run_cli("link", "--yes", token=make_token(audience))
+            self.assertEqual(result, 1)
+            self.assertIn("revoke it in the Harness and link again", err)
+        # H10: the server is shown and linking needs a yes; a no writes nothing.
+        with confirmation_server() as server:
+            audience = f"http://127.0.0.1:{server.server_port}/tokenwerk/room/v1/local-devices/connect"
+            self.record_path.unlink(missing_ok=True)
+            result, out, _err, _prompt = run_cli("link", token=make_token(audience), answer="n")
+            self.assertEqual(result, 0)
+            self.assertIn(f"Server:      127.0.0.1:{server.server_port}", out)
+            self.assertEqual(server.requests, [])
+            self.assertFalse(self.record_path.exists() or link.pending_path(self.record_path).exists())
+
+    async def test_l1_21_requests_never_follow_a_redirect(self):
+        # The pairing confirmation.
+        with confirmation_server() as target:
+            redirector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Redirect)
+            redirector.requests, redirector.location = [], f"http://127.0.0.1:{target.server_port}/elsewhere"
+            thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+            thread.start()
+            try:
+                audience = f"http://127.0.0.1:{redirector.server_port}/tokenwerk/room/v1/local-devices/connect"
+                record = link.pending_record({"deviceId": DEVICE, "audience": audience, "pairingSecret": FAKE_PAIRING_SECRET,
+                                              "expiresAt": _iso(300)}, label="Test · Hermes test", seed=SEED)
+                with self.assertRaises(link.ConfirmationRetry) as caught:
+                    await asyncio.to_thread(link.send_confirmation, record)
+                self.assertEqual(caught.exception.code, "link_route_refused")
+                self.assertEqual(len(redirector.requests), 1)
+                self.assertEqual(target.requests, [])
+            finally:
+                redirector.shutdown()
+                redirector.server_close()
+        async with Gateway() as target, Gateway() as redirecting:
+            redirecting.redirect_to = f"http://127.0.0.1:{target.port}"
+            # The dashboard page (GET /).
+            with self.assertRaises(link.LocalGatewayError) as caught:
+                await asyncio.to_thread(link.resolve_local_gateway, f"http://127.0.0.1:{redirecting.port}")
+            self.assertEqual(caught.exception.code, "local_gateway_refused")
+            # The Gateway WebSocket (/api/ws).
+            with self.assertRaises(link.LocalGatewayError) as caught:
+                await link.open_local_gateway("", 1024, resolver=lambda _u: ("127.0.0.1", redirecting.port, FAKE_DASHBOARD_TOKEN))
+            self.assertEqual(caught.exception.code, "local_gateway_refused")
+            self.assertEqual(target.requests, [])
+        # The device socket.
+        async with Harness() as target, Harness() as redirecting:
+            redirecting.redirect_to = target.audience.replace("http://", "ws://") + f"?deviceId={DEVICE}"
+            self.active_record(redirecting.audience)
+            await self.running(self.service())
+            await until(lambda: self.status_link()["code"] == "link_route_refused")
+            self.assertEqual(target.requests, [])
+            self.assertTrue(target.connections.empty())
+
+    async def test_relink_record_validation_and_service_guard(self):
+        # H6: a record missing a field is refused on load, never a KeyError later.
+        record = link.pending_record({"deviceId": DEVICE, "audience": "https://rooms.example/x/local-devices/connect",
+                                      "pairingSecret": FAKE_PAIRING_SECRET, "expiresAt": _iso(300)}, label="L", seed=SEED)
+        del record["deviceLabel"]
+        link.write_link(record, link.pending_path(self.record_path))
+        with self.assertRaises(ValueError):
+            link.read_link(link.pending_path(self.record_path))
+
+        service = self.service()
+        await self.running(service)
+        await until(lambda: self.status_link()["code"] == "link_store_unreadable")
+        # The top-level guard: an unexpected failure is reported and retried.
+        calls = []
+
+        async def failing_step():
+            calls.append(1)
+            raise KeyError("deviceLabel")
+
+        guarded = self.service()
+        guarded._step = failing_step
+        with self.assertLogs(link.logger, level="WARNING"):
+            await self.running(guarded)
+            await until(lambda: len(calls) >= 2)
+        self.assertEqual(guarded.snapshot()["code"], "link_service_error")
+
+    def test_rendezvous_host_and_literal_loopback(self):
+        # H4: a rendezvous record on a non-loopback host is not used.
+        import gateway as core_gateway
+
+        for host in ("0.0.0.0", "192.0.2.1", "localhost"):
+            fake = mock.Mock(ROLE_SERVE="serve", ROLE_DESKTOP_SERVE="desktop-serve")
+            fake.read_record.side_effect = lambda role, host=host: mock.Mock(host=host, port=9, pid=1)
+            fake.read_token.return_value = FAKE_DASHBOARD_TOKEN
+            fake.record_token_is_consistent.return_value = True
+            with self.subTest(host=host), mock.patch.object(core_gateway, "host_rendezvous", fake, create=True), \
+                    self.assertRaises(link.LocalGatewayError) as caught:
+                link.resolve_local_gateway("http://127.0.0.1:1")  # nothing listens there
+            self.assertEqual(caught.exception.code, "local_gateway_unavailable")
+            fake.read_token.assert_not_called()
+        # H9: literal loopback addresses only, never a name.
+        with self.assertRaises(link.LocalGatewayError) as caught:
+            link.resolve_local_gateway("http://localhost:9119")
+        self.assertEqual(caught.exception.code, "local_gateway_auth_unavailable")
+        with self.assertRaises(link.LinkError):
+            link.derive_urls("http://localhost:9/tokenwerk/room/v1/local-devices/connect", DEVICE)
+        self.assertNotIn("localhost", link.LOOPBACK_HOSTS)
+
+    def test_kept_bound_for_a_realistic_too_large_reply(self):
+        # H2: a reply over the Room's default ceiling (16384 bytes) is kept.
+        state_module = __import__(adapter.__name__.rsplit(".", 1)[0] + ".state", fromlist=["state"])
+        self.assertEqual(state_module.kept_reply_bound(16384), 32768)
+        self.assertEqual(state_module.kept_reply_bound(0), state_module.KEPT_REPLY_HARD_LIMIT)
+        self.assertEqual(state_module.kept_reply_bound(10**6), state_module.KEPT_REPLY_HARD_LIMIT)
+        self.assertEqual(state_module.kept_reply_bound(100), state_module.KEPT_REPLY_CHARACTER_LIMIT)
+
+    async def test_no_link_poller_when_not_linked(self):
+        # H7: the link service starts only for a linked profile.
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        instance._state_file = self.store / "state.json"
+        instance.config = type("Config", (), {"extra": {}})()
+
+        self.assertFalse(instance._start_link_service())
+        self.assertIsNone(getattr(instance, "_link_task", None))
+        self.active_record("https://rooms.example/tokenwerk/room/v1/local-devices/connect")
+        self.assertTrue(instance._start_link_service())
+        instance._link_task.cancel()
+        await asyncio.gather(instance._link_task, return_exceptions=True)
 
 
 if __name__ == "__main__":

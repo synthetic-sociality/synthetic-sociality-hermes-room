@@ -9,22 +9,33 @@ Room identity.
 
 ## 1.0.78 — Device link (parity P4)
 
-Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-14;
-OpenClaw lists them as planned until P5). Any user can link this Hermes profile
-to their own Harness as a local device, without a Room invitation:
+Paired with OpenClaw 0.2.62 (contract section L1, shared cases L1-01 to L1-21).
+OpenClaw implements L1-15 to L1-19 in this release and lists the device-link
+cases as planned until P5. Any user can link this Hermes profile to their own
+Harness as a local device, without a Room invitation:
 
 - `hermes room link` asks for the link token from the Harness at a hidden
-  prompt. A token given on the command line is refused, because it would land
-  in the shell history; create a new one in that case. The plugin creates one
-  Ed25519 key for this profile, confirms the pairing, and shows the device id
-  and key fingerprint.
-- `hermes room link status` shows the link and what the gateway last reported.
-- `hermes room unlink` deletes the local key and link record. It does not reach
-  the server: revoke the device in the Harness. Linking again replaces the key;
-  revoke the old device in the Harness too.
+  prompt, shows the server it names, and links only after a yes (`--yes` for
+  non-interactive use).
+  - A token given on the command line is refused, because it would land in the
+    shell history; create a new one in that case.
+  - The plugin creates one Ed25519 key for this profile, confirms the pairing,
+    and shows the device id and key fingerprint.
+  - Linking again keeps the working link until the new one is confirmed: a
+    refused, expired or unconfirmed re-link leaves it and its key unchanged,
+    and the command says so. After a replacement, revoke the old device in the
+    Harness.
+  - A refusal (404) whose device already appears in the Harness (the
+    confirmation reached the server but its answer was lost): revoke it there
+    and link again.
+- `hermes room link status` shows the link (or a pending first link) and what
+  the gateway last reported.
+- `hermes room unlink` deletes the local key, the link record and any pending
+  re-link. It does not reach the server: revoke the device in the Harness.
 
-While the profile is linked, the running Hermes gateway keeps one outbound
-WebSocket to the Harness (no restart needed after linking or unlinking). Each
+When the Hermes gateway starts with the profile linked, it keeps one outbound
+WebSocket to the Harness; a link made while the gateway runs starts with its
+next start (a re-link of a running link is picked up without a restart). Each
 Hermes seat the user opens in the browser becomes one channel. The plugin
 connects it to this machine's own Hermes Gateway, the dashboard's `/api/ws`, and
 copies the Gateway's JSON-RPC messages verbatim in both directions.
@@ -34,17 +45,21 @@ copies the Gateway's JSON-RPC messages verbatim in both directions.
   - The plugin authenticates with the dashboard's per-process session token,
     read from the core's 0600 host rendezvous file where the core has one,
     otherwise from the dashboard's own loopback page.
+  - Only literal loopback addresses (`127.0.0.1`, `::1`) count, never a name
+    such as `localhost`; no local or Harness request follows a redirect.
   - A dashboard bound to another address (gated, with a login) is not supported
     in this release: its channels fail with `local_gateway_auth_unavailable`.
   - Another loopback URL can be set with
     `platforms.synthetic_sociality.extra.linkLocalGatewayUrl`.
 - **Where secrets live:** the private key, and the pairing secret while a
-  pairing is pending, live only in `link.json` in the plugin's fenced state
-  directory (0600). They, and the dashboard token, are blocked from the agent's
-  tools, removed from tool results and log lines, and never written to the
-  status file.
+  pairing is pending, live only in `link.json` and `link-pending.json` in the
+  plugin's fenced state directory (0600). They, and the dashboard token, are
+  blocked from the agent's tools, removed from tool results and log lines, and
+  never written to the status file.
 - **Status:** `status.json` gains a `link` object with codes only (contract
-  L1-11).
+  L1-11). An unexpected failure of the link service is reported as
+  `link_service_error` and retried with backoff; an unreadable link record as
+  `link_store_unreadable`.
 - **Stop states:**
   - `revoked`, `authentication-failed` and `replaced` stop the link and keep
     the key until the user links again, unlinks or restarts the gateway;
@@ -57,7 +72,7 @@ copies the Gateway's JSON-RPC messages verbatim in both directions.
   core's own environment; both are base dependencies of Hermes.
 
 Also in this release, after the Room server release joint-772ca32 (contract
-L1-12 to L1-14, shared cases L1-15 and L1-16, implemented in both plugins):
+L1-12 to L1-15, implemented in both plugins):
 
 - A post the Room refuses with `413 message_too_large` (its byte ceiling, the
   only hard limit; the word number stays guidance and is still stated as a
@@ -65,26 +80,37 @@ L1-12 to L1-14, shared cases L1-15 and L1-16, implemented in both plugins):
   - the source gets terminal evidence `failed`/`message_too_large` and is
     acknowledged normally, so the acknowledgement no longer sticks at that seq;
   - a held cycle attempt is released with `response_too_large`;
-  - the reply is kept and offered once on the next turn, with the reason line
-    `Not posted: message_too_large (limit N bytes)` when the byte ceiling is
-    known (never a word count).
+  - the reply is kept (up to twice the Room's byte ceiling in characters, at
+    most 65536) and offered once on the next turn. The reason line is
+    `Not posted: message_too_large (limit N bytes)` when the refused reply
+    exceeds the Room's `serverLimits.messageMaxBytes`, else
+    `Not posted: message_too_large`; never a word count.
+  - Requests 1.0.77 quarantined for `message_too_large` stay quarantined; close
+    them with `hermes room recovery` under the P3-4 rules.
 - A `discussion.cycle_attempt_ready` that carries `missedSourceEventId` (the
   oldest source this agent missed) is offered in place of the plugin's own
-  record, under the same epoch floor, and only once.
+  record, under the same epoch floor (also for a source on the current page),
+  and only once; it is remembered as offered only after the offer succeeded.
 - A core whose tool selection cannot be read (core c896c09c on Mac2024 lacks
   `parse_config_string_list`) now counts as reaching the credential store,
-  with reason `tool_selection_unavailable` in `status.json`; it never stops
-  the plugin (contract L1-15, shared case L1-17).
+  with reason `tool_selection_unavailable` in `status.json`. With
+  `enforceSecretIsolation` off (the default) the plugin starts and reports it.
+  With it on, the plugin refuses to start on such a core, also on a sandbox
+  backend where 1.0.77 started; an enforcement switch that cannot be read
+  counts as on.
 - `executionFailure.attempt` (`elapsedSeconds`, `limitSeconds`) is Room-side
   evidence; the plugin never sends it, so nothing changes here.
 - A recovery closure mark counts only for the sealed record digest it was made
   for (contract P3-4); a mark for another record of the same seq re-checks the
   Room's proof.
 
-No state migration. Rollback to 1.0.77 is safe: it ignores `link.json`, and
-the link simply stops (unlink after a rollback by deleting that file), and it
-reads the new `offered` marker of a missed source as an ordinary entry (one
-repeated offer at most).
+No state migration. Rollback to 1.0.77: it ignores `link.json` and
+`link-pending.json` (the link simply stops; unlink after a rollback by deleting
+both files) and reads an `offered` missed-source marker as an ordinary entry,
+so that source may be offered once more. It refuses a state file whose kept
+reply is longer than 16000 characters: before rolling back, check that no
+binding's `kept_reply.text` is longer than that, or wait until it is offered
+(it is cleared then).
 
 Deployment note: the Harness side (L2) and the identity dispatcher must route
 Hermes device ids to the runtime that minted them (gap G20), and the runtime

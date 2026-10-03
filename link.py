@@ -77,6 +77,8 @@ CONFIRMATION_BODY_LIMIT = 4096
 CONNECT_SUFFIX = "/local-devices/connect"
 CONFIRMATION_SUFFIX = "/local-devices/pairing-confirmations"
 LINK_FILE = "link.json"
+# Contract L1-9: a (re-)link waits here until its 201; link.json changes only then.
+LINK_PENDING_FILE = "link-pending.json"
 LINK_LOCK_FILE = "link.lock"
 LINK_SCHEMA = "synthetic-sociality-room-link-v1"
 SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
@@ -102,7 +104,8 @@ BACKOFF_INITIAL_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 30.0
 RECORD_POLL_SECONDS = 2.0
 DEFAULT_LOCAL_GATEWAY_URL = "http://127.0.0.1:9119"
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# Literal loopback addresses only: a name ("localhost") is resolved per request.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 _PAIRING_SECRET = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _BASE64URL = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -316,6 +319,35 @@ def _remember(record: dict[str, Any] | None) -> None:
         )
 
 
+def pending_path(path: Path | None = None) -> Path:
+    return (path or link_path()).parent / LINK_PENDING_FILE
+
+
+_RECORD_STATES = frozenset({"active", "pending", "refused", "expired"})
+
+
+def _validate_record(record: Any) -> dict[str, Any]:
+    """Every field the link code reads, checked on load (OP-12 P4 r1 H6)."""
+    if not isinstance(record, dict) or record.get("schema") != LINK_SCHEMA:
+        raise ValueError("unsupported link record")
+    state = record.get("state")
+    if state not in _RECORD_STATES:
+        raise ValueError("link record state is invalid")
+    for key in ("deviceId", "audience", "deviceLabel", "privateKeyBase64", "publicKeySpkiBase64", "fingerprintSha256"):
+        if not isinstance(record.get(key), str) or not record[key]:
+            raise ValueError(f"link record lacks {key}")
+    if not _UUID4.match(record["deviceId"]) or not re.fullmatch(r"[0-9a-f]{64}", record["fingerprintSha256"]):
+        raise ValueError("link record identity is invalid")
+    _seed(record)
+    if state == "pending":
+        if not isinstance(record.get("pairingSecret"), str) or not _PAIRING_SECRET.match(record["pairingSecret"]):
+            raise ValueError("pending link record lacks its pairing secret")
+        _parse_time(str(record.get("expiresAt") or ""))
+    elif "pairingSecret" in record:
+        raise ValueError("only a pending link record holds a pairing secret")
+    return record
+
+
 def read_link(path: Path | None = None) -> dict[str, Any] | None:
     """The link record, or None when not linked. Raises on an unreadable record."""
     target = path or link_path()
@@ -326,10 +358,9 @@ def read_link(path: Path | None = None) -> dict[str, Any] | None:
     assert_state_directory(target.parent)
     os.chmod(target, 0o600)
     record = json.loads(target.read_text(encoding="utf-8"))
-    if not isinstance(record, dict) or record.get("schema") != LINK_SCHEMA:
-        raise ValueError("unsupported link record")
-    _remember(record)
-    return record
+    if isinstance(record, dict):
+        _remember(record)
+    return _validate_record(record)
 
 
 def record_digest(record: dict[str, Any] | None) -> str:
@@ -361,8 +392,11 @@ def write_link(record: dict[str, Any], path: Path | None = None) -> Path:
 
 
 def delete_link(path: Path | None = None) -> dict[str, Any] | None:
-    """Delete the local key and record (L1-9); the deleted record's public view."""
+    """Delete the local key, record and any pending re-link (L1-9); the deleted record's public view."""
     target = path or link_path()
+    pending = pending_path(target)
+    if pending.exists() or pending.is_symlink():
+        pending.unlink()
     try:
         record = read_link(target)
     except (ValueError, OSError, json.JSONDecodeError):
@@ -449,8 +483,30 @@ def confirmation_body(record: dict[str, Any]) -> bytes:
     return body
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """OP-12 P4 r1 H3: a redirect is answered as the 3xx it is, never followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401, ANN001
+        return None
+
+
+def _no_redirect_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect())
+
+
 def _no_proxy_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def _connect_without_redirects():
+    """websockets' connect, refusing every redirect (OP-12 P4 r1 H3)."""
+    from websockets.asyncio.client import connect
+
+    class _Connect(connect):
+        def process_redirect(self, exc: Exception) -> Exception:
+            return exc
+
+    return _Connect
 
 
 def send_confirmation(record: dict[str, Any], *, timeout: float = 15.0,
@@ -462,7 +518,7 @@ def send_confirmation(record: dict[str, Any], *, timeout: float = 15.0,
         headers={"Content-Type": "application/json", "Accept": "application/json"},
     )
     try:
-        with (opener or urllib.request.build_opener()).open(request, timeout=timeout) as response:
+        with (opener or _no_redirect_opener()).open(request, timeout=timeout) as response:
             status = response.status
             payload = response.read(65_536)
     except urllib.error.HTTPError as error:
@@ -474,6 +530,8 @@ def send_confirmation(record: dict[str, Any], *, timeout: float = 15.0,
         raise ConfirmationRetry("link_connection_lost") from None
     if status == 404:
         raise ConfirmationRefused()
+    if 300 <= status < 400:
+        raise ConfirmationRetry("link_route_refused")
     if status != 201:
         dispatcher = ""
         with contextlib.suppress(Exception):
@@ -494,45 +552,62 @@ def send_confirmation(record: dict[str, Any], *, timeout: float = 15.0,
 def confirm_pending(*, now: datetime | None = None, path: Path | None = None,
                     sender: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
                     blocking: bool = True) -> tuple[str, str]:
-    """One confirmation attempt for a pending record: (state, code).
+    """One confirmation attempt for the pending (re-)link: (state, code).
 
     state is ``active``, ``pending`` (retry later), ``refused`` or ``expired``;
-    ``none`` when there is no record.
+    ``none`` when nothing is pending. The pending record lives in its own
+    file; link.json is replaced only after the 201, so a failed re-link
+    leaves a working link as it was (L1-9).
     """
-    with link_lock(blocking=blocking, path=path) as locked:
+    target = path or link_path()
+    pending_file = pending_path(target)
+    with link_lock(blocking=blocking, path=target) as locked:
         if not locked:
             return "pending", "link_pending"
-        record = read_link(path)
+        record = read_link(pending_file)
         if record is None:
             return "none", ""
-        if record.get("state") != "pending":
-            return str(record.get("state") or ""), ""
-        try:
-            expires = _parse_time(str(record.get("expiresAt") or ""))
-        except ValueError:
-            expires = now or _now()
+        expires = _parse_time(str(record["expiresAt"]))
         if (now or _now()) >= expires:
-            _retire(record, "expired", path)
+            _retire(record, "expired", target)
             return "expired", "link_pairing_expired"
         try:
             view = (sender or send_confirmation)(record)
         except ConfirmationRefused:
-            _retire(record, "refused", path)
+            _retire(record, "refused", target)
             return "refused", "link_pairing_refused"
         except ConfirmationRetry as retry:
             return "pending", retry.code
         active = {key: value for key, value in record.items() if key not in {"pairingSecret", "expiresAt"}}
         active["state"] = "active"
         active["confirmedAt"] = str(view.get("confirmedAt") or _iso())
-        write_link(active, path)
+        write_link(active, target)
+        pending_file.unlink()
         return "active", ""
 
 
-def _retire(record: dict[str, Any], state: str, path: Path | None) -> None:
-    # The spent pairing secret leaves the store; the key stays until unlink.
-    retired = {key: value for key, value in record.items() if key != "pairingSecret"}
+def discard_pending(path: Path | None = None) -> None:
+    """Drop a pending re-link (its pairing secret leaves the store)."""
+    target = path or link_path()
+    with link_lock(path=target):
+        pending_file = pending_path(target)
+        if pending_file.exists() or pending_file.is_symlink():
+            pending_file.unlink()
+
+
+def _retire(record: dict[str, Any], state: str, target: Path) -> None:
+    # The spent pairing secret leaves the store. A working link stays as it
+    # was; without one, the refused or expired first link is recorded.
+    pending_path(target).unlink()
+    try:
+        current = read_link(target)
+    except (ValueError, OSError, json.JSONDecodeError):
+        current = None
+    if current is not None and current.get("state") == "active":
+        return
+    retired = {key: value for key, value in record.items() if key not in {"pairingSecret", "expiresAt"}}
     retired["state"] = state
-    write_link(retired, path)
+    write_link(retired, target)
 
 
 # --- L1-7: the local Gateway (G23) ---------------------------------------------------
@@ -583,8 +658,10 @@ def resolve_local_gateway(configured_url: str = "", *,
     try:
         with (opener or _no_proxy_opener()).open(request, timeout=3.0) as response:
             page = response.read(4 * 1024 * 1024).decode("utf-8", "replace")
-    except urllib.error.HTTPError:
-        raise LocalGatewayError("local_gateway_auth_unavailable") from None
+    except urllib.error.HTTPError as error:
+        # A redirect is not followed (H3): the dashboard refused this request.
+        code = "local_gateway_refused" if 300 <= error.code < 400 else "local_gateway_auth_unavailable"
+        raise LocalGatewayError(code) from None
     except (urllib.error.URLError, OSError, TimeoutError):
         raise LocalGatewayError("local_gateway_unavailable") from None
     match = _SESSION_TOKEN_JS.search(page)
@@ -599,9 +676,9 @@ def resolve_local_gateway(configured_url: str = "", *,
 async def open_local_gateway(configured_url: str, max_size: int,
                              resolver: Callable[[str], tuple[str, int, str]] = resolve_local_gateway):
     """One new Gateway WebSocket for one channel (L1-6, L1-7)."""
-    from websockets.asyncio.client import connect
     from websockets.exceptions import InvalidStatus, InvalidHandshake
 
+    connect = _connect_without_redirects()
     host, port, token = await asyncio.to_thread(resolver, configured_url)
     url = f"ws://{_loopback_url_host(host)}:{port}/api/ws?token={quote(token, safe='')}"
     try:
@@ -903,24 +980,31 @@ class LinkService:
     def snapshot(self) -> dict[str, Any]:
         return dict(self._link)
 
-    def _read(self) -> dict[str, Any] | None:
-        return read_link(self.record_path)
+    def _read(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        return read_link(self.record_path), read_link(pending_path(self.record_path))
 
-    async def _current(self) -> tuple[dict[str, Any] | None, str]:
+    async def _current(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
         try:
-            record = await asyncio.to_thread(self._read)
+            record, pending = await asyncio.to_thread(self._read)
         except (ValueError, OSError, json.JSONDecodeError):
-            return None, "unreadable"
-        return record, record_digest(record)
+            return None, None, "unreadable"
+        return record, pending, f"{record_digest(record)}:{record_digest(pending)}"
+
+    async def _link_digest(self) -> str:
+        """The active record alone: a pending re-link does not touch the socket."""
+        try:
+            return record_digest(await asyncio.to_thread(read_link, self.record_path))
+        except (ValueError, OSError, json.JSONDecodeError):
+            return "unreadable"
 
     async def _wait_for_change(self, digest: str, seconds: float | None = None) -> None:
-        """Sleep until the record changes, or for ``seconds`` when given."""
+        """Sleep until the records change, or for ``seconds`` when given."""
         waited = 0.0
         while seconds is None or waited < seconds:
             step = RECORD_POLL_SECONDS if seconds is None else min(RECORD_POLL_SECONDS, seconds - waited)
             await self._sleep(step)
             waited += step
-            if (await self._current())[1] != digest:
+            if (await self._current())[2] != digest:
                 return
 
     async def _backoff(self, digest: str) -> None:
@@ -931,52 +1015,84 @@ class LinkService:
 
     async def run(self) -> None:
         while True:
-            record, digest = await self._current()
-            if digest == "unreadable":
-                self._set(state="stopped", code="link_store_unreadable", channels=0)
-                await self._wait_for_change(digest)
-                continue
-            if record is None:
+            try:
+                await self._step()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - OP-12 P4 r1 H6: never end silently
+                logger.warning("Room link service failed (%s); retrying", type(error).__name__)
+                self._set(state="reconnecting", code="link_service_error", channels=0)
+                delay = backoff_delay(self._attempt, self._rng)
+                self._attempt += 1
+                self.delays.append(delay)
+                await self._sleep(delay)
+
+    async def _step(self) -> None:
+        record, pending, digest = await self._current()
+        if digest == "unreadable":
+            self._set(state="stopped", code="link_store_unreadable", channels=0)
+            await self._wait_for_change(digest)
+            return
+        if record is not None and record.get("state") == "active":
+            # A pending re-link is confirmed by the CLI; this link serves on.
+            self._set(deviceId=str(record["deviceId"]))
+            await self._serve_record(record)
+            return
+        if pending is not None:
+            # A first link the CLI could not confirm in time: retried here
+            # until its token expires (G6).
+            self._set(state="pending", code="link_pending", deviceId=str(pending["deviceId"]))
+            result, code = await asyncio.to_thread(
+                confirm_pending, path=self.record_path, blocking=False,
+            )
+            if result == "active":
                 self._attempt = 0
-                self._set(state="not_linked", code="", deviceId="", channels=0)
-                await self._wait_for_change(digest)
-                continue
-            state = record.get("state")
-            self._set(deviceId=str(record.get("deviceId") or ""))
-            if state == "pending":
-                self._set(state="pending", code="link_pending")
-                result, code = await asyncio.to_thread(
-                    confirm_pending, path=self.record_path, blocking=False,
-                )
-                if result == "active":
-                    self._attempt = 0
-                    continue
-                if result == "pending":
-                    self._set(code=code or "link_pending")
-                    await self._backoff((await self._current())[1])
-                continue
-            if state != "active":
-                self._set(state="stopped", code="link_pairing_expired" if state == "expired" else "link_pairing_refused")
-                await self._wait_for_change(digest)
-                continue
-            code, action = await self.connect_once(record, digest)
-            if action == STOP:
-                self._set(state="stopped", code=code, channels=0)
-                logger.warning("Room link stopped: %s", code)
-                await self._wait_for_change(digest)
-                self._attempt = 0
-                continue
-            if code == "link_record_changed":
-                self._attempt = 0
-                continue
-            self._set(state="reconnecting", code=code, channels=0)
-            await self._backoff(digest)
+                return
+            if result == "pending":
+                self._set(code=code or "link_pending")
+                await self._backoff((await self._current())[2])
+            return
+        if record is None:
+            self._attempt = 0
+            self._set(state="not_linked", code="", deviceId="", channels=0)
+            await self._wait_for_change(digest)
+            return
+        self._set(state="stopped", deviceId=str(record["deviceId"]),
+                  code="link_pairing_expired" if record["state"] == "expired" else "link_pairing_refused")
+        await self._wait_for_change(digest)
+
+    async def _serve_record(self, record: dict[str, Any]) -> None:
+        digest = record_digest(record)
+        code, action = await self.connect_once(record, digest)
+        if action == STOP:
+            self._set(state="stopped", code=code, channels=0)
+            logger.warning("Room link stopped: %s", code)
+            await self._wait_for_link_change(digest)
+            self._attempt = 0
+            return
+        if code == "link_record_changed":
+            self._attempt = 0
+            return
+        self._set(state="reconnecting", code=code, channels=0)
+        delay = backoff_delay(self._attempt, self._rng)
+        self._attempt += 1
+        self.delays.append(delay)
+        await self._wait_for_link_change(digest, delay)
+
+    async def _wait_for_link_change(self, digest: str, seconds: float | None = None) -> None:
+        waited = 0.0
+        while seconds is None or waited < seconds:
+            step = RECORD_POLL_SECONDS if seconds is None else min(RECORD_POLL_SECONDS, seconds - waited)
+            await self._sleep(step)
+            waited += step
+            if await self._link_digest() != digest:
+                return
 
     async def connect_once(self, record: dict[str, Any], digest: str) -> tuple[str, str]:
         """One device socket, from upgrade to close: (status code, action)."""
-        from websockets.asyncio.client import connect
         from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
+        connect = _connect_without_redirects()
         self._set(state="connecting")
         try:
             url, _ = derive_urls(record["audience"], record["deviceId"])
@@ -992,7 +1108,8 @@ class LinkService:
             )
         except InvalidStatus as error:
             status = getattr(getattr(error, "response", None), "status_code", 0)
-            return ("link_route_refused" if status in {400, 401, 403, 404} else "link_connection_lost"), RECONNECT
+            refused = status in {400, 401, 403, 404} or 300 <= status < 400  # a redirect is never followed
+            return ("link_route_refused" if refused else "link_connection_lost"), RECONNECT
         except (InvalidHandshake, OSError, TimeoutError, asyncio.TimeoutError):
             return "link_connection_lost", RECONNECT
         try:
@@ -1091,7 +1208,7 @@ class LinkService:
         async def watch_record() -> None:
             while True:
                 await asyncio.sleep(RECORD_POLL_SECONDS)
-                if (await self._current())[1] != digest:
+                if await self._link_digest() != digest:
                     outcome.append(("link_record_changed", RECONNECT))
                     await socket.close(1000)
                     return

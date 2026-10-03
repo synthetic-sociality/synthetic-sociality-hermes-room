@@ -68,6 +68,16 @@ MISSED_SOURCE_LIMIT = 8
 # Contract P2c-2: the longest kept reply, in characters. A longer reply is not
 # kept (it is never shortened: the offer repeats the text verbatim).
 KEPT_REPLY_CHARACTER_LIMIT = 16_000
+# Contract L1-12: a reply the Room refused as too large is kept up to twice the
+# Room's byte ceiling (in characters), at most this many; the loader bound.
+KEPT_REPLY_HARD_LIMIT = 65_536
+
+
+def kept_reply_bound(message_max_bytes: Any) -> int:
+    """The kept-reply bound for a message_too_large refusal (contract L1-12)."""
+    if type(message_max_bytes) is int and message_max_bytes > 0:
+        return min(KEPT_REPLY_HARD_LIMIT, max(KEPT_REPLY_CHARACTER_LIMIT, 2 * message_max_bytes))
+    return KEPT_REPLY_HARD_LIMIT
 KEPT_REPLY_KEYS = frozenset({"source_event_id", "source_seq", "epoch_id", "produced_at", "reason", "text"})
 
 
@@ -210,7 +220,7 @@ class RoomBinding:
             or not all(isinstance(kept[key], str) for key in KEPT_REPLY_KEYS - {"source_seq"})
             or not isinstance(kept["source_seq"], int) or isinstance(kept["source_seq"], bool)
             or kept["source_seq"] < 0
-            or not kept["text"] or len(kept["text"]) > KEPT_REPLY_CHARACTER_LIMIT
+            or not kept["text"] or len(kept["text"]) > KEPT_REPLY_HARD_LIMIT
             or not kept["source_event_id"] or not kept["epoch_id"]
         )):
             raise ValueError("Room kept reply is invalid")

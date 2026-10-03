@@ -130,6 +130,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         "link", help="Link this Hermes profile to your Harness (token at a hidden prompt); `link status` shows it",
     )
     link_parser.add_argument("action", nargs="?", help="status")
+    link_parser.add_argument("--yes", action="store_true", help="Link after showing the server (non-interactive)")
     commands.add_parser("unlink", help="Delete this profile's local link key (revoke the device in the Harness)")
     recovery_parser = commands.add_parser("recovery", help="List or close acknowledgement holes and quarantines (audited)")
     recovery_verbs = recovery_parser.add_subparsers(dest="recovery_command")
@@ -256,7 +257,7 @@ def _link(args: argparse.Namespace, *, sleep=None) -> int:
                 "link tokens are secrets; run `hermes room link` and paste the token at the hidden prompt "
                 "(create a new token in the Harness: this one may now be in your shell history)"
             )
-        raise ValueError("usage: hermes room link | hermes room link status")
+        raise ValueError("usage: hermes room link [--yes] | hermes room link status")
     import time as _time
 
     sleep = sleep or _time.sleep
@@ -273,10 +274,18 @@ def _link(args: argparse.Namespace, *, sleep=None) -> int:
         previous = device_link.read_link()
     except (ValueError, OSError, json.JSONDecodeError):
         previous = None
+    old = device_link.public_view(previous or {}) if (previous or {}).get("state") == "active" else {}
+    # OP-12 P4 r1 H10: the server this profile will be linked to, before anything is written.
+    print(f"Server:      {urlsplit(token['audience']).netloc}")
+    if old:
+        print(f"This replaces the working link of device {old.get('deviceId', '')} once the new one is confirmed.")
+    if not getattr(args, "yes", False) and input("Link this Hermes profile to this server? [y/N] ").strip().lower() not in {"y", "yes"}:
+        print("Not linked; nothing was written.")
+        return 0
     record = device_link.pending_record(token)
     del token
     with device_link.link_lock():
-        device_link.write_link(record)
+        device_link.write_link(record, device_link.pending_path())
     print(f"Linking this Hermes profile as {record['deviceLabel']!r} (device {record['deviceId']}).")
     deadline = _time.monotonic() + LINK_CONFIRMATION_WAIT_SECONDS
     attempt = 0
@@ -286,30 +295,41 @@ def _link(args: argparse.Namespace, *, sleep=None) -> int:
             break
         sleep(device_link.backoff_delay(attempt))
         attempt += 1
-    old = device_link.public_view(previous or {})
-    replaced = old.get("deviceId") and old.get("deviceId") != record["deviceId"]
     if state == "active":
         print("Linked.")
         print(f"Device:      {record['deviceId']}")
         print(f"Fingerprint: {record['fingerprintSha256']}")
-        print("The Hermes gateway connects within a few seconds; restart it if the Room plugin is not running yet.")
-        if replaced:
+        print("If the Hermes gateway was not running the Room plugin with a link before, restart it to start the link.")
+        if old and old.get("deviceId") != record["deviceId"]:
             print(f"This replaced the local key of device {old['deviceId']}. Revoke that device in the Harness.")
         return 0
     if state == "pending":
+        if old:
+            # A re-link is confirmed here or not at all: the working link stays.
+            device_link.discard_pending()
+            print(f"Not confirmed ({code}); your existing link (device {old.get('deviceId', '')}) is unchanged. "
+                  "Create a new token in the Harness and try again.", file=sys.stderr)
+            return 1
         print(f"Not confirmed yet ({code}). The Hermes gateway keeps trying until the token expires "
               f"at {record['expiresAt']}.", file=sys.stderr)
         return 1
+    unchanged = f" Your existing link (device {old.get('deviceId', '')}) is unchanged." if old else ""
     if state == "expired":
-        print("Link refused (link_pairing_expired): the token expired. Create a new one in the Harness.", file=sys.stderr)
+        print(f"Link refused (link_pairing_expired): the token expired. Create a new one in the Harness.{unchanged}",
+              file=sys.stderr)
         return 1
-    print("Link refused (link_pairing_refused): the token is spent, expired or invalid. "
-          "Create a new one in the Harness.", file=sys.stderr)
+    # OP-12 P4 r1 H11: a lost 201 also ends here.
+    print("Link refused (link_pairing_refused): the token is spent, expired or invalid. Create a new one in the "
+          "Harness. If this device already appears there (the confirmation may have reached the server), revoke "
+          f"it in the Harness and link again.{unchanged}", file=sys.stderr)
     return 1
 
 
 def _link_status() -> int:
     record = device_link.read_link()
+    pending = device_link.read_link(device_link.pending_path())
+    if record is None and pending is not None:
+        record = pending
     if record is None:
         print("Not linked.")
         return 0

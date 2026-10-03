@@ -36,7 +36,7 @@ class L1RoomServerTests(unittest.TestCase):
                     instance, binding, api, published, _dispatched = room_instance(attempt, mode=mode)
                     api.post_error = lambda _n: too_large()
                     room_state = api.room_state
-                    api.room_state = lambda room: {**room_state(room), "serverLimits": {"messageMaxBytes": 16384}}
+                    api.room_state = lambda room: {**room_state(room), "serverLimits": {"messageMaxBytes": 16}}
                     result = await instance._send_final("room-1", source_ref(), REPLY)
                     return instance, binding, api, published, result
 
@@ -61,17 +61,31 @@ class L1RoomServerTests(unittest.TestCase):
                     self.assertEqual(binding.delivery_authority[key]["state"], "superseded")
                 # Kept under P2c-2 with the Room's byte ceiling, never a word count.
                 kept = binding.kept_reply
-                self.assertEqual((kept["reason"], kept["text"]), ("message_too_large (limit 16384 bytes)", REPLY))
+                self.assertEqual((kept["reason"], kept["text"]), ("message_too_large (limit 16 bytes)", REPLY))
                 offer = adapter._kept_reply_text(kept, None, {})
-                self.assertIn("\nNot posted: message_too_large (limit 16384 bytes)\n", offer)
+                self.assertIn("\nNot posted: message_too_large (limit 16 bytes)\n", offer)
                 self.assertNotIn("words", offer.replace(REPLY, ""))
                 self.assertEqual(DENY_PATTERN.findall(offer.replace(REPLY, "")), [])
-        # A byte number in the refusal wins; a word count is never named; an
-        # unknown ceiling leaves only the code.
-        self.assertEqual(adapter.too_large_kept_reason("allows at most 8000 bytes", 16384), "message_too_large (limit 8000 bytes)")
-        self.assertEqual(adapter.too_large_kept_reason("allows at most 300 words per response"), "message_too_large")
-        self.assertEqual(adapter.too_large_kept_reason(BYTE_CEILING, 0), "message_too_large")
+        # The ceiling is named only when the body exceeds it (a cycle byte
+        # budget below the ceiling, or an unknown ceiling, names only the code).
+        self.assertEqual(adapter.too_large_kept_reason("x" * 20000, 16384), "message_too_large (limit 16384 bytes)")
+        self.assertEqual(adapter.too_large_kept_reason("é" * 9000, 16384), "message_too_large (limit 16384 bytes)")
+        self.assertEqual(adapter.too_large_kept_reason("x" * 900, 16384), "message_too_large")
+        self.assertEqual(adapter.too_large_kept_reason("x" * 20000, 0), "message_too_large")
         self.assertEqual(adapter.post_refusal_outcome("message_too_large", False), "too_large")
+        # OP-12 P4 r1 H2: a realistic reply over the Room's default ceiling is kept.
+        long_reply = "word " * 3999 + "word"  # 19999 characters, over 16384 bytes
+
+        async def long_run():
+            instance, binding, api, _published, _dispatched = room_instance(None, mode="open")
+            api.post_error = lambda _n: too_large()
+            room_state = api.room_state
+            api.room_state = lambda room: {**room_state(room), "serverLimits": {"messageMaxBytes": 16384}}
+            await instance._send_final("room-1", source_ref(), long_reply)
+            return binding
+
+        kept = asyncio.run(long_run()).kept_reply
+        self.assertEqual((kept["reason"], kept["text"]), ("message_too_large (limit 16384 bytes)", long_reply))
 
     def test_l1_16_missed_source_named_by_the_room(self):
         mention = message(2964, "owner-1", "human_owner", "@Zurie your view?", resolvedRecipientMembershipIds=["member-1"])
@@ -131,6 +145,57 @@ class L1RoomServerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.RoomBinding.from_dict({**stored.__dict__, "missed_sources": [{**marked[0], "offered": "yes"}]})
         self.assertEqual(DENY_PATTERN.findall(fact), [])
+        # OP-12 P4 r1 item 2: a failed read leaves the Room's source unmarked.
+        direct = object.__new__(adapter.SyntheticSocialityAdapter)
+        binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential")
+
+        async def unavailable(_binding, _operation):
+            raise adapter.ProtocolError("unavailable", code="network", retryable=True)
+
+        direct._call = unavailable
+        with self.assertLogs(adapter.logger, level="WARNING"):
+            result = asyncio.run(direct._missed_source_facts(binding, {"roster": ROSTER}, 2970, [named], 2900, set(),
+                                                             server_missed=named["id"]))
+        self.assertEqual(result, ([], [], ""))
+        # OP-12 P4 r1 item 5: the epoch floor also holds for a source on the current page.
+        before = message(2900, "owner-1", "human_owner", "Before the restart.")
+        result = asyncio.run(direct._missed_source_facts(binding, {"roster": ROSTER}, 3000, [before], 2950, set(),
+                                                         server_missed=before["id"]))
+        self.assertEqual(result, ([], [before["id"]], before["id"]))
+        binding.missed_sources = [{"source_event_id": before["id"], "source_seq": 0}]
+        result = asyncio.run(direct._missed_source_facts(binding, {"roster": ROSTER}, 3000, [before], 2950, set()))
+        self.assertEqual(result, ([], [before["id"]], ""))
+
+    def test_l1_19_a_room_named_source_is_marked_only_after_its_offer(self):
+        # OP-12 P4 r1 (Hermes H1, OpenClaw item 2): a transient failure while
+        # offering leaves the Room's source unmarked, so a later turn offers it.
+        import types
+        named = message(2966, "owner-1", "human_owner", "And this one?", resolvedRecipientMembershipIds=["member-1"])
+        newer = [message(seq, "paula-1", "participant_agent", f"Note {seq}.") for seq in (2967, 2968, 2969)]
+        binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential")
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        instance._persist_binding = lambda _binding: True
+
+        async def unavailable(_binding, _operation):
+            raise adapter.ProtocolError("unavailable", code="network", retryable=True)
+
+        instance._call = unavailable
+        with self.assertLogs(adapter.logger, level="WARNING"):
+            facts, offered, mark = asyncio.run(instance._missed_source_facts(
+                binding, {"roster": ROSTER}, 2970, [named], 2900, set(), server_missed=named["id"]))
+        self.assertEqual((facts, offered, mark), ([], [], ""))
+        instance._clear_missed_sources(binding, offered, mark=mark, attempt_ready=True)
+        self.assertEqual(binding.missed_sources, [])
+        # The next turn, with the Room still naming it: offered, then marked.
+        api = types.SimpleNamespace(events=lambda _room, after, _wait: {
+            "events": [item for item in (named, *newer) if item["seq"] > after]})
+        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        facts, offered, mark = asyncio.run(instance._missed_source_facts(
+            binding, {"roster": ROSTER}, 2970, [named], 2900, set(), server_missed=named["id"]))
+        self.assertEqual(len(facts), 1)
+        self.assertTrue(facts[0].startswith("Missed earlier: #2966 "), facts)
+        instance._clear_missed_sources(binding, offered, mark=mark, attempt_ready=True)
+        self.assertEqual(binding.missed_sources, [{"source_event_id": named["id"], "source_seq": 0, "offered": True}])
 
     def test_l1_17_unknown_tool_selection(self):
         # A core without parse_config_string_list (Hermes core c896c09c) or a
@@ -162,12 +227,55 @@ class L1RoomServerTests(unittest.TestCase):
                     status.set_secret_store("reachable" if reasons else "isolated", reasons)
                     written = adapter.local_status.read(store / "status.json")
                     self.assertEqual((written["secretStore"], written["secretStoreReasons"]), ("reachable", expected))
+            # The enforcement switch: unreadable counts as on; readable non-true is off.
+            class Hostile:
+                @property
+                def extra(self):
+                    raise RuntimeError("config changed")
+
+            switch = object.__new__(adapter.SyntheticSocialityAdapter)
+            switch.config = Hostile()
+            self.assertIs(switch._secret_isolation_enforced(), True)
+            for extra, expected in (({}, False), ({"enforceSecretIsolation": "true"}, False),
+                                    ({"enforceSecretIsolation": True}, True)):
+                switch.config = type("Config", (), {"extra": extra})()
+                self.assertIs(switch._secret_isolation_enforced(), expected, extra)
             # A readable selection adds no such code.
             with mock.patch.dict(os.environ, {"HERMES_HOME": str(home), "HOME": scratch, "TERMINAL_ENV": "docker",
                                               "TERMINAL_DOCKER_VOLUMES": "[]"}), \
                     mock.patch.object(adapter, "_core_tool_selection", lambda: ({"read_file"}, [])), \
                     mock.patch.object(secret_isolation, "_sandbox_mount_sources", lambda: []):
                 self.assertEqual(instance._secret_store_reasons(), [])
+
+    def test_l1_18_too_large_refusal_persists_through_the_real_writer(self):
+        # OP-12 P4 r1 item 1, as a universal real-writer probe: the real
+        # _persist_binding and state file (no snapshot stub), then a reload.
+        import types
+        for mode, attempt in (("open", None), ("coordinated", cycle_attempt())):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as scratch:
+                path = Path(scratch) / ".hermes" / "synthetic-sociality-room" / "state.json"
+
+                async def run(mode=mode, attempt=attempt):
+                    instance, binding, api, _published, _dispatched = room_instance(attempt, mode=mode)
+                    api.post_error = lambda _n: too_large()
+                    room_state = api.room_state
+                    api.room_state = lambda room: {**room_state(room), "serverLimits": {"messageMaxBytes": 16}}
+                    state_module.save(adapter.PluginState(bindings=[binding]), path)
+                    instance._state_file = path
+                    instance._renewing_rooms = set()
+                    instance._persist_binding = types.MethodType(adapter.SyntheticSocialityAdapter._persist_binding, instance)
+                    with state_module.state_path_scope(path):
+                        result = await instance._send_final("room-1", source_ref(), REPLY)
+                    return api, result
+
+                api, result = asyncio.run(run())
+                self.assertTrue(result.success)
+                reloaded = state_module.load(path).bindings[0]  # validated by the real loader
+                self.assertEqual(reloaded.acknowledged_cursor, 5)
+                self.assertNotEqual(reloaded.inbox.get("5"), "quarantined")
+                self.assertEqual((reloaded.kept_reply["reason"], reloaded.kept_reply["text"]),
+                                 ("message_too_large (limit 16 bytes)", REPLY))
+                self.assertEqual(len(api.posts), 1)
 
 
 if __name__ == "__main__":

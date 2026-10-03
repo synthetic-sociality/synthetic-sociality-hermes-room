@@ -48,7 +48,7 @@ from .room_tools import (
     room_post,
 )
 from .state import (
-    KEPT_REPLY_CHARACTER_LIMIT, MISSED_SOURCE_LIMIT, PluginState, RoomBinding, load, state_path, state_root,
+    KEPT_REPLY_CHARACTER_LIMIT, MISSED_SOURCE_LIMIT, kept_reply_bound, PluginState, RoomBinding, load, state_path, state_root,
     update, upsert,
 )
 
@@ -358,9 +358,6 @@ def post_refusal_outcome(code: str, retryable: bool) -> str:
     return "quarantined"
 
 
-_BYTE_LIMIT_IN_REFUSAL = re.compile(r"at most (\d{1,9}) bytes")
-
-
 def _server_missed_source(payload: dict[str, Any]) -> str:
     """The Room's ``missedSourceEventId`` on an attempt-ready event (L1-13)."""
     value = payload.get("missedSourceEventId") if isinstance(payload, dict) else None
@@ -369,18 +366,19 @@ def _server_missed_source(payload: dict[str, Any]) -> str:
     return "" if value == str(payload.get("sourceEventId") or "") else value
 
 
-def too_large_kept_reason(message: str, message_max_bytes: Any = 0) -> str:
+def too_large_kept_reason(body: Any, message_max_bytes: Any = 0) -> str:
     """The P2c-2 reason line for a message_too_large refusal (contract L1-12).
 
-    It names the byte ceiling when known: from the refusal itself, else the
-    Room's ``serverLimits.messageMaxBytes``. Never a word count: the word
-    number is guidance and the Room does not refuse on it.
+    It names the Room's byte ceiling (``serverLimits.messageMaxBytes`` from
+    the room state) only when the refused body exceeds it, so the ceiling is
+    certainly the cause; the Room's 413 text carries no number (Room server
+    772ca32, messages.go:27). Never a word count: the word number is guidance
+    and the Room does not refuse on it.
     """
-    match = _BYTE_LIMIT_IN_REFUSAL.search(str(message or ""))
-    limit = int(match.group(1)) if match else (
-        message_max_bytes if type(message_max_bytes) is int and message_max_bytes > 0 else 0
-    )
-    return f"message_too_large (limit {limit} bytes)" if limit else "message_too_large"
+    size = len(str(body or "").encode("utf-8"))
+    if type(message_max_bytes) is int and 0 < message_max_bytes < size:
+        return f"message_too_large (limit {message_max_bytes} bytes)"
+    return "message_too_large"
 
 
 def response_too_large_failure() -> dict[str, str]:
@@ -1077,7 +1075,7 @@ def validate_config(_config: PlatformConfig) -> bool:
         pass
     # Contract L1-4: a linked profile runs the platform for its device link.
     try:
-        return device_link.link_path().is_file()
+        return device_link.link_path().is_file() or device_link.pending_path().is_file()
     except Exception:
         return False
 
@@ -1203,8 +1201,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _secret_isolation_enforced(self) -> bool:
         """The installation's P2c-1 enforcement switch (off by default)."""
         # Boolean true only, as in OpenClaw's schema; any other value is off.
-        extra = getattr(getattr(self, "config", None), "extra", None) or {}
-        value = extra.get(secret_isolation.ENFORCEMENT_SETTING, False) if isinstance(extra, dict) else False
+        # Contract L1-15: a switch that cannot be read counts as on.
+        try:
+            extra = getattr(getattr(self, "config", None), "extra", None) or {}
+            value = extra.get(secret_isolation.ENFORCEMENT_SETTING, False) if isinstance(extra, dict) else False
+        except Exception:  # noqa: BLE001 - unreadable never weakens enforcement
+            return True
         return value is True
 
     def _secret_store_reasons(self) -> list[str]:
@@ -1284,6 +1286,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         opens the socket only while the profile is linked. True when linked.
         """
         record_path = self._state_file.parent / device_link.LINK_FILE
+        try:
+            linked = record_path.is_file() or device_link.pending_path(record_path).is_file()
+        except OSError:
+            linked = False
+        if not linked:
+            # OP-12 P4 r1 H7: no poller for a profile that is not linked; a
+            # link made later starts with the next gateway start.
+            return False
         task = getattr(self, "_link_task", None)
         if task is None or task.done():
             extra = getattr(getattr(self, "config", None), "extra", None) or {}
@@ -1294,10 +1304,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 record_path=record_path,
             )
             self._link_task = asyncio.create_task(self._link_service.run(), name="room-device-link")
-        try:
-            return record_path.is_file()
-        except OSError:
-            return False
+        return True
 
     async def disconnect(self) -> None:
         self._stop.set()
@@ -2581,9 +2588,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
                 await self._publish(binding, source_id, "terminal", status="failed", suppress_errors=True)
                 self._log_outcome(binding, "failed", source_id, error.code, cycle_attempt)
+                message_max_bytes = await self._message_max_bytes(binding)
                 self._keep_late_reply(
                     binding, source_id, responds_to_id, observed_epoch, body,
-                    too_large_kept_reason(str(error), await self._message_max_bytes(binding, str(error))),
+                    too_large_kept_reason(body, message_max_bytes), limit=kept_reply_bound(message_max_bytes),
                 )
                 return self._successful_terminal(
                     source_ref, dispatch_generation, f"failed:{source_id}",
@@ -4802,10 +4810,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         before_seq=current_seq, active_epoch_starts_at=starts_at,
                     ))
                 offered.append(source_id)
-                if source_id == server_missed:
-                    mark = server_missed
                 source_seq = int((source or {}).get("seq") or 0)
-                if not source or source_seq <= 0 or source_seq >= current_seq:
+                # P2a-3 epoch floor, also for a source found on the current page.
+                if not source or source_seq <= 0 or source_seq < starts_at or source_seq >= current_seq:
+                    if source_id == server_missed:
+                        mark = server_missed
                     continue
                 newer, complete = await self._call(binding, lambda api, source_seq=source_seq: _count_messages_between(
                     lambda after: api.events(binding.room_id, after, 0), source_seq, current_seq,
@@ -4820,6 +4829,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     f"Missed earlier: #{source_seq} {_room_actor_name(state, source)}{time_text}; "
                     f"{newer}{'' if complete else '+'} newer {noun} since."
                 )
+                # Contract L1-13: remembered as offered only once its offer
+                # succeeded; a failed read keeps it for a later turn.
+                if source_id == server_missed:
+                    mark = server_missed
             except ProtocolError as error:
                 if offered and offered[-1] == source_id:
                     offered.pop()
@@ -4828,7 +4841,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _keep_late_reply(
         self, binding: RoomBinding, source_id: str, responds_to_id: str, epoch_id: str,
-        body: Any, reason: str,
+        body: Any, reason: str, *, limit: int = KEPT_REPLY_CHARACTER_LIMIT,
     ) -> None:
         """Keep a produced reply whose turn's authority ended (contract P2c-2).
 
@@ -4841,7 +4854,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             answered = str(responds_to_id or source_id or "")
             if not text or not answered or not epoch_id or reason == "stale_epoch":
                 return
-            if len(text) > KEPT_REPLY_CHARACTER_LIMIT:
+            if len(text) > limit:
                 # Latest wins: an older kept reply is not offered in its place.
                 if binding.kept_reply:
                     binding.kept_reply = {}
@@ -5598,10 +5611,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding.room_id, outcome, seq or "?", attempt_id, code or "-",
         )
 
-    async def _message_max_bytes(self, binding: RoomBinding, refusal: str) -> int:
+    async def _message_max_bytes(self, binding: RoomBinding) -> int:
         """The Room's byte ceiling for the L1-12 fact; 0 when unknown."""
-        if _BYTE_LIMIT_IN_REFUSAL.search(refusal or ""):
-            return 0
         try:
             state = await self._call(binding, lambda api: api.room_state(binding.room_id))
             value = ((state or {}).get("serverLimits") or {}).get("messageMaxBytes")
