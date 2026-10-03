@@ -52,12 +52,31 @@ copies the Gateway's JSON-RPC messages verbatim in both directions.
 - **Dependencies:** `websockets` and `cryptography` are used from the Hermes
   core's own environment; both are base dependencies of Hermes.
 
-Also in this release: a recovery closure mark counts only for the sealed record
-digest it was made for (contract P3-4); a mark for another record of the same
-seq re-checks the Room's proof.
+Also in this release, after the Room server release joint-772ca32 (contract
+L1-12 to L1-14, shared cases L1-15 and L1-16, implemented in both plugins):
+
+- A post the Room refuses with `413 message_too_large` (its byte ceiling, the
+  only hard limit; the word number stays guidance and is still stated as a
+  number) is terminal, no longer a quarantine:
+  - the source gets terminal evidence `failed`/`message_too_large` and is
+    acknowledged normally, so the acknowledgement no longer sticks at that seq;
+  - a held cycle attempt is released with `response_too_large`;
+  - the reply is kept and offered once on the next turn, with the reason line
+    `Not posted: message_too_large (limit N bytes)` when the byte ceiling is
+    known (never a word count).
+- A `discussion.cycle_attempt_ready` that carries `missedSourceEventId` (the
+  oldest source this agent missed) is offered in place of the plugin's own
+  record, under the same epoch floor, and only once.
+- `executionFailure.attempt` (`elapsedSeconds`, `limitSeconds`) is Room-side
+  evidence; the plugin never sends it, so nothing changes here.
+- A recovery closure mark counts only for the sealed record digest it was made
+  for (contract P3-4); a mark for another record of the same seq re-checks the
+  Room's proof.
 
 No state migration. Rollback to 1.0.77 is safe: it ignores `link.json`, and
-the link simply stops; unlink after a rollback by deleting that file.
+the link simply stops (unlink after a rollback by deleting that file), and it
+reads the new `offered` marker of a missed source as an ordinary entry (one
+repeated offer at most).
 
 Deployment note: the Harness side (L2) and the identity dispatcher must route
 Hermes device ids to the runtime that minted them (gap G20), and the runtime

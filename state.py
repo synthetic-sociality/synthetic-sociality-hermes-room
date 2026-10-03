@@ -199,6 +199,7 @@ class RoomBinding:
                 or len(item["source_event_id"]) > 128
                 or type(item.get("source_seq")) is not int
                 or item["source_seq"] < 0
+                or ("offered" in item and item["offered"] is not True)
                 for item in binding.missed_sources
             )
         ):

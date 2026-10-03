@@ -315,7 +315,7 @@ class LinkTestCase(unittest.IsolatedAsyncioTestCase):
 class L1ConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityL1Cases"]
-        self.assertEqual(len(cases), 14)
+        self.assertEqual(len(cases), 16)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"L1-{index:02d} "), name)

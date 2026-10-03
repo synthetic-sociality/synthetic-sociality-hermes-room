@@ -49,6 +49,7 @@ PAYLOAD = (
     "tests/test_delivery_lifecycle.py",
     "tests/test_epoch_handover_dispatch.py",
     "tests/test_parity_l1.py",
+    "tests/test_parity_l1_room.py",
     "tests/test_parity_p1.py",
     "tests/test_parity_p1a.py",
     "tests/test_parity_p2a.py",

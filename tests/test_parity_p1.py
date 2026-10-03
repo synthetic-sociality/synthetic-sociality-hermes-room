@@ -336,7 +336,7 @@ class ParityP1Tests(unittest.TestCase):
             "cycle_superseded", "reply_cap_reached", "stale_context",
         ):
             self.assertIn(required, codes)
-        expected = {"reply_cap_reached": "skipped"}
+        expected = {"reply_cap_reached": "skipped", "message_too_large": "too_large"}  # L1-12
         expected.update({code: "superseded" for code in adapter.POST_REFUSAL_SUPERSEDED_CODES})
         protocol = adapter.RoomProtocol("https://room.example/api", "credential-SECRET")
         for code in codes + ["a_code_no_list_names"]:

@@ -347,11 +347,46 @@ def post_refusal_outcome(code: str, retryable: bool) -> str:
     """
     if code == "reply_cap_reached":
         return "skipped"
+    if code == "message_too_large":
+        # Contract L1-12: the Room's byte ceiling is a terminal refusal, never
+        # a quarantine.
+        return "too_large"
     if code in POST_REFUSAL_SUPERSEDED_CODES:
         return "superseded"
     if retryable:
         return "retryable"
     return "quarantined"
+
+
+_BYTE_LIMIT_IN_REFUSAL = re.compile(r"at most (\d{1,9}) bytes")
+
+
+def _server_missed_source(payload: dict[str, Any]) -> str:
+    """The Room's ``missedSourceEventId`` on an attempt-ready event (L1-13)."""
+    value = payload.get("missedSourceEventId") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        return ""
+    return "" if value == str(payload.get("sourceEventId") or "") else value
+
+
+def too_large_kept_reason(message: str, message_max_bytes: Any = 0) -> str:
+    """The P2c-2 reason line for a message_too_large refusal (contract L1-12).
+
+    It names the byte ceiling when known: from the refusal itself, else the
+    Room's ``serverLimits.messageMaxBytes``. Never a word count: the word
+    number is guidance and the Room does not refuse on it.
+    """
+    match = _BYTE_LIMIT_IN_REFUSAL.search(str(message or ""))
+    limit = int(match.group(1)) if match else (
+        message_max_bytes if type(message_max_bytes) is int and message_max_bytes > 0 else 0
+    )
+    return f"message_too_large (limit {limit} bytes)" if limit else "message_too_large"
+
+
+def response_too_large_failure() -> dict[str, str]:
+    failure = typed_execution_failure("runtime", "response_too_large")
+    failure["remediationHint"] = "The response exceeded the Room's message size limit. Retry with a shorter response."
+    return failure
 
 
 def _terminal_reason_execution_failure(reason: str) -> dict[str, str]:
@@ -2530,6 +2565,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     source_ref, dispatch_generation, f"skipped:{source_id}",
                     terminal_status="skipped", reason="reply_cap_reached",
                 )
+            if refusal == "too_large":
+                # Contract L1-12: terminal evidence failed/message_too_large,
+                # the normal acknowledgement, the attempt released with
+                # response_too_large, and the reply kept for one offer. The
+                # attempt is fenced first so a restart cannot replay the post.
+                await self._supersede_refused_post(
+                    binding, source_id, cycle_attempt, execution_failure=response_too_large_failure(),
+                )
+                await self._publish(binding, source_id, "terminal", status="failed", suppress_errors=True)
+                self._log_outcome(binding, "failed", source_id, error.code, cycle_attempt)
+                self._keep_late_reply(
+                    binding, source_id, responds_to_id, observed_epoch, body,
+                    too_large_kept_reason(str(error), await self._message_max_bytes(binding, str(error))),
+                )
+                return self._successful_terminal(
+                    source_ref, dispatch_generation, f"failed:{source_id}",
+                    terminal_status="failed", reason="message_too_large",
+                )
             if refusal == "superseded":
                 # Contract P1-2: the attempt, turn or epoch this reply belonged
                 # to is gone (2026-10-01 D4a: a post after lease expiry). The
@@ -4575,9 +4628,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         shared_context = _canonical_room_context(
             state, context_events, prompt_event_id, _policy_view(context_policy),
         )
-        missed_facts, missed_offered = await self._missed_source_facts(
+        attempt_ready = event.get("type") == "discussion.cycle_attempt_ready"
+        missed_facts, missed_offered, missed_mark = await self._missed_source_facts(
             binding, state, seq, context_events, starts_at,
             {event_id, prompt_event_id, str(payload.get("sourceEventId") or "")},
+            server_missed=_server_missed_source(payload) if attempt_ready else "",
         )
         kept_block, kept_cleared = await self._kept_reply_block(
             binding, state, context_events, str(active_epoch_id or ""), starts_at, seq,
@@ -4647,7 +4702,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         )
         # Offered once, then cleared durably before core runs the turn (P2a-3,
         # P2c-2).
-        self._clear_missed_sources(binding, missed_offered)
+        self._clear_missed_sources(binding, missed_offered, mark=missed_mark, attempt_ready=attempt_ready)
         if kept_cleared:
             self._clear_kept_reply(binding)
         # Bounded size telemetry for the pilot: character counts only, never
@@ -4702,16 +4757,30 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _missed_source_facts(
         self, binding: RoomBinding, state: dict[str, Any], current_seq: int,
         context_events: list[dict[str, Any]], starts_at: int, answered: set[str],
-    ) -> tuple[list[str], list[str]]:
+        *, server_missed: str = "",
+    ) -> tuple[list[str], list[str], str]:
         """Fact lines for missed sources: number, speaker, time, newer count.
 
         Nothing else and no wording about what to do (contract P1a-1, P2a-3).
         A source this turn answers is cleared without an offer; one whose read
-        fails stays for a later turn.
+        fails stays for a later turn. Contract L1-13: a source the Room names
+        (``missedSourceEventId``) replaces the local record, which is cleared,
+        and is offered once: the returned mark is remembered durably.
         """
         facts: list[str] = []
         offered: list[str] = []
-        for missed in list(binding.missed_sources):
+        mark = ""
+        entries = list(binding.missed_sources)
+        marks = {str(item.get("source_event_id") or "") for item in entries if item.get("offered")}
+        candidates = [item for item in entries if not item.get("offered")]
+        if server_missed:
+            offered.extend(str(item.get("source_event_id") or "") for item in candidates)
+            candidates = []
+            if server_missed in marks or server_missed in answered:
+                mark = server_missed
+            else:
+                candidates = [{"source_event_id": server_missed, "source_seq": 0}]
+        for missed in candidates:
             source_id = str(missed.get("source_event_id") or "")
             if source_id in answered:
                 offered.append(source_id)
@@ -4727,6 +4796,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         before_seq=current_seq, active_epoch_starts_at=starts_at,
                     ))
                 offered.append(source_id)
+                if source_id == server_missed:
+                    mark = server_missed
                 source_seq = int((source or {}).get("seq") or 0)
                 if not source or source_seq <= 0 or source_seq >= current_seq:
                     continue
@@ -4747,7 +4818,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if offered and offered[-1] == source_id:
                     offered.pop()
                 logger.warning("Room %s missed source unavailable: code %s", binding.room_id, error.code or "-")
-        return facts, offered
+        return facts, offered, mark
 
     def _keep_late_reply(
         self, binding: RoomBinding, source_id: str, responds_to_id: str, epoch_id: str,
@@ -4828,12 +4899,21 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding.kept_reply = {}
             self._persist_binding(binding)
 
-    def _clear_missed_sources(self, binding: RoomBinding, offered: list[str]) -> None:
-        if not offered:
+    def _clear_missed_sources(
+        self, binding: RoomBinding, offered: list[str], *, mark: str = "", attempt_ready: bool = False,
+    ) -> None:
+        remaining = [item for item in binding.missed_sources if item.get("source_event_id") not in offered]
+        if attempt_ready:
+            # Contract L1-13: each attempt-ready event restates the Room's
+            # missed source; without the field the offered memory ends.
+            remaining = [item for item in remaining if not item.get("offered")]
+            if mark:
+                remaining = [item for item in remaining if item.get("source_event_id") != mark]
+                remaining.append({"source_event_id": mark, "source_seq": 0, "offered": True})
+        remaining = remaining[-MISSED_SOURCE_LIMIT:]
+        if remaining == binding.missed_sources:
             return
-        binding.missed_sources = [
-            item for item in binding.missed_sources if item.get("source_event_id") not in offered
-        ]
+        binding.missed_sources = remaining
         self._persist_binding(binding)
 
     async def _epoch_handover_context(
@@ -4955,7 +5035,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if intent.get("last_error_code") == "message_too_large":
                     failure = {
                         "layer": "runtime", "code": "response_too_large",
-                        "remediationHint": "The response exceeded the Room's contribution limit. Retry with a shorter response.",
+                        "remediationHint": "The response exceeded the Room's message size limit. Retry with a shorter response.",
                     }
                 try:
                     if failure is None:
@@ -5512,11 +5592,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding.room_id, outcome, seq or "?", attempt_id, code or "-",
         )
 
+    async def _message_max_bytes(self, binding: RoomBinding, refusal: str) -> int:
+        """The Room's byte ceiling for the L1-12 fact; 0 when unknown."""
+        if _BYTE_LIMIT_IN_REFUSAL.search(refusal or ""):
+            return 0
+        try:
+            state = await self._call(binding, lambda api: api.room_state(binding.room_id))
+            value = ((state or {}).get("serverLimits") or {}).get("messageMaxBytes")
+        except Exception:  # noqa: BLE001 - the fact then names only the code
+            return 0
+        return value if type(value) is int and value > 0 else 0
+
     async def _supersede_refused_post(
         self,
         binding: RoomBinding,
         source_id: str,
         cycle_attempt: dict[str, Any] | None,
+        *,
+        execution_failure: dict[str, str] | None = None,
     ) -> None:
         """Fence, settle and free an attempt whose post the Room refused."""
         await self._stop_attempt_renewal(source_id)
@@ -5535,7 +5628,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             try:
                 await self._complete_cycle_attempt(
                     binding, cycle_attempt, "fail",
-                    execution_failure=typed_execution_failure("infrastructure", "attempt_timeout"),
+                    execution_failure=execution_failure or typed_execution_failure("infrastructure", "attempt_timeout"),
                 )
             except ProtocolError as error:
                 if error.code not in {"cycle_superseded", "cycle_no_attempt"}:
@@ -5758,7 +5851,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
             if code == "message_too_large":
                 failure["remediationHint"] = (
-                    "The response exceeded the Room's contribution limit. Retry with a shorter response."
+                    "The response exceeded the Room's message size limit. Retry with a shorter response."
                 )
             try:
                 await self._complete_cycle_attempt(binding, cycle_attempt, "fail", execution_failure=failure)
