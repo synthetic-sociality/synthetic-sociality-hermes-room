@@ -5345,7 +5345,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         for seq in sorted(records):
             record = records[seq]
             marker = (binding.room_id, seq, record["recordDigest"])
-            recorded = str(seq) in binding.recovery_closures
+            # A mark counts only for the record it was made for: a mark with a
+            # different digest (another record for this seq) is not recorded,
+            # so the Room's proof is checked again for the current record.
+            recorded = (binding.recovery_closures.get(str(seq)) or {}).get("recordDigest") == record["recordDigest"]
             if seq <= binding.acknowledged_cursor or marker in refused:
                 continue
             try:

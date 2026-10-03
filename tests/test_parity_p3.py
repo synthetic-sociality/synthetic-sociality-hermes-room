@@ -413,6 +413,27 @@ class P3Tests(unittest.TestCase):
                 asyncio.run(ledger_instance(binding, room, path)._apply_recovery_closures(binding))
                 self.assertEqual((room.acks, binding.recovery_closures, binding.acknowledged_cursor), ([], {}, 378))
 
+        # P3 final review: a mark counts as recorded only for its own record.
+        # A mark with another digest plus a valid record runs the proof again.
+        for cycle_state, applied in (("interrupted", True), ("running", False)):
+            with self.subTest(stale_mark=cycle_state), profile(paula_binding()) as path:
+                record = recovery.seal(recovery.build_record(
+                    connector="hermes/test", room_id="room-1", membership_id="member-1", client_instance_id="inst-1",
+                    seq=379, reason="cycle_terminal", evidence_ref=f"cycle:{CYCLE}",
+                    proven=recovery.server_proof(ProofRoom(), "room-1", "member-1", 379, "cycle_terminal", f"cycle:{CYCLE}"),
+                    prior={"kind": "quarantine", "intentKey": "ev379", "lastErrorCode": "cycle_superseded"}, operator="o"))
+                recovery.append_record(recovery.journal_path(path), record)
+                binding = state_module.load(path).bindings[0]
+                binding.recovery_closures = {"379": {"recordDigest": "0" * 64, "appliedAt": "2026-10-03T00:00:00Z"}}
+                room = ProofRoom(cycle_state=cycle_state)
+                with self.assertLogs(adapter.logger, level="WARNING"):
+                    asyncio.run(ledger_instance(binding, room, path)._apply_recovery_closures(binding))
+                self.assertIn(("cycle", CYCLE), room.reads, "the proof was checked again")
+                if applied:
+                    self.assertEqual((room.acks, binding.recovery_closures["379"]["recordDigest"]), ([382], record["recordDigest"]))
+                else:
+                    self.assertEqual((room.acks, binding.acknowledged_cursor), ([], 378))
+
         # OP-12 F2/F3: a transient error is retried at the next iteration; any
         # other error retires only that record, logged once; the loop goes on.
         with profile(paula_binding()) as path:
