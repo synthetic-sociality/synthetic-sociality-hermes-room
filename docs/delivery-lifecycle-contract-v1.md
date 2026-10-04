@@ -188,10 +188,53 @@ P2c-3 Self-reconnect. After a network loss or an expired connector session, the 
 session and event stream by itself, with bounded backoff, without a host restart, as long as its credential is valid.
 A credential that is revoked or expired follows the existing revocation/renewal rules instead.
 
+P2c-3a Reconnect schedule (2026-10-05). A failed contact with the Room (a network error, an HTTP 5xx or 429, a response
+that is not the expected JSON, or an event page whose active epoch metadata is invalid) is retried on one schedule. The
+wait before the n-th consecutive retry has a base of min(2^(n-1), 15) seconds (1, 2, 4, 8, 15, 15, ... s) and is
+multiplied by a factor drawn uniformly from [0.8, 1.0], so the first retry follows the failure within 1 s and no wait
+is longer than 15 s. A `Retry-After` on a 5xx or a network error lengthens a wait to at most 15 s; a `Retry-After` on a
+429 lengthens it to at most 120 s (the existing bound, Hermes `parse_retry_after`, OpenClaw `parseRetryAfter`). A
+`Retry-After` never shortens a wait. There is no attempt limit while the credential is valid: the connector never ends a
+Room connection for such a failure and never hands it back to the host to restart (OpenClaw: the channel's start does
+not throw and the host's restart schedule is not used for it). The schedule of a loop resets to its first step after an
+accepted registration and after any other successful contact of the same loop. It applies alike to registration,
+heartbeat, the event stream (SSE or long poll) and the enrollment listing, whatever the Room's base URL (a loopback
+address or the public origin). A failed heartbeat is retried on this schedule, not at the heartbeat interval. A failed
+enrollment listing (other than P2c-3b) leaves the connection state as it is and is tried again at the next heartbeat.
+An invalid event page is never processed; its events are read again from the same cursor. A revoked or expired
+credential follows P2c-3, and the device link (L1-8) uses the same schedule.
+
+P2c-3b Inactive membership (2026-10-05). The Room answers `connector_not_active` (HTTP 401) on the enrollment listing
+when the calling membership is not `active`. A `muted` membership may still register, heartbeat and read the Room state
+and events; a `left` or `removed` membership is refused on every route with `credential_revoked` and follows the
+revocation rule. On `connector_not_active` from the enrollment listing the connector reads the Room state once and
+looks up its own membership in `roster`. When that entry's `status` is `muted`, the membership is inactive: the
+connector keeps its session, heartbeat and event stream, does not register again, and does not call the enrollment
+listing with that membership; the status `connection` is `inactive` and `lastErrorCode` stays `connector_not_active`.
+While inactive it reads the Room state again at most every 60 seconds, at a heartbeat; when the entry is `active`, the
+membership is active again: the enrollment listing resumes at that heartbeat and `connection` returns to `connected`.
+Any other answer (the entry is `active` or missing, or the state read fails) means the Room holds no live session: the
+connector registers again at the next contact (P2c-3, on the P2c-3a schedule).
+
+P2c-3c Attempt renewal retry (2026-10-05, ISSUE-023). A transient failure of an attempt renewal or re-claim (P1-1) is
+retried on the P2c-3a schedule with its cap at 5 seconds (1, 2, 4, 5, 5, ... s, the same jitter), never past the
+remaining lease, so the first retry follows within 1 s. When the lease has run out the attempt is superseded, durably
+and without a post (P1-1); the connector holds no Room turn past its lease, whatever the host run still does.
+
 P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
-connection state, last error code, last gate wait), with no secrets and no message bodies, for the host watchdog.
+connection state, last error code, last gate wait and its reason, last reconnect and outage length, web reading per P2c-6),
+with no secrets and no message bodies, for the host watchdog. Additions to the file are additive: the schema name stays.
 
 P2c-5 Host identity. The host label a connector reports is derived from the machine it runs on at start, not from stored state.
+
+P2c-6 Web reading is the host's tool (2026-10-05, ISSUE-030). A Room turn runs with the agent's own host tool
+selection. The connector neither adds nor removes web tools and has no web tool of its own. It reports per installation
+whether a web reading tool is in the host's selection (status `webRead`, P2c-4): `available` with the names found,
+`unavailable` when the host reports a selection without one, `unknown` when the host does not report its selection.
+The names that count are `web_search`, `web_extract`, `web_fetch`, `browser` and `browser_navigate`. Hermes takes the
+selection core resolves for the profile (`_core_tool_selection`, P3-7). OpenClaw 2026.7.1-2 gives a channel plugin no
+resolved tool list; its connector reports `unknown` until the host's own tool-call hook names a web reading tool in a
+Room turn, then `available` with that name. The connector never infers the value from configuration.
 
 ## U — Automatic updates (planned)
 
@@ -235,14 +278,19 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `secretStore` | string | `isolated` or `reachable`: whether the agent's tools can reach the credential store (P2c-1) |
 | `secretStoreReasons` | array of strings | the reason codes when `reachable`; empty when `isolated` |
 | `secretIsolationEnforced` | boolean | the installation's `enforceSecretIsolation` switch; when true and the store is reachable, the connector did not start |
+| `webRead` | string | P2c-6: `available`, `unavailable` or `unknown` |
+| `webReadTools` | array of strings | P2c-6: the web reading tool names found, names only; empty unless `available` |
 | `rooms` | object | one entry per configured Room, keyed by Room id |
 | `rooms.<id>.membershipId` | string | the Room membership |
-| `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting` or `stopped` |
+| `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting`, `inactive` (P2c-3b) or `stopped` |
 | `rooms.<id>.lastConnectedAt` | string or null | the last accepted registration or heartbeat |
 | `rooms.<id>.lastErrorCode` | string | the last error code (a server code from `errorCodes`, or a connector code such as `network`, `session_lost`, `secret_store_reachable`); empty when none |
 | `rooms.<id>.lastErrorAt` | string or null | when it was recorded |
 | `rooms.<id>.lastGateWaitSeconds` | number | the last wait on a host gate before dispatch, in seconds |
 | `rooms.<id>.lastGateWaitAt` | string or null | when that wait ended |
+| `rooms.<id>.lastGateWaitReason` | string | why that wait happened: `host_run_busy` (an earlier host run of this Room still held its session) or `host_session_unobservable` (Hermes only: core could not report the release; the bounded wait of P2a-1 ran out); empty when the dispatch did not wait on the host (ISSUE-023) |
+| `rooms.<id>.lastReconnectedAt` | string or null | when the connection was last re-established by an accepted registration after a failure (P2c-3a); `lastConnectedAt` keeps its meaning |
+| `rooms.<id>.lastOutageSeconds` | number | seconds from the first failure of that outage to `lastReconnectedAt`; 0 before the first reconnect |
 | `rooms.<id>.acknowledgedSeq` | integer | the Room's acknowledged seq (P3-3) |
 | `rooms.<id>.holeSeqs` | array of integers | holes above the acknowledgement, at most 32 (P3-3) |
 | `rooms.<id>.quarantinedSeqs` | array of integers | quarantined seqs above the acknowledgement, at most 32 (P3-3) |
@@ -373,7 +421,7 @@ per-process session token: from the core's host rendezvous record where the core
 dashboard's own loopback page. A dashboard that is gated (not loopback-bound) has no non-interactive credential and is
 not supported: its channels fail with `local_gateway_auth_unavailable`.
 
-L1-8 Reconnect and stop. Reconnects use bounded backoff with jitter (P2c-3). The close code and reason map to status
+L1-8 Reconnect and stop. Reconnects follow the schedule of P2c-3a (first retry within 1 s, cap 15 s, jitter). The close code and reason map to status
 codes and actions with this fixed table; close reasons are best-effort, and an unlisted close counts as a lost
 connection.
 

@@ -444,10 +444,26 @@
       "sha256": "38e4669f25cf1864759be6e1efaad0ebed816dbdee02b161ed8474fd62f8be78"
     }
   ],
+  "parityP7aContract": "docs/delivery-lifecycle-contract-v1.md#p2c--secrets-late-replies-self-recovery-2026-10-02",
+  "parityP7aCases": {
+    "P7a-01 the server answers 502 for a while, then 200: connected again within the cap after the first 200, without a channel exit": "test_p7a_01_502_then_200_reconnects_within_the_cap_without_exit",
+    "P7a-02 a malformed event page once, then a valid one: retried inside the connector": "test_p7a_02_a_malformed_event_page_is_retried_inside_the_connector",
+    "P7a-03 a 5xx with Retry-After 300: the next attempt within the cap": "test_p7a_03_5xx_retry_after_300_waits_at_most_the_cap",
+    "P7a-04 a 429 with Retry-After: the 120 s bound is kept": "test_p7a_04_429_retry_after_keeps_the_120_s_bound",
+    "P7a-05 a muted membership is inactive, not retried on the seconds schedule, and active again after the slow re-check": "test_p7a_05_a_muted_membership_is_inactive_and_rechecked_slowly",
+    "P7a-06 more than 10 consecutive failures: still retrying": "test_p7a_06_more_than_10_failures_still_retrying",
+    "P7a-07 a transient attempt-renewal failure is retried within 1 s and never past the lease": "test_p7a_07_attempt_renewal_retries_within_1_s_and_never_past_the_lease",
+    "P7a-08 the status records the reconnect time, the outage length and a coded dispatch-wait reason": "test_p7a_08_status_reconnect_time_outage_and_gate_wait_reason",
+    "P7a-09 web reading is reported from the host's own tool selection, unknown when the host cannot report it": "test_p7a_09_web_reading_reported_from_the_host_tool_selection"
+  },
+  "parityP7aReconnectSchedule": {"firstSeconds": 1, "capSeconds": 15, "jitterFactor": [0.8, 1.0], "retryAfter5xxMaxSeconds": 15, "retryAfter429MaxSeconds": 120, "attemptRenewalCapSeconds": 5, "inactiveRecheckSeconds": 60},
+  "parityP7aWebReadToolNames": ["browser", "browser_navigate", "web_extract", "web_fetch", "web_search"],
   "parityContractSectionSha256": {
     "P3": "a689096e24f9fee13e0603006274c303f3435ee823f082a84a63b765deb8906b",
-    "L1": "504b548622321269be64fd64dfcfa83884a2ded2bad092a37b4db379ba632937",
+    "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
-    "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a"
+    "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
+    "P2c": "bef5ce6b849f40d7f6714bfbf8e6a171b101943bdafe496acf9a59e06425d889",
+    "Appendix": "105f61d0c35a24eeee8fce02d146da41868812bfea97cae59594191c2b8e20ee"
   }
 }
