@@ -328,14 +328,21 @@
   "parityP5Contract": "docs/delivery-lifecycle-contract-v1.md#p5--cycle-documents-2026-10-03",
   "parityP5Cases": {
     "P5-01 every turn of a cycle carries the cycle source's attachments once, then the turn source's, within the limits": "test_p5_01_every_turn_of_a_cycle_carries_the_cycle_source_attachments",
-    "P5-02 a slow or unresolvable cycle source costs at most one bounded lookup per cycle and never delays a turn beyond the bound": "test_p5_02_a_slow_or_unresolvable_cycle_source_costs_one_bounded_lookup"
+    "P5-02 a slow or unresolvable cycle source costs at most one bounded lookup per cycle and never delays a turn beyond the bound": "test_p5_02_a_slow_or_unresolvable_cycle_source_costs_one_bounded_lookup",
+    "P5-03 a failed or timed-out cycle-source lookup is tried again on the next turn and the brief returns": "test_p5_03_a_failed_cycle_source_lookup_is_tried_again_on_the_next_turn"
   },
   "parityP6Contract": "docs/delivery-lifecycle-contract-v1.md#p6--clean-start-and-bounds-2026-10-04",
   "parityP6Cases": {
     "P6-01 a new discussion runs in a new host session and no block holds an event from before its start": "test_p6_01_a_new_discussion_runs_in_a_new_host_session",
     "P6-02 an epoch without a start gives a prompt without earlier events and the turn proceeds": "test_p6_02_an_epoch_without_a_start_gives_no_earlier_events",
     "P6-03 rotate-current-epoch-session is a dry run without --yes and with it authorises one fresh epoch session": "test_p6_03_rotate_current_epoch_session",
-    "P6-04 the Room guidance is cut by the one shared rule at 3,000 characters": "test_p6_04_guidance_bound"
+    "P6-04 the Room guidance is cut by the one shared rule at 3,000 characters": "test_p6_04_guidance_bound",
+    "P6-05 a turn with the start unknown keeps nothing per epoch, so a later turn has the handover and the discussion start": "test_p6_05_an_unknown_start_turn_keeps_nothing_per_epoch",
+    "P6-06 the start is known only as an integer of at least 1 from the Room state, and a disagreeing page never stops a turn": "test_p6_06_the_start_is_known_only_as_an_integer_from_the_room_state",
+    "P6-07 with the start unknown the turn still renders its current item from the loaded page": "test_p6_07_an_unknown_start_still_renders_the_current_item",
+    "P6-08 an unresolvable or hanging turn source costs one bounded scan per turn and never blocks a turn": "test_p6_08_an_unresolvable_or_hanging_turn_source_costs_one_bounded_scan",
+    "P6-09 the Room state's activeTopic is authoritative and a cleared brief is gone on the next turn": "test_p6_09_the_room_state_topic_is_authoritative_and_a_cleared_brief_is_gone",
+    "P6-10 a topic.changed event is acknowledged without model work": "test_p6_10_a_topic_change_is_acknowledged_without_model_work"
   },
   "parityP6GuidanceVector": [
     {
@@ -375,12 +382,72 @@
       ],
       "codePoints": 2998,
       "sha256": "21cba6089d814e3dbc4730417dbd276a83383d50738ba37c0a6185c53f23f6ed"
+    },
+    {
+      "name": "edges",
+      "roomRules": [
+        {
+          "enforcement": "guidance",
+          "text": "\ufeff\u00a0 BOM, NBSP and NEL are trimmed \u0085"
+        },
+        {
+          "enforcement": " guidance\t",
+          "text": "Enforcement is trimmed too."
+        },
+        {
+          "enforcement": "guidance",
+          "text": "\u001fU+001F and U+001C are not trimmed\u001c"
+        },
+        {
+          "enforcement": "guidance",
+          "text": 42
+        },
+        {
+          "enforcement": "guidance",
+          "text": [
+            "a list"
+          ]
+        },
+        {
+          "enforcement": "guidance",
+          "text": null
+        },
+        {
+          "enforcement": "rule",
+          "text": "Not guidance."
+        },
+        {
+          "enforcement": "guidance",
+          "text": "A lone \ud800 surrogate and a pair \ud83d\ude00 stay one code point each."
+        },
+        "a string rule",
+        null,
+        {
+          "enforcement": "guidance",
+          "text": "\u2028\u3000 \u200a"
+        },
+        {
+          "enforcement": [
+            "guidance"
+          ],
+          "text": "Enforcement that is not a string."
+        },
+        {
+          "text": "No enforcement."
+        },
+        {
+          "enforcement": "guidance",
+          "text": "\u180eU+180E is not White_Space and stays\u200b"
+        }
+      ],
+      "codePoints": 199,
+      "sha256": "38e4669f25cf1864759be6e1efaad0ebed816dbdee02b161ed8474fd62f8be78"
     }
   ],
   "parityContractSectionSha256": {
     "P3": "a689096e24f9fee13e0603006274c303f3435ee823f082a84a63b765deb8906b",
     "L1": "504b548622321269be64fd64dfcfa83884a2ded2bad092a37b4db379ba632937",
-    "P5": "ea70a9e7270a8165d949b25aae09004bd07cd70e6530ca2a40eabbd0508a97d7",
-    "P6": "672a608c82a5974c4f9ccb920215896b992c83ad7e01ae6c882f8882743bc7fa"
+    "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
+    "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a"
   }
 }

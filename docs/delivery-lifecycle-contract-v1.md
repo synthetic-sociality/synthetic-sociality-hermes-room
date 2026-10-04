@@ -491,14 +491,15 @@ cycle source's attachments come first, then the turn source's, cut at the limit 
 and the untrusted-content framing are unchanged.
 
 P5-2 Unresolvable cycle source. The connector takes the cycle's source message from the loaded context, otherwise from
-the bounded epoch scan of P1a-8 (at most 2000 sequence numbers, never before the epoch start), under one overall time
-bound of 10 seconds for the whole lookup (Hermes `CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS`, OpenClaw
-`CYCLE_DOCUMENT_SOURCE_TIMEOUT_MS`). It remembers the outcome per cycle, a found source and an unresolved one alike, for
-at most 32 cycles, so that a slow or unresolvable source costs at most one bounded lookup per cycle and process; a
-remembered outcome counts only for the same epoch start, and a remembered source never below it. When the source
-cannot be resolved (outside the scan bound, a Room error, or the time bound), the turn proceeds without it, and one log
-line with code `cycle_source_unresolved` says so (Room, cycle and source ids and a reason code, never content). The
-turn is never failed, retried or delayed beyond that bound for it.
+the bounded epoch scan of P1a-8 (at most 2000 sequence numbers, never before the epoch start). A turn makes at most one
+lookup, and each lookup has one overall time bound of 10 seconds (Hermes `CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS`,
+OpenClaw `CYCLE_DOCUMENT_SOURCE_TIMEOUT_MS`). The connector remembers per cycle, for at most 32 cycles, a found source
+and a scan that completed without finding it (`not_found`); a remembered outcome counts only for the same epoch start,
+and a remembered source never below it. A Room error or the time bound is not remembered: the next turn of the cycle
+tries again, under the same bound, so a transient failure costs the documents of that turn only. When a lookup leaves
+the source unresolved, the turn proceeds without it, and one log line with code `cycle_source_unresolved` says so (Room,
+cycle and source ids and a reason code, never content). The turn is never failed, retried or delayed beyond that bound
+for it.
 
 P5-3 Outside a cycle. A message outside a cycle (an open Room turn without a claimed cycle attempt) is unchanged: its
 own attachments only.
@@ -520,30 +521,65 @@ the first 32 hex digits of that sha256); the session of an earlier discussion is
 discussions stay reachable only through the history tool, on the model's own call. The one exception is the legacy
 session of P6-3.
 
-P6-2 Unknown epoch start. When the active epoch has no start (missing, or below 1), the connector never widens a window
-to the Room's history and never refuses the turn for it: the prompt holds no earlier event (no transcript entry, no
-missed source, no kept reply, no scanned source; the current event and its own attachments only), the turn proceeds,
-and one log line with code `epoch_start_unknown` says so (Room id only). The durable missed sources and kept reply are
-neither offered nor cleared on such a turn. Refusing the turn would stop the agent until the Room repaired its data;
-therefore an event page whose active epoch has a valid id and no valid start is processed with the start unknown, while
-a page without a valid active epoch id still fails closed.
+P6-2 Unknown epoch start. The discussion start of a prompt is the `startsAtSeq` of the active epoch in the Room state.
+It is known only when it is a JSON number whose value is an integer from 1 to 2^53 - 1; a number written `41.0` counts as
+41, because a JavaScript connector cannot tell it from `41`. Every other shape (missing, null, 0, negative, a fraction, a
+string, a boolean, a list, an object) is unknown. Event-page metadata never decides the start of a prompt: when an event
+page and the Room state disagree, the Room state wins, and the disagreement never stops a channel or fails a dispatch.
+The existing epoch-id fences are unchanged; OpenClaw's delivery fence keeps skipping events before the page's start when
+that start is known, and a page start of any other shape counts as unknown there and never stops the channel. When the
+start is unknown, the connector never widens a window to the Room's history and never refuses the turn for it: no scan
+runs and the prompt holds no transcript entry, no missed source, no kept reply and no scanned source. The turn's current
+item (the source the Room named for this attempt, or the event itself) and that item's own attachments are still
+rendered when the item is in the connector's ordinary loaded page (Hermes: the 100 sequence numbers before the turn,
+OpenClaw: its 50); only earlier events are left out. The turn proceeds, and one log line with code `epoch_start_unknown`
+says so (Room id only). The durable missed sources and kept reply are neither offered nor cleared on such a turn, and
+nothing the connector keeps per epoch (the handover, the discussion start event) is kept from it: a later turn whose
+start is known reads them afresh.
 
 P6-3 Legacy session rotation. The epoch that was active when a connector first initialised epoch routing keeps the
 older per-Room host session. Both connectors offer the operator command `rotate-current-epoch-session` for one Room
 membership: Hermes `hermes room rotate-current-epoch-session ROOM_ID [--yes]`, OpenClaw `openclaw-room-recovery
-rotate-current-epoch-session (--state FILE | --account ID) [--yes]`. Without `--yes` it is a dry run: it prints the
-membership's routing (initialised or not, whether its recorded epoch uses the legacy session, whether a rotation is
-already authorised) and changes nothing. With `--yes` it authorises, durably and for that membership only, that the
-epoch active at the connector's next start gets a fresh epoch session instead of the legacy one. The authorisation is
-consumed once at that start. It never deletes or edits a host session, a cursor, an acknowledgement, an intent or a
-quarantine, and a running connector does not overwrite it (Hermes merges it into its next state write; OpenClaw reads it
-from a request file beside the state, `<state>.rotate-epoch-session.json`, which it consumes at its next start).
+rotate-current-epoch-session (--state FILE | --account ID) [--yes | --cancel]`. Without `--yes` it is a dry run: it
+prints the membership's routing (initialised or not, whether its recorded epoch uses the legacy session, whether a
+rotation is already authorised) and changes nothing. With `--yes` it authorises, durably and for that membership only,
+that the epoch active at the connector's next start gets a fresh epoch session instead of the legacy one. The
+authorisation is consumed once at that start. It never deletes or edits a host session, a cursor, an acknowledgement, an
+intent or a quarantine, and a running connector does not overwrite it. Hermes merges it into its next state write.
+OpenClaw writes a request file beside the state, `<state>.rotate-epoch-session.request` (never ending in `.json`, so
+account discovery does not take it for an account), atomically through a temporary file and a rename, mode 0600; the
+connector consumes it at its next start. A request that names another Room, membership or client instance, that is not
+a regular file, or that is larger than 4096 bytes is refused and left in place. `--cancel` removes a pending request
+(OpenClaw only; Hermes has no request file).
 
-P6-4 Guidance bound. The saved Room guidance (rules with enforcement `guidance`, each text trimmed, empty texts and the
-open-exchange preamble left out) is rendered in Room order as one line per rule, `- ` followed by the text. The joined
-lines hold at most 3,000 characters, counted in Unicode code points. The bound is a connector constant (Hermes and
-OpenClaw `GUIDANCE_CHARACTER_LIMIT`), not a Room policy value. Lines are kept whole while they fit, the newline between
-two lines counting as one character. The first line that does not fit is cut to the remaining room and its last kept
-character is replaced by `…`, so that the joined lines hold exactly 3,000 characters; when fewer than two characters
-remain, it is dropped instead. Every later line is dropped. Both repositories pin the same vector,
-`parityP6GuidanceVector` in `conformance.json`.
+P6-4 Guidance bound. The saved Room guidance is rendered in Room order as one line per rule, `- ` followed by the text.
+A rule counts when it is an object whose `enforcement`, trimmed, equals `guidance` and whose `text` is a string; a rule
+of any other shape, a `text` that is not a string (a number, a list, null), an empty trimmed text and the open-exchange
+preamble are left out. Before trimming, each lone surrogate (a UTF-16 surrogate code unit that is not part of a pair, as
+a JSON `\ud800` escape can carry) is replaced by U+FFFD, so that no text raises and both connectors count, digest and
+render it the same. Trimming removes, from both ends only, the Unicode White_Space characters (U+0009 to U+000D,
+U+0020, U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F, U+3000) and U+FEFF; U+FEFF is
+included because pasted text often starts with it and JavaScript's own trim removes it. The joined lines hold at most
+3,000 characters, counted in Unicode code points. The bound is a connector constant (Hermes and OpenClaw
+`GUIDANCE_CHARACTER_LIMIT`), not a Room policy value. Lines are kept whole while they fit, the newline between two lines
+counting as one character. The first line that does not fit is cut to the remaining room and its last kept character is
+replaced by `…`, so that the joined lines hold exactly 3,000 characters; when fewer than two characters remain, it is
+dropped instead. Every later line is dropped. Both repositories pin the same vector, `parityP6GuidanceVector` in
+`conformance.json`.
+
+P6-5 Turn-source scan. The bounded scan of P1a-8 for the message a turn answers, when it is older than the loaded
+context, has the time bound of P5-2 (10 seconds, the same constant) and the same memory: a found source and `not_found`
+are remembered per Room and source, for at most 32 sources and only for the same epoch start; a Room error or the time
+bound is not remembered, and the next turn may scan again. A turn runs at most one such scan. When the source is not
+resolved, the turn proceeds without its current item, as before.
+
+P6-6 Discussion topic and brief. When the Room state has an `activeTopic` object, its `title` and `description` are
+authoritative, both for the "Current discussion" lines and for a discussion start presented as the current item (P1a-5):
+an empty string, null or a missing value means no title or no description, and nothing is taken from the
+`discussion.started` payload in its place. Only when the Room state has no `activeTopic` (missing or null) may a
+connector use the topic of the `discussion.started` payload (OpenClaw for the context lines and the presented start,
+Hermes for the presented start only, as before). The description carries the owner-editable discussion brief (Room
+server `PUT /api/rooms/{roomId}/discussion/brief`, event `topic.changed` with `change` = `description`). The connector
+reads it fresh from the Room state on every turn and renders it verbatim, trimmed only as P6-4 trims guidance text, so
+an edit or a cleared brief takes effect on the next turn. A `topic.changed` event never triggers a turn: it is
+acknowledged without model work.
