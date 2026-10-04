@@ -9,8 +9,8 @@ Room identity.
 
 ## 1.0.80 — Clean start and bounds (parity P6)
 
-Paired with OpenClaw 0.2.64 (contract section P6, shared cases P6-01 to P6-04;
-P5-2 amended, shared case P5-02).
+Paired with OpenClaw 0.2.64 (contract section P6, shared cases P6-01 to P6-10;
+P5-2 amended, shared cases P5-02 and P5-03).
 
 - **A new discussion starts clean** (contract P6-1). This was already the
   behaviour and is now a rule with a shared case: nothing from before the
@@ -20,34 +20,56 @@ P5-2 amended, shared case P5-02).
   runs in a new Hermes session. This release does not change the growth of
   input tokens inside one discussion (the host replays each earlier prompt);
   that is designed separately.
-- **An epoch without a start** (`startsAtSeq` missing or below 1, contract
-  P6-2). Before, the window fell back to sequence 1 and could reach 2,000
-  sequence numbers into earlier discussions. Now the prompt holds no earlier
-  event, the turn proceeds, and one line with code `epoch_start_unknown` is
-  logged. Missed sources and a kept reply are neither offered nor cleared on
-  such a turn.
+- **An epoch without a start** (contract P6-2). The start comes from the Room
+  state and is known only as an integer from 1 to 2^53 - 1; any other shape
+  (missing, null, 0, negative, a fraction, a string, a boolean, a list) is
+  unknown. Before, the window fell back to sequence 1 and could reach 2,000
+  sequence numbers into earlier discussions, a string start raised, and `1.5`
+  or `true` counted as 1. Now the prompt holds no earlier event except the
+  turn's current item when it is among the 100 sequence numbers before the
+  turn (with its own attachments), the turn proceeds, and one line with code
+  `epoch_start_unknown` is logged. Missed sources and a kept reply are neither
+  offered nor cleared on such a turn, and the handover is not remembered from
+  it, so a later turn with a known start has it.
 - **`hermes room rotate-current-epoch-session ROOM_ID` is a dry run without
   `--yes`** (contract P6-3). It prints the binding's routing and changes
   nothing; before, it refused without `--yes`. With `--yes` it behaves as
   before. OpenClaw now has the same command.
-- **Cycle-source lookup bounded** (contract P5-2, OP-12 P5 review item 1): an
-  unresolved cycle source is remembered per cycle like a found one (32 cycles),
-  and the whole lookup of a turn has one time bound,
-  `CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS` (10 seconds). A slow or unresolvable
-  source costs at most one bounded lookup per cycle; the turn proceeds with the
-  coded line `cycle_source_unresolved`. A remembered outcome counts only for
-  the same epoch start.
+- **Cycle-source lookup bounded** (contract P5-2, OP-12 P5 review item 1): a
+  turn makes at most one lookup, under one time bound,
+  `CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS` (10 seconds). A source the scan
+  finds, or does not find (`not_found`), is remembered per cycle (32 cycles,
+  both kinds counted). A Room error or the time bound is not remembered, so
+  the next turn tries again and a transient error costs the documents of one
+  turn only (as 1.0.79 recovered). The turn proceeds with the coded line
+  `cycle_source_unresolved`. A remembered outcome counts only for the same
+  epoch start.
+- **Discussion brief** (contract P6-6): when the Room state has an
+  `activeTopic`, its title and description are authoritative; a cleared
+  description is gone on the next turn, also when the turn presents the
+  discussion start itself (before, that start showed its own, possibly stale,
+  title and description). The brief is read fresh from the Room state on every
+  turn. A `topic.changed` event is acknowledged without model work.
+- **Turn-source scan bounded** (contract P6-5): the scan for the message an
+  attempt answers, when it is older than the loaded context, has the same
+  time bound and memory.
 - **Room guidance bound stated** (contract P6-4): 3,000 characters, counted in
   code points, cut by one rule shared with OpenClaw (whole lines while they
   fit, the first line that does not fit cut with `…`, later lines dropped),
   pinned by a shared vector. Hermes cut this way already. The open-exchange
   preamble is now recognised wherever it stands among the rules; before, a
-  preamble listed after the bound was reached was not.
+  preamble listed after the bound was reached was not. The edges are now
+  defined and shared: trimming removes Unicode White_Space and U+FEFF only
+  (Python's own `strip()` also removed U+001C to U+001F), a rule text that is
+  not a string is left out (before, a number was rendered), and a lone
+  surrogate is rendered as U+FFFD instead of raising.
 - **Device link** (OP-12 P5 review items 3 and 4): a `link-pending.json` that is
   a directory no longer blocks `hermes room unlink` (an empty one is removed,
   one with content is left in place and named); a malformed dashboard address
   such as `http://[::1` is refused with `local_gateway_auth_unavailable`
-  instead of an uncaught error.
+  instead of an uncaught error. A pending symlink is removed as a link, never
+  followed, and `hermes room unlink` no longer says it deleted a pending link
+  when only a directory was left in place.
 - `plugin.yaml` declares `transform_tool_result`, which the plugin registers
   (Plugin Doctor warned on 1.0.78 and 1.0.79); a test keeps the declared and
   registered hooks equal.

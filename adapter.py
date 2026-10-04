@@ -26,6 +26,7 @@ from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
 from .context import count_messages_between as _count_messages_between
+from .context import active_topic as _active_topic
 from .context import cycle_source_message as _cycle_source_message
 from .context import epoch_start_event as _epoch_start_event
 from .context import recent_room_messages as _recent_room_messages
@@ -674,6 +675,26 @@ def _acknowledge_peer(api: Any, room_id: str, source_event_id: str) -> dict[str,
     return reader(room_id, source_event_id) if callable(reader) else {}
 
 
+# Contract P6-2: the largest start a JavaScript connector can hold exactly.
+_EPOCH_START_MAX = 2**53 - 1
+
+
+def _known_epoch_start(value: Any) -> int:
+    """The active epoch's start when it is known, else 0 (contract P6-2).
+
+    Known only for a JSON number whose value is an integer from 1 to 2^53 - 1
+    (``41.0`` counts as 41, as in JavaScript); a boolean, string, fraction,
+    list, object, null, 0 or a negative number is unknown. Never raises
+    (same in OpenClaw ``knownEpochStart``).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not value.is_integer():
+        return 0
+    number = int(value)
+    return number if 1 <= number <= _EPOCH_START_MAX else 0
+
+
 def _cycle_source_body(event: dict[str, Any], payload: dict[str, Any]) -> str:
     if event.get("type") == "discussion.cycle_attempt_ready":
         # The canonical source could not be resolved. State that fact; never
@@ -737,6 +758,19 @@ def _is_cycle_start_refusal(error: ProtocolError) -> bool:
         and int(error.status or 0) not in {401, 403, 429}
         and error.code not in _CYCLE_START_SESSION_CODES
     )
+
+
+# Contract P6-2: the ordinary loaded page when the epoch start is unknown, the
+# 100 sequence numbers before the turn (one chunk of the context scan).
+LOADED_PAGE_SEQUENCES = 100
+
+
+def _loaded_page(response: dict[str, Any], before_seq: int) -> list[dict[str, Any]]:
+    """The events of one page read in [before_seq - 100, before_seq)."""
+    return [
+        item for item in (response.get("events") or [])
+        if isinstance(item, dict) and before_seq - LOADED_PAGE_SEQUENCES <= int(item.get("seq") or 0) < before_seq
+    ]
 
 
 def _cycle_prompt_event(
@@ -2168,7 +2202,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=str(error), retryable=error.retryable)
             active_epoch = current_state.get("activeEpoch") or {}
             active_epoch_id = active_epoch.get("id")
-            starts_at = int(active_epoch.get("startsAtSeq") or 0)
+            starts_at = _known_epoch_start(active_epoch.get("startsAtSeq"))
             if (
                 not isinstance(active_epoch_id, str)
                 or not active_epoch_id.strip()
@@ -3940,7 +3974,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 retryable=True,
             )
         active_epoch_id = _exact_epoch_id(active_epoch_id, "Room state active epoch")
-        starts_at = int(active_epoch.get("startsAtSeq") or 0)
+        starts_at = _known_epoch_start(active_epoch.get("startsAtSeq"))
         event_epoch_id = _event_epoch_evidence(event)
         if starts_at and seq < starts_at:
             await self._complete_event(
@@ -3978,6 +4012,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 str(policy_view.get("summaryBehavior") or "") == "on_cycle_complete"
                 and coordinator == binding.membership_id
             )
+        if event_type == "topic.changed":
+            # Contract P6-6: a topic or brief edit never triggers a turn; the
+            # next turn reads the Room state afresh (OpenClaw: not assigned).
+            await self._complete_event(
+                binding, seq, terminal_status="ignored", source_id=event_id,
+                reason="topic_change_not_a_trigger",
+            )
+            return
         if event_type != "message.posted" and not human_source and not ready_for_self and not summary_for_self:
             await self._complete_event(
                 binding, seq, terminal_status="ignored", source_id=event_id,
@@ -4129,7 +4171,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if (human_source or agent_seed) and not open_message:
             state = receive_state
             active_epoch = state.get("activeEpoch") or {}
-            starts_at = int(active_epoch.get("startsAtSeq") or 0)
+            starts_at = _known_epoch_start(active_epoch.get("startsAtSeq"))
             if starts_at and seq < starts_at:
                 # Full-chain agent transport deliberately replays historical
                 # epochs.  Those events are canonical transport work, but they
@@ -4303,7 +4345,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # must stay visible rather than being silently retried.
             fresh = await self._call(binding, lambda api: api.room_state(binding.room_id))
             fresh_epoch = fresh.get("activeEpoch") or {}
-            starts_at = int(fresh_epoch.get("startsAtSeq") or 0)
+            starts_at = _known_epoch_start(fresh_epoch.get("startsAtSeq"))
             if starts_at and int(event.get("seq") or 0) < starts_at:
                 return None
             # A same-epoch conflict (for example this agent is not
@@ -4574,7 +4616,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # outbound I/O path merely because the process restarted.
         state = await self._call(binding, lambda api: api.room_state(binding.room_id))
         active_epoch = state.get("activeEpoch") or {}
-        starts_at = int(active_epoch.get("startsAtSeq") or 0)
+        starts_at = _known_epoch_start(active_epoch.get("startsAtSeq"))
         if starts_at and seq < starts_at:
             self._inflight_events.discard(event_id)
             await self._complete_event(
@@ -4659,8 +4701,21 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # Canonical delivery remains available if the bounded enrichment
             # read fails; the next Room event gets another chance to refresh.
             logger.warning("Room %s context refresh unavailable: %s", binding.room_id, error)
+        current_page = context_events
+        if not start_known:
+            # Contract P6-2: the current item still comes from the ordinary
+            # loaded page (the 100 sequence numbers before the turn); no
+            # earlier event enters the prompt otherwise.
+            try:
+                current_page = await self._call(
+                    binding, lambda api: _loaded_page(api.events(binding.room_id, max(0, seq - 101), 0), seq),
+                )
+            except Exception as error:
+                logger.warning("Room %s context refresh unavailable: %s", binding.room_id, error)
         self._remember_post_numbers(binding.room_id, [*context_events, event])
-        prompt_event = _cycle_prompt_event(event, payload, context_events)
+        prompt_event = _cycle_prompt_event(event, payload, current_page)
+        if prompt_event is not event:
+            self._remember_post_numbers(binding.room_id, [prompt_event])
         if prompt_event is event and event.get("type") == "discussion.cycle_attempt_ready":
             # Contract P1a-5: a cycle seeded by the epoch's discussion.started
             # presents the topic itself, attributed to the human who started it.
@@ -4681,17 +4736,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             elif source_id and start_known:
                 # Contract P1a-8: a source message older than the bounded
                 # context is read by a bounded scan and is still the current item.
-                source_message = None
-                try:
-                    source_message = await self._call(
-                        binding,
-                        lambda api: _cycle_source_message(
-                            lambda after: api.events(binding.room_id, after, 0), source_id,
-                            before_seq=seq, active_epoch_starts_at=starts_at,
-                        ),
-                    )
-                except Exception as error:
-                    logger.warning("Room %s cycle source unavailable: %s", binding.room_id, error)
+                # Contract P6-5: one scan per turn under the P5-2 time bound;
+                # a found source and not_found are remembered.
+                source_message, reason = await self._remembered_epoch_scan(
+                    "_turn_source_events", (binding.room_id, source_id), binding, source_id, seq, starts_at,
+                    ("message.posted",),
+                )
+                if reason not in (None, "", "not_found"):
+                    error = getattr(self, "_last_scan_error", None)
+                    logger.warning("Room %s cycle source unavailable: %s", binding.room_id, error or reason)
                 if isinstance(source_message, dict):
                     prompt_event = source_message
                     self._remember_post_numbers(binding.room_id, [source_message])
@@ -4699,6 +4752,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         prompt_event_id = str(prompt_event.get("id") or event_id)
         actor = _room_actor_name(state, prompt_event)
         body = _cycle_source_body(prompt_event, prompt_payload)
+        if prompt_event.get("type") == "discussion.started":
+            # Contract P6-6: the Room state's activeTopic is authoritative for
+            # the presented start; a cleared brief is gone on the next turn.
+            body = "\n\n".join(value for value in _active_topic(state, prompt_event) if value)
         shared_context = _canonical_room_context(
             state, context_events, prompt_event_id, _policy_view(context_policy),
         )
@@ -4852,37 +4909,59 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if starts_at < 1:
             # Contract P6-2: without an epoch start there is no floor to scan to.
             return None
-        cache = getattr(self, "_cycle_source_events", None)
-        if cache is None:
-            cache = self._cycle_source_events = {}
-        key = (binding.room_id, str(cycle.get("id") or ""), source_id)
-        # Contract P5-2: a found source and an unresolved one are both
-        # remembered per cycle, so the bounded lookup runs at most once. A hit
-        # counts only for the same epoch floor and never below it.
-        if key in cache:
-            floor, cached = cache[key]
-            if floor == starts_at and (cached is None or int(cached.get("seq") or 0) >= starts_at):
-                return cached
-        reason = "not_found"
-        found = None
-        try:
-            found = await self._bounded_cycle_source_lookup(binding, source_id, before_seq, starts_at)
-        except Exception as error:
-            reason = type(error).__name__
-        if not isinstance(found, dict):
-            found = None
+        found, reason = await self._remembered_epoch_scan(
+            "_cycle_source_events", (binding.room_id, str(cycle.get("id") or ""), source_id),
+            binding, source_id, before_seq, starts_at, CYCLE_DOCUMENT_SOURCE_TYPES,
+        )
+        if reason:
             logger.warning(
                 "Room %s cycle source documents unavailable: code cycle_source_unresolved cycle %s source %s reason %s",
                 binding.room_id, cycle.get("id") or "-", source_id, reason,
             )
-        cache.pop(key, None)
-        cache[key] = (starts_at, found)
-        while len(cache) > CYCLE_DOCUMENT_SOURCE_CACHE:
-            cache.pop(next(iter(cache)))
         return found
+
+    async def _remembered_epoch_scan(
+        self, cache_name: str, key: tuple[str, ...], binding: RoomBinding, source_id: str,
+        before_seq: int, starts_at: int, types: Any,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """One bounded epoch scan with its memory (contract P5-2, P6-5).
+
+        Returns the event (or None) and the reason it was not found: None for
+        a remembered outcome, "" for a found source, "not_found" for a scan
+        that completed without it, else the error's name. A found source and
+        not_found are remembered for the same epoch start (at most
+        CYCLE_DOCUMENT_SOURCE_CACHE keys, both kinds counted); an error or the
+        time bound is not, so the next turn tries again.
+        """
+        cache = getattr(self, cache_name, None)
+        if cache is None:
+            cache = {}
+            setattr(self, cache_name, cache)
+        if key in cache:
+            floor, cached = cache[key]
+            if floor == starts_at and (cached is None or int(cached.get("seq") or 0) >= starts_at):
+                return cached, None
+        reason = "not_found"
+        found = None
+        try:
+            found = await self._bounded_cycle_source_lookup(binding, source_id, before_seq, starts_at, types)
+        except Exception as error:
+            reason = type(error).__name__
+            self._last_scan_error = error
+        if isinstance(found, dict):
+            reason = ""
+        else:
+            found = None
+        if reason in ("", "not_found"):
+            cache.pop(key, None)
+            cache[key] = (starts_at, found)
+            while len(cache) > CYCLE_DOCUMENT_SOURCE_CACHE:
+                cache.pop(next(iter(cache)))
+        return found, reason
 
     async def _bounded_cycle_source_lookup(
         self, binding: RoomBinding, source_id: str, before_seq: int, starts_at: int,
+        types: Any = CYCLE_DOCUMENT_SOURCE_TYPES,
     ) -> dict[str, Any] | None:
         """The P5-2 epoch scan under one overall time bound.
 
@@ -4900,7 +4979,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
             return _cycle_source_message(
                 page, source_id, before_seq=before_seq, active_epoch_starts_at=starts_at,
-                types=CYCLE_DOCUMENT_SOURCE_TYPES,
+                types=types,
             )
 
         worker = asyncio.ensure_future(self._call(binding, scan))
@@ -5113,6 +5192,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         key = (binding.room_id, epoch_id)
         if key in cache:
             return cache[key]
+        if starts_at < 1:
+            # Contract P6-2: nothing is kept per epoch from a turn whose start
+            # is unknown; a later turn with a known start reads it afresh.
+            return ""
         start_event: dict[str, Any] | None = None
         if event.get("type") == "discussion.started" and int(event.get("seq") or 0) == int(starts_at or 0):
             start_event = event

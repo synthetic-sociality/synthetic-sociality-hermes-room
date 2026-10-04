@@ -365,6 +365,10 @@ def _unlink() -> int:
     if removed.get("pendingNotRemoved"):
         print(f"A directory with content stands at {device_link.pending_path(device_link.link_path())}; "
               "it was left in place.")
+        if removed.get("pendingOnly"):
+            # OP-12 P6 review note 6: no link and no pending link was deleted.
+            print("No link key was deleted; this device has no link record.")
+            return 0
     if removed.get("pendingOnly"):
         print(f"Deleted the pending, never confirmed link of device {removed.get('deviceId', '')} (its key and "
               "pairing secret).")
