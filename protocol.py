@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -17,6 +18,12 @@ from typing import Any, Callable
 MAX_JSON_RESPONSE_BYTES = 16 << 20
 MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY = "messages.logical_contribution.v1"
 MESSAGE_PAYLOAD_DIALECTS = frozenset({"v1", "v2"})
+# Contract P2c-3a: the reconnect schedule, identical in OpenClaw
+# (conformance.json parityP7aReconnectSchedule).
+RECONNECT_FIRST_SECONDS = 1.0
+RECONNECT_CAP_SECONDS = 15.0
+RECONNECT_JITTER_LOW = 0.8
+RETRY_AFTER_RATE_LIMIT_MAX_SECONDS = 120.0
 
 
 class ProtocolError(RuntimeError):
@@ -566,3 +573,23 @@ def parse_retry_after(raw: str, *, now: float | None = None, maximum: float = 12
         except (TypeError, ValueError, OverflowError):
             return 0.0
     return min(maximum, max(0.0, seconds))
+
+
+def reconnect_delay(
+    step: int,
+    *,
+    retry_after: float = 0.0,
+    status: int = 0,
+    cap: float = RECONNECT_CAP_SECONDS,
+    rng: Callable[[float, float], float] = random.uniform,
+) -> float:
+    """Contract P2c-3a: the wait before retry ``step`` (0 is the first retry).
+
+    The base doubles from 1 s to ``cap`` and is multiplied by a factor in
+    [0.8, 1.0]. A Retry-After lengthens the wait to at most ``cap``, or to at
+    most 120 s on a 429; it never shortens it.
+    """
+    ceiling = min(cap, RECONNECT_FIRST_SECONDS * (2 ** max(0, min(int(step), 16))))
+    delay = rng(RECONNECT_JITTER_LOW * ceiling, ceiling)
+    bound = RETRY_AFTER_RATE_LIMIT_MAX_SECONDS if status == 429 else cap
+    return max(delay, min(max(0.0, float(retry_after or 0)), bound))

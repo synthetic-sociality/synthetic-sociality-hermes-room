@@ -7,6 +7,35 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.82 — Stay connected (parity P7a)
+
+Paired with OpenClaw 0.2.65. Contract P2c-3a, P2c-3b, P2c-3c, P2c-6 and the
+P2c-4 status additions (cases P7a-01 to P7a-09).
+
+- **One reconnect schedule (P2c-3a).** Registration, heartbeat, the event
+  stream and the enrollment listing retry after 1, 2, 4, 8, then every 15 s
+  (each wait 80 to 100 % of that), with no attempt limit and on every route.
+  A `Retry-After` on a 5xx is honoured up to 15 s (it was up to 120 s, which
+  kept the public-route Rooms 60 s apart after the restart of 2026-10-04); on
+  a 429 up to 120 s as before. A failed heartbeat is retried on the schedule,
+  not at the heartbeat interval. The device link uses the same schedule
+  (L1-8: cap 15 s instead of 30 s).
+- **Muted membership (P2c-3b).** `connector_not_active` on the enrollment
+  listing of a muted membership no longer re-registers every few seconds: the
+  Room shows `connection: inactive`, the listing pauses, and the Room state is
+  re-read at most every 60 s until the membership is active again.
+- **Attempt renewal (P2c-3c, ISSUE-023).** A transient renewal failure is
+  retried after 1, 2, 4, then 5 s instead of a flat 5 s, never past the lease.
+- **Status (P2c-4, additive; schema name unchanged).** Per Room
+  `lastReconnectedAt`, `lastOutageSeconds` and `lastGateWaitReason`
+  (`host_run_busy`, `host_session_unobservable`); per installation `webRead`
+  and `webReadTools` from core's own tool selection (P2c-6: the plugin adds and
+  removes no web tool).
+- `plugin.yaml` changes only its `version:` line.
+
+No state migration and nothing new on disk: 1.0.82 loads a 1.0.81 state file
+unchanged.
+
 ## 1.0.81 — Manifest back to the 1.0.79 shape
 
 Paired with OpenClaw 0.2.64 (unchanged; no contract change).

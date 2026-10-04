@@ -728,9 +728,10 @@ class L1SocketTests(LinkTestCase):
             low = link.backoff_delay(attempt, rng=lambda a, b: a)
             high = link.backoff_delay(attempt, rng=lambda a, b: b)
             self.assertLessEqual(high, link.BACKOFF_MAX_SECONDS)
-            self.assertAlmostEqual(low * 2, high)
+            self.assertAlmostEqual(low, high * 0.8)
+        # Contract L1-8: the P2c-3a schedule (first retry within 1 s, cap 15 s).
         self.assertEqual(link.backoff_delay(0, rng=lambda a, b: b), 1.0)
-        self.assertEqual(link.backoff_delay(20, rng=lambda a, b: b), 30.0)
+        self.assertEqual(link.backoff_delay(20, rng=lambda a, b: b), 15.0)
         calls = []
         async with Harness() as harness:
             self.active_record(harness.audience)
@@ -740,7 +741,7 @@ class L1SocketTests(LinkTestCase):
                 ws = await asyncio.wait_for(harness.connections.get(), 8)
                 ws.transport.abort()  # no close frame: 1006
             await harness.accept()
-            self.assertEqual(calls[:3], [(0.5, 1.0), (1.0, 2.0), (2.0, 4.0)])  # bounded, jittered, growing
+            self.assertEqual(calls[:3], [(0.8, 1.0), (1.6, 2.0), (3.2, 4.0)])  # bounded, jittered, growing (P2c-3a)
             await until(lambda: self.status_link()["state"] == "connected")
             self.assertEqual(service.delays[:3], [1.0, 2.0, 4.0])
         # The device's own ping, and an idle close after twice the keepalive.

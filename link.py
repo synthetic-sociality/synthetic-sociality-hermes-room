@@ -45,6 +45,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from . import secret_isolation
+from .protocol import RECONNECT_CAP_SECONDS, RECONNECT_FIRST_SECONDS, reconnect_delay
 from .state import assert_state_directory, state_path
 
 logger = logging.getLogger(__name__)
@@ -101,8 +102,9 @@ LIMIT_RANGES = {
 # Server messages up to the schema maximum carrier plus 1 KiB (>= 6 MiB + 1 KiB).
 CLIENT_MAX_MESSAGE_BYTES = 8_388_608 + 1024
 HANDSHAKE_TIMEOUT_SECONDS = 15.0
-BACKOFF_INITIAL_SECONDS = 1.0
-BACKOFF_MAX_SECONDS = 30.0
+# Contract L1-8: the reconnect schedule of P2c-3a.
+BACKOFF_INITIAL_SECONDS = RECONNECT_FIRST_SECONDS
+BACKOFF_MAX_SECONDS = RECONNECT_CAP_SECONDS
 RECORD_POLL_SECONDS = 2.0
 DEFAULT_LOCAL_GATEWAY_URL = "http://127.0.0.1:9119"
 # Literal loopback addresses only: a name ("localhost") is resolved per request.
@@ -782,9 +784,8 @@ def close_outcome(code: int | None, reason: str = "") -> tuple[str, str]:
 
 
 def backoff_delay(attempt: int, rng: Callable[[float, float], float] = random.uniform) -> float:
-    """Bounded exponential backoff with jitter (P2c-3): in [d/2, d], d ≤ 30 s."""
-    ceiling = min(BACKOFF_MAX_SECONDS, BACKOFF_INITIAL_SECONDS * (2 ** max(0, attempt)))
-    return rng(ceiling / 2, ceiling)
+    """Contract L1-8: the P2c-3a schedule, in [0.8 d, d] with d ≤ 15 s."""
+    return reconnect_delay(attempt, rng=rng)
 
 
 # --- L1-4 … L1-6: the gateway-side link service -----------------------------------------

@@ -14,12 +14,18 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 SCHEMA = "synthetic-sociality-room-status-v1"
-CONNECTION_STATES = frozenset({"connecting", "connected", "reconnecting", "stopped"})
+CONNECTION_STATES = frozenset({"connecting", "connected", "reconnecting", "inactive", "stopped"})
+# Contract P2c-6: the web reading values, and the tool names that count.
+WEB_READ_VALUES = frozenset({"available", "unavailable", "unknown"})
+WEB_READ_TOOL_NAMES = ("browser", "browser_navigate", "web_extract", "web_fetch", "web_search")
+# Contract P2c-4 (ISSUE-023): why a dispatch waited on the host.
+GATE_WAIT_REASONS = frozenset({"", "host_run_busy", "host_session_unobservable"})
 _CODE_LIMIT = 64
 
 logger = logging.getLogger(__name__)
@@ -55,8 +61,15 @@ class LocalStatus:
             "secretStore": "isolated",
             "secretStoreReasons": [],
             "secretIsolationEnforced": False,
+            "webRead": "unknown",
+            "webReadTools": [],
             "rooms": {},
         }
+        # Contract P2c-3a: when the current outage of a Room began (monotonic
+        # process memory only; never written).
+        self._outage_started: dict[str, float] = {}
+        # Contract P2c-3b: Rooms whose membership is inactive (muted).
+        self._inactive: set[str] = set()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -70,14 +83,28 @@ class LocalStatus:
             self._data["secretIsolationEnforced"] = bool(enforced)
         self.write()
 
+    def set_web_read(self, tool_names: set[str] | list[str] | tuple[str, ...] | None) -> None:
+        """Contract P2c-6: web reading from the host's own selection; None is unknown."""
+        if tool_names is None:
+            value, found = "unknown", []
+        else:
+            found = sorted(name for name in WEB_READ_TOOL_NAMES if name in set(tool_names))
+            value = "available" if found else "unavailable"
+        with self._lock:
+            changed = (self._data.get("webRead"), self._data.get("webReadTools")) != (value, found)
+            self._data["webRead"], self._data["webReadTools"] = value, found
+        if changed:
+            self.write()
+
     def set_loaded(self, loaded: bool) -> None:
         with self._lock:
             self._data["pluginLoaded"] = bool(loaded)
         self.write()
 
     def room(self, room_id: str, membership_id: str = "", *, connection: str | None = None,
-             error_code: str | None = None, connected: bool = False,
-             gate_wait_seconds: float | None = None, ledger: dict[str, Any] | None = None) -> None:
+             error_code: str | None = None, connected: bool = False, registered: bool = False,
+             inactive: bool | None = None, gate_wait_seconds: float | None = None,
+             gate_wait_reason: str | None = None, ledger: dict[str, Any] | None = None) -> None:
         """Update one Room entry; write only when something changed."""
         if not room_id:
             return
@@ -91,6 +118,9 @@ class LocalStatus:
                 "lastErrorAt": None,
                 "lastGateWaitSeconds": 0,
                 "lastGateWaitAt": None,
+                "lastGateWaitReason": "",
+                "lastReconnectedAt": None,
+                "lastOutageSeconds": 0,
                 "acknowledgedSeq": 0,
                 "holeSeqs": [],
                 "quarantinedSeqs": [],
@@ -99,11 +129,31 @@ class LocalStatus:
             before = json.dumps(entry, sort_keys=True)
             if membership_id:
                 entry["membershipId"] = str(membership_id)
+            key = str(room_id)
+            if inactive is True:
+                self._inactive.add(key)
+            elif inactive is False:
+                self._inactive.discard(key)
             if connection in CONNECTION_STATES:
                 entry["connection"] = connection
+            if connection == "reconnecting":
+                # Contract P2c-3a: the first failure of an outage starts it.
+                self._outage_started.setdefault(key, time.monotonic())
+            elif connection in {"stopped", "inactive"}:
+                self._outage_started.pop(key, None)
             if connected:
                 entry["connection"] = "connected"
                 entry["lastConnectedAt"] = _now()
+                started = self._outage_started.pop(key, None)
+                if started is not None and registered:
+                    # Re-established by an accepted registration after a
+                    # failure; a heartbeat that survived ends the outage only.
+                    entry["lastReconnectedAt"] = entry["lastConnectedAt"]
+                    entry["lastOutageSeconds"] = round(max(0.0, time.monotonic() - started), 1)
+            if key in self._inactive:
+                # Contract P2c-3b: a muted membership stays inactive while its
+                # session and heartbeat continue.
+                entry["connection"] = "inactive"
             if error_code is not None:
                 code = _code(error_code)
                 entry["lastErrorCode"] = code
@@ -117,6 +167,7 @@ class LocalStatus:
             if gate_wait_seconds is not None:
                 entry["lastGateWaitSeconds"] = round(max(0.0, float(gate_wait_seconds)), 1)
                 entry["lastGateWaitAt"] = _now()
+                entry["lastGateWaitReason"] = gate_wait_reason if gate_wait_reason in GATE_WAIT_REASONS else ""
             changed = json.dumps(entry, sort_keys=True) != before
         if changed:
             self.write()

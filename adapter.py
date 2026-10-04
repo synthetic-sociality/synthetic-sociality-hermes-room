@@ -38,6 +38,7 @@ from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
     ProtocolError,
     RoomProtocol,
+    reconnect_delay,
     stable_key,
 )
 from .room_tools import (
@@ -73,7 +74,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.81"
+CONNECTOR_VERSION = "1.0.82"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -169,6 +170,9 @@ SESSION_WAIT_WARN_SECONDS = 900.0
 # the bound receives the next event through core's busy path (steer,
 # interrupt or queue; gateway/run.py _handle_active_session_busy_message).
 SESSION_UNOBSERVABLE_WAIT_SECONDS = 120.0
+# Contract P2c-3b: an inactive (muted) membership re-reads the Room state at
+# most this often, at a heartbeat.
+INACTIVE_RECHECK_SECONDS = 60.0
 _DISPATCH_SOURCE_PREFIX = "room-dispatch:"
 ROOM_HISTORY_INSTRUCTION = (
     "Earlier discussions and the library text are not preloaded. If your task needs an exact "
@@ -1262,6 +1266,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _secret_store_reasons(self) -> list[str]:
         reasons: list[str] = []
         tool_names, mcp_servers = _core_tool_selection()
+        # Contract P2c-6: the same selection tells whether a web reading tool
+        # is offered; None (not reported) stays unknown.
+        self._tool_selection = None if tool_names is None else set(tool_names)
         directories = [self._state_file.parent, *_secret_store_dirs()]
         for index, directory in enumerate(directories):
             if directory in directories[:index]:
@@ -1292,6 +1299,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         status = getattr(self, "_status", None)
         if status is not None:
             status.set_secret_store("reachable" if reasons else "isolated", reasons, enforced=enforced)
+            status.set_web_read(getattr(self, "_tool_selection", None))
         if reasons and enforced:
             for binding in self._state.bindings:
                 self._status_room(binding, connection="stopped", error_code=secret_isolation.REFUSAL_CODE)
@@ -3208,7 +3216,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._publish(self._binding(chat_id), source_id, "lifecycle", status="preparing_response", suppress_errors=True)
 
     async def _watch(self, binding: RoomBinding, *, is_reconnect: bool) -> None:
-        delay = 1.0
+        # Contract P2c-3a: one schedule, no attempt limit, never handed back
+        # to the host; it resets after an accepted registration or a cycle.
+        step = 0
         try:
             while not self._stop.is_set() and binding.enabled and not binding.revoked:
                 try:
@@ -3223,7 +3233,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             code="orphaned_delivery_intent",
                             retryable=False,
                         )
+                    registrations = self._registration_count(binding.room_id)
                     connector = await self._ensure_connector(binding)
+                    if self._registration_count(binding.room_id) != registrations:
+                        step = 0
                     await self._accept_connector_enrollments(binding)
                     await self._ensure_epoch_session_routing(binding)
                     await self._repair_pending_lifecycles(binding)
@@ -3252,7 +3265,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     await self._transport_cycle(binding)
                     self._report_ledger(binding)
                     self._persist_binding(binding)
-                    delay = 1.0
+                    step = 0
                 except asyncio.CancelledError:
                     raise
                 except ProtocolError as error:
@@ -3270,8 +3283,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         return
                     logger.warning("Room %s temporarily unavailable: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
-                    await asyncio.sleep(max(delay, min(error.retry_after, 120.0)))
-                    delay = min(delay * 2, 30)
+                    await asyncio.sleep(reconnect_delay(step, retry_after=error.retry_after, status=error.status))
+                    step += 1
                 except Exception as error:  # noqa: BLE001 - contract P2c-3
                     # An unexpected failure must not end this Room's event
                     # stream until a gateway restart: reconnect with the same
@@ -3280,8 +3293,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         "Room %s connector loop failed (%s); reconnecting", binding.room_id, type(error).__name__,
                     )
                     self._status_room(binding, connection="reconnecting", error_code="connector_error")
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 30)
+                    await asyncio.sleep(reconnect_delay(step))
+                    step += 1
         finally:
             self._tasks.pop(binding.room_id, None)
 
@@ -3392,9 +3405,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata))
         binding.connector_session_id = session["sessionId"]
         registered.add(binding.room_id)
-        self._note_connected(binding, session)
+        counts = getattr(self, "_registrations", None)
+        if counts is None:
+            counts = self._registrations = {}
+        counts[binding.room_id] = counts.get(binding.room_id, 0) + 1
+        self._note_connected(binding, session, registered=True)
         self._persist_binding(binding)
         return session
+
+    def _registration_count(self, room_id: str) -> int:
+        """Accepted registrations of this Room in this process (P2c-3a reset)."""
+        return (getattr(self, "_registrations", None) or {}).get(room_id, 0)
 
     async def _ensure_epoch_session_routing(self, binding: RoomBinding) -> None:
         if binding.epoch_session_routing_initialized:
@@ -3472,11 +3493,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._message_contract_checked.add(binding.room_id)
 
     async def _heartbeat_loop(self, binding: RoomBinding, interval: int) -> None:
-        retry_delay = 0.0
+        # Contract P2c-3a: a failed heartbeat is retried on the reconnect
+        # schedule, not at the heartbeat interval; success resets it.
+        retry_delay: float | None = None
+        step = 0
         try:
             while not self._stop.is_set() and binding.enabled and not binding.revoked:
-                await asyncio.sleep(max(interval, retry_delay))
-                retry_delay = 0.0
+                await asyncio.sleep(interval if retry_delay is None else retry_delay)
+                retry_delay = None
                 if not await self._refresh_binding(binding):
                     return
                 try:
@@ -3499,6 +3523,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         "heartbeat",
                         suppress_errors=True,
                     )
+                    step = 0
                 except ProtocolError as error:
                     if error.revoked:
                         self._revoke(binding)
@@ -3510,20 +3535,32 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     if error.status == 404 or error.code == "connector_not_active":
                         getattr(self, "_registered_rooms", set()).discard(binding.room_id)
-                    # A 429 is a scheduling instruction, not a reason to
-                    # keep probing.  Honour Retry-After before the next
-                    # heartbeat; the room will truthfully show unavailable if
-                    # its lease expires meanwhile.
-                    retry_delay = max(interval, min(error.retry_after, 120.0))
-                    deadline = self._lease_deadline.get(binding.room_id, 0)
-                    if deadline and asyncio.get_running_loop().time() >= deadline:
-                        _connected_rooms.discard(binding.room_id)
-                        # The lease is gone: the next contact registers.
-                        getattr(self, "_registered_rooms", set()).discard(binding.room_id)
-                        if not _connected_rooms:
-                            self._mark_disconnected()
+                    # A 429 is a scheduling instruction: its Retry-After is
+                    # honoured up to 120 s, a 5xx one up to the cap (P2c-3a);
+                    # the room will truthfully show unavailable if its lease
+                    # expires meanwhile.
+                    retry_delay = reconnect_delay(step, retry_after=error.retry_after, status=error.status)
+                    step += 1
+                    self._expire_lease_if_due(binding)
+                except Exception as error:  # noqa: BLE001 - contract P2c-3a
+                    # An unexpected failure never ends the heartbeat; logged by
+                    # type only (no body, no trace).
+                    logger.warning("Room %s heartbeat failed (%s); retrying", binding.room_id, type(error).__name__)
+                    self._status_room(binding, connection="reconnecting", error_code="connector_error")
+                    retry_delay = reconnect_delay(step)
+                    step += 1
+                    self._expire_lease_if_due(binding)
         finally:
             self._heartbeat_tasks.pop(binding.room_id, None)
+
+    def _expire_lease_if_due(self, binding: RoomBinding) -> None:
+        deadline = self._lease_deadline.get(binding.room_id, 0)
+        if deadline and asyncio.get_running_loop().time() >= deadline:
+            _connected_rooms.discard(binding.room_id)
+            # The lease is gone: the next contact registers.
+            getattr(self, "_registered_rooms", set()).discard(binding.room_id)
+            if not _connected_rooms:
+                self._mark_disconnected()
 
     async def _renewal_loop(self) -> None:
         """Bounded renewal discovery even when the only credential has expired."""
@@ -3594,6 +3631,48 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             self._watch(latest, is_reconnect=True), name=f"synthetic-sociality:{room_id}",
                         )
 
+    def _inactive_rooms(self) -> dict[str, float]:
+        rooms = getattr(self, "_inactive_membership_checks", None)
+        if rooms is None:
+            rooms = self._inactive_membership_checks = {}
+        return rooms
+
+    async def _own_membership_status(self, binding: RoomBinding) -> str:
+        """Contract P2c-3b: this membership's status in the Room roster, or ""."""
+        try:
+            state = await self._call(binding, lambda api: api.room_state(binding.room_id))
+        except Exception:  # noqa: BLE001 - an unread state is not an inactive membership
+            return ""
+        roster = state.get("roster") if isinstance(state, dict) else None
+        for entry in roster if isinstance(roster, list) else []:
+            if isinstance(entry, dict) and entry.get("membershipId") == binding.membership_id:
+                status = entry.get("status")
+                return status if isinstance(status, str) else ""
+        return ""
+
+    async def _membership_active_for_enrollments(self, binding: RoomBinding) -> bool:
+        """Contract P2c-3b: False while the membership is muted (inactive)."""
+        rooms = self._inactive_rooms()
+        checked = rooms.get(binding.room_id)
+        if checked is None:
+            return True
+        if time.monotonic() - checked < INACTIVE_RECHECK_SECONDS:
+            return False
+        status = await self._own_membership_status(binding)
+        if status == "muted":
+            rooms[binding.room_id] = time.monotonic()
+            return False
+        rooms.pop(binding.room_id, None)
+        if status == "active":
+            logger.info("Room %s membership is active again; enrollment listing resumes", binding.room_id)
+            self._status_room(binding, inactive=False, connection="connected", error_code="")
+            return True
+        # Not active and not muted, or the state could not be read: the Room
+        # holds no live session; register again at the next contact.
+        self._status_room(binding, inactive=False, connection="reconnecting", error_code="connector_not_active")
+        getattr(self, "_registered_rooms", set()).discard(binding.room_id)
+        return False
+
     async def _accept_connector_enrollments(self, source: RoomBinding) -> None:
         """Durably activate owner-approved Rooms for this exact installation."""
         lock = getattr(self, "_enrollment_lock", None)
@@ -3601,6 +3680,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             lock = asyncio.Lock()
             self._enrollment_lock = lock
         async with lock:
+            if not await self._membership_active_for_enrollments(source):
+                return
             try:
                 pending = await self._call(
                     source,
@@ -3614,6 +3695,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if error.status in {404, 405, 501}:
                     return
                 if error.code == "connector_not_active":
+                    if await self._own_membership_status(source) == "muted":
+                        # Contract P2c-3b: a muted membership is inactive, not
+                        # a lost session: no registration, no listing, a slow
+                        # re-check of the Room state.
+                        self._inactive_rooms()[source.room_id] = time.monotonic()
+                        self._status_room(source, connection="inactive", inactive=True, error_code=error.code)
+                        logger.warning(
+                            "Room %s membership is muted: inactive; enrollment listing paused, Room state "
+                            "re-read at most every %.0fs", source.room_id, INACTIVE_RECHECK_SECONDS,
+                        )
+                        return
                     # Contract P2c-3 (Wu and Real, Mac128, 2026-10-02): the
                     # Room holds no live session for this installation. The
                     # next heartbeat registers it again instead of repeating
@@ -4364,12 +4456,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         more than what is left of the lease. A refusal by the Room is final and
         raised (cycle_no_attempt and cycle_superseded return None, as before);
         a transient failure (no answer, network, 429 or 5xx without a code, or
-        this connector's own renewal pause) is retried every
-        ATTEMPT_RENEWAL_RETRY_SECONDS while the lease is valid and raised once
-        it has run out. Every failure is one log line: no traceback, no body.
+        this connector's own renewal pause) is retried on the P2c-3a schedule
+        capped at ATTEMPT_RENEWAL_RETRY_SECONDS (contract P2c-3c: 1, 2, 4, 5 s)
+        while the lease is valid and raised once it has run out. Every failure
+        is one log line: no traceback, no body.
         """
         cycle_id = str((cycle_attempt.get("cycle") or {}).get("id") or "")
         attempt_id = str((cycle_attempt.get("attempt") or {}).get("id") or "-")
+        step = 0
         while True:
             remaining = _attempt_lease_remaining(cycle_attempt)
             bound = min(self.ATTEMPT_RENEWAL_REQUEST_SECONDS, remaining) if remaining > 0 else self.ATTEMPT_RENEWAL_REQUEST_SECONDS
@@ -4390,7 +4484,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 stop = getattr(self, "_stop", None)
                 if not transient or remaining <= 0 or (stop is not None and stop.is_set()):
                     raise
-                await asyncio.sleep(max(0.001, min(self.ATTEMPT_RENEWAL_RETRY_SECONDS, remaining)))
+                await asyncio.sleep(max(0.001, min(
+                    reconnect_delay(step, cap=self.ATTEMPT_RENEWAL_RETRY_SECONDS), remaining,
+                )))
+                step += 1
 
     async def _claim_discussion_attempt(
         self, binding: RoomBinding, cycle_id: str, request_seconds: float | None = None,
@@ -5972,6 +6069,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         started = (getattr(self, "_session_wait_started", None) or {}).get(room_id)
         if started is None or time.time() - started < SESSION_UNOBSERVABLE_WAIT_SECONDS:
             return True
+        unobservable = getattr(self, "_session_wait_unobservable", None)
+        if unobservable is None:
+            unobservable = self._session_wait_unobservable = set()
+        unobservable.add(room_id)
         logged = getattr(self, "_session_unobservable_logged", None)
         if logged is None:
             logged = self._session_unobservable_logged = set()
@@ -6027,8 +6128,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     def _end_session_wait(self, room_id: str) -> None:
         started = (getattr(self, "_session_wait_started", None) or {}).pop(room_id, None)
+        unobservable = getattr(self, "_session_wait_unobservable", None) or set()
+        reason = "host_session_unobservable" if room_id in unobservable else "host_run_busy"
+        unobservable.discard(room_id)
         if started is not None:
-            self._status_room(None, room_id, gate_wait_seconds=time.time() - started)
+            # Contract P2c-4 (ISSUE-023): the wait and its coded reason.
+            self._status_room(None, room_id, gate_wait_seconds=time.time() - started, gate_wait_reason=reason)
         (getattr(self, "_session_wait_warned", None) or set()).discard(room_id)
 
     def _room_awaits_session(self, room_id: str) -> bool:
@@ -6350,7 +6455,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._lease_deadline.pop(binding.room_id, None)
         return False
 
-    def _note_connected(self, binding: RoomBinding, evidence: dict[str, Any]) -> None:
+    def _note_connected(self, binding: RoomBinding, evidence: dict[str, Any], *, registered: bool = False) -> None:
         remaining = 45.0  # server contract fallback when old servers omit expiry
         raw_expiry = str(evidence.get("leaseExpiresAt") or "")
         if raw_expiry:
@@ -6362,7 +6467,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._lease_deadline[binding.room_id] = asyncio.get_running_loop().time() + remaining
         _connected_rooms.add(binding.room_id)
         self._mark_connected()
-        self._status_room(binding, connected=True)
+        self._status_room(binding, connected=True, registered=registered)
 
     @staticmethod
     def _same_generation(left: RoomBinding, right: RoomBinding) -> bool:
