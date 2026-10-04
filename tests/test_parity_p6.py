@@ -338,21 +338,26 @@ class ParityP5BoundTests(unittest.TestCase):
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_declared_and_registered_hooks_are_equal(self):
-        # Plugin Doctor warned on 1.0.78 and 1.0.79: transform_tool_result was
-        # registered but not declared.
-        declared, section = [], False
-        for line in (ROOT / "plugin.yaml").read_text().splitlines():
-            if not line.startswith(" "):
-                section = line.strip() == "provides_hooks:"
-                continue
-            if section and line.strip().startswith("- "):
-                declared.append(line.strip()[2:].strip())
+    def test_manifest_equals_1_0_79_except_version(self):
+        # The installers (install-hermes-systemd.sh, install-hermes-mac.sh) refuse
+        # a release whose plugin.yaml differs from the installed one in anything
+        # but the version: line ("STOP: plugin.yaml differs beyond version");
+        # 1.0.80 was uninstallable for that reason. A manifest change needs an
+        # installer decision by the owner first.
+        def without_version(path):
+            return [line for line in path.read_text().splitlines() if not line.startswith("version:")]
+
+        fixture = ROOT / "tests" / "fixtures" / "plugin-1.0.79.yaml"
+        self.assertEqual(without_version(ROOT / "plugin.yaml"), without_version(fixture))
+        self.assertIn(f"version: {adapter.CONNECTOR_VERSION}", (ROOT / "plugin.yaml").read_text().splitlines())
+
+    def test_transform_tool_result_is_registered_at_runtime(self):
+        # Registered but not declared: Plugin Doctor warns (known, harmless).
         context = mock.MagicMock()
         adapter.register(context)
         registered = [call.args[0] for call in context.register_hook.call_args_list]
-        self.assertEqual(sorted(declared), sorted(registered))
-        self.assertIn("transform_tool_result", declared)
+        self.assertIn("transform_tool_result", registered)
+        self.assertNotIn("transform_tool_result", (ROOT / "plugin.yaml").read_text())
 
 
 class P6LinkTests(LinkTestCase):

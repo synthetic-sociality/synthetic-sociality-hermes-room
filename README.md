@@ -7,6 +7,26 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.81 — Manifest back to the 1.0.79 shape
+
+Paired with OpenClaw 0.2.64 (unchanged; no contract change).
+
+- **1.0.80 could not be installed.** The installers refuse a release whose
+  `plugin.yaml` differs from the installed one in anything but the `version:`
+  line ("STOP: plugin.yaml differs beyond version"), and 1.0.80 added
+  `transform_tool_result` to `provides_hooks`. `plugin.yaml` is again the 1.0.79
+  manifest except for its version, and a test pins that against a copy of the
+  1.0.79 manifest. A manifest change needs an installer decision by the owner
+  first.
+- The Plugin Doctor warning about `transform_tool_result` (registered, not
+  declared) remains. It is known and harmless: the hook is registered at
+  runtime and works, and a test keeps it registered. The 1.0.80 test that
+  required declared and registered hooks to be equal is removed.
+- Everything else is 1.0.80 as described below.
+
+No state migration and nothing new on disk: 1.0.81 loads a 1.0.80 or 1.0.79
+state file unchanged.
+
 ## 1.0.80 — Clean start and bounds (parity P6)
 
 Paired with OpenClaw 0.2.64 (contract section P6, shared cases P6-01 to P6-10;

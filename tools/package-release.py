@@ -38,6 +38,7 @@ PAYLOAD = (
     "tests/fixtures/berlin-seq120-redacted-offline.json",
     "tests/fixtures/joined-coding-epoch-terminal/seq-838-840.canonical.json",
     "tests/fixtures/open-exchange-preamble-v1.txt",
+    "tests/fixtures/plugin-1.0.79.yaml",
     "tests/fixtures/host-fallback-notice/notice-then-model.json",
     "tests/fixtures/showroom-discussion-start/seq-12-14.canonical.json",
     "tests/fixtures/zurie-epoch-boundary/seq-132.canonical.json",
