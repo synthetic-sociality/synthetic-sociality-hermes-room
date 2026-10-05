@@ -492,7 +492,8 @@
     "P7c-19 a command-source turn whose attempt is renewed by a fresh claim answer before the post posts without respondsTo, a message-source turn names its source": "test_p7c_19_the_command_source_is_kept_through_a_renewal",
     "P7c-20 a Room URL the runtime refuses to form is the connector's own error, never a failed contact, and no request leaves the host": "test_p7c_20_a_room_url_the_runtime_refuses_to_form_is_the_connectors_own_error",
     "P7c-21 a credential the runtime refuses in a header is never in an error, a log line or the status, and the loop fails closed": "test_p7c_21_a_refused_credential_never_appears_in_an_error_a_log_line_or_the_status",
-    "P7c-22 held_by_moderator only for cycle_no_attempt while the Room state holds the refused cycle, and never the holder's name or membership id": "test_p7c_22_held_by_moderator_only_for_a_hold_of_the_refused_cycle"
+    "P7c-22 held_by_moderator only for cycle_no_attempt while the Room state holds the refused cycle, and never the holder's name or membership id": "test_p7c_22_held_by_moderator_only_for_a_hold_of_the_refused_cycle",
+    "P7c-23 a timeout, a DNS failure, a connection reset or a refused connection on a request or on the event read is a failed contact and retried, never the connector's own request_not_formed": "test_p7c_23_a_transient_failure_is_a_failed_contact_never_the_connectors_own_error"
   },
   "parityP7cNoStatusSentence": "Say nothing in a Room message about your tools, access, credentials, model or system status. If you cannot read a source, answer from what you have; do not claim to have read it and invent nothing about its content. You may say what your answer is based on.",
   "parityP7cWordBound": {

@@ -10,10 +10,14 @@ ISSUE-023 follow-ups. No test uses a real credential or talks to a live Room.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import json
+import socket
+import struct
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -22,7 +26,8 @@ from unittest import mock
 
 from test_delivery_lifecycle import ROOT, adapter
 from test_parity_p1 import cycle_attempt, refusal, room_instance, source_ref
-from test_parity_p1a import HUMAN, PEER, START, attempt_ready, build_message, command, cycle, every_prompt
+from test_parity_p1a import (CODING_OWNER_BODY, CODING_ROSTER, CODING_START, HUMAN, PEER, START, attempt_ready,
+                             build_message, coding_message, command, cycle, every_prompt)
 from test_parity_p7a import REAL_SLEEP, FakeRoom, Waits, edge_error, http_error, lost_session, run_watch, watched
 
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
@@ -141,7 +146,7 @@ def claimed_attempt(attempt_id="attempt-1"):
 class P7cConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP7cCases"]
-        self.assertEqual(len(cases), 22)
+        self.assertEqual(len(cases), 23)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P7c-{index:02d} "), name)
@@ -787,6 +792,48 @@ class P7cTests(unittest.TestCase):
                         self.assertIn("Room request refused by the runtime before any I/O", result)
                         self.assertNotIn("example", result)
         self.assertEqual(connects, [])
+        # The other side (OP-12 P7c r3 N1, N2): a Room URL that worked still forms.
+        # An upper-case scheme, leading white space and a Latin-1 host reach the
+        # connect (l7, l6); the scheme check is an allow-list: http and https
+        # reach it, ftp, file, ws and wss are refused before any name lookup (l2).
+        attempts, lookups = [], []
+
+        def refused(address, *_args, **_kwargs):
+            attempts.append(address[0])
+            raise ConnectionRefusedError(111, "Connection refused")
+
+        def no_lookup(host, *_args, **_kwargs):
+            lookups.append(host)
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        with mock.patch("socket.create_connection", refused), mock.patch("socket.getaddrinfo", no_lookup), \
+                mock.patch("socket.gethostbyname", no_lookup), mock.patch("socket.gethostbyname_ex", no_lookup):
+            for url, host in (("http://room.example/api", "room.example"), ("https://room.example/api", "room.example"),
+                              ("HTTPS://room.example/api", "room.example"), ("Https://Room.Example/API", "Room.Example"),
+                              ("HTTP://127.0.0.1:8787/api", "127.0.0.1"), ("  https://room.example/api", "room.example"),
+                              ("\thttp://127.0.0.1:8787/api", "127.0.0.1"), ("http://räume.example/api", "räume.example"),
+                              ("https://räume.example:8443/api", "räume.example")):
+                api = protocol.RoomProtocol(url, "credential")
+                for contact, call in (("request", lambda: api.request("GET", "/rooms/room-1/state")),
+                                      ("stream", lambda: api.stream_events("room-1", 40, lambda _event: True))):
+                    with self.subTest(url=url, contact=contact, formed=True):
+                        attempts.clear()
+                        with self.assertRaises(adapter.ProtocolError) as raised:
+                            call()
+                        self.assertNotIsInstance(raised.exception, protocol.RequestNotFormed)
+                        self.assertTrue(raised.exception.retryable)
+                        self.assertEqual(attempts, [host], "formed: the connect was attempted")
+            attempts.clear()
+            for url in ("ftp://room.example/api", "file://room.example/api", "ws://room.example/api",
+                        "wss://room.example/api", "FTP://room.example/api"):
+                api = protocol.RoomProtocol(url, "credential")
+                for contact, call in (("request", lambda: api.request("GET", "/rooms/room-1/state")),
+                                      ("stream", lambda: api.stream_events("room-1", 40, lambda _event: True))):
+                    with self.subTest(url=url, contact=contact, formed=False):
+                        with self.assertRaises(protocol.RequestNotFormed):
+                            call()
+            self.assertEqual(attempts, [])
+        self.assertEqual(lookups, [], "no name was looked up")
 
     def test_p7c_21_a_refused_credential_never_appears_in_an_error_a_log_line_or_the_status(self):
         # A credential with a character the runtime rejects in a header: the
@@ -880,6 +927,162 @@ class P7cTests(unittest.TestCase):
                     asyncio.run(instance._consume(binding, {**response_ready(52), "id": "ready-51-hold-1"}))
                 self.assertEqual(record.claims, ["cycle-1"] * 2)
                 self.assertEqual(local_status.read(path)["rooms"]["room-1"]["lastGateWaitReason"], reason)
+
+    def test_p7c_23_a_transient_failure_is_a_failed_contact_never_the_connectors_own_error(self):
+        # OP-12 P7c r3 B1: a stop needs a gateway restart, so a transient failure
+        # must never be taken for a request the runtime refused to form. Each kind,
+        # real (loopback listeners, this process's connect and resolver), on a
+        # request and on the event stream: a retryable ProtocolError without a
+        # code, never RequestNotFormed; the watch and heartbeat loops go on.
+        with TransientFaults() as faults:
+            for kind, marker in faults.KINDS.items():
+                for contact in ("register", "stream", "heartbeat"):
+                    with self.subTest(kind=kind, contact=contact):
+                        with self.assertRaises(adapter.ProtocolError) as raised:
+                            faults.fail(kind, contact)
+                        self.assertNotIsInstance(raised.exception, protocol.RequestNotFormed)
+                        self.assertTrue(raised.exception.retryable)
+                        self.assertEqual((raised.exception.code, raised.exception.status), ("", 0))
+                        self.assertIn(marker, str(raised.exception), "the failure is of this kind")
+                with self.subTest(kind=kind, loop="watch"):
+                    room = FakeRoom()
+                    room.register_errors = [lambda kind=kind: faults.fail(kind, "register")]
+                    room.stream_errors = [lambda kind=kind: faults.fail(kind, "stream")]
+                    room.pending_events = [{"id": "evt-after", "type": "message.posted"}]
+                    instance, binding = watched(room)
+                    statuses = recorded_statuses(instance)
+                    with mock.patch.object(asyncio, "sleep", Waits()):
+                        outcome = run_watch(instance, binding, lambda: instance.consumed == ["evt-after"],
+                                            timeout=HANG_GUARD)
+                    self.assertTrue(outcome["reached"] and not outcome["exited"], "the watch loop goes on")
+                    self.assertEqual(room.log[:2], ["register failed", "register"])
+                    self.assertGreaterEqual(statuses.count(("reconnecting", "network")), 2, statuses)
+                    self.assertFalse([entry for entry in statuses if "stopped" in entry or "request_not_formed" in entry])
+                with self.subTest(kind=kind, loop="heartbeat"):
+                    room, beats = FakeRoom(), []
+
+                    def heartbeat(room_id, session, kind=kind):
+                        beats.append(kind)
+                        return faults.fail(kind, "heartbeat") if len(beats) <= 2 else {"leaseExpiresAt": "2099-01-01T00:00:00Z"}
+
+                    room.heartbeat = heartbeat
+                    instance, binding = watched(room)
+                    instance._registered_rooms.add(binding.room_id)
+                    statuses = recorded_statuses(instance)
+                    outcome = {}
+
+                    async def run():
+                        task = asyncio.create_task(instance._heartbeat_loop(binding, 15))
+                        deadline = time.monotonic() + HANG_GUARD
+                        while not task.done() and len(beats) < 4 and time.monotonic() < deadline:
+                            await REAL_SLEEP(0.01)
+                        outcome["exited"] = task.done()
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+                    with mock.patch.object(asyncio, "sleep", Waits()):
+                        asyncio.run(run())
+                    self.assertFalse(outcome["exited"], "the heartbeat loop goes on")
+                    self.assertGreaterEqual(len(beats), 4)
+                    self.assertEqual(statuses.count(("reconnecting", "network")), 2, statuses)
+                    self.assertFalse([entry for entry in statuses if "stopped" in entry or "request_not_formed" in entry])
+
+
+class TransientFaults:
+    """P7c-23: the transient failures of a Room contact, real: a response
+    timeout (a loopback peer that accepts and never answers), a connection reset
+    (a loopback peer that reads the request and resets), a refused connection (a
+    closed loopback port); a connect timeout and a DNS failure as this process's
+    connect and resolver raise them. Each kind with a word of its message."""
+
+    KINDS = {"response timeout": "timed out", "connect timeout": "timed out", "DNS failure": "Name or service not known",
+             "connection reset": "reset", "connection refused": "refused"}
+
+    def __enter__(self):
+        self.listeners, self.held = {}, []
+        for kind in ("response timeout", "connection reset"):
+            listener = socket.create_server(("127.0.0.1", 0))
+            self.listeners[kind] = listener
+            threading.Thread(target=self._serve, args=(kind, listener), daemon=True).start()
+        closed = socket.create_server(("127.0.0.1", 0))
+        self.closed_port = closed.getsockname()[1]
+        closed.close()
+        return self
+
+    def __exit__(self, *_exc):
+        for item in (*self.listeners.values(), *self.held):
+            item.close()
+
+    def _serve(self, kind, listener):
+        while True:
+            try:
+                peer, _address = listener.accept()
+            except OSError:
+                return
+            received = b""
+            try:
+                peer.settimeout(HANG_GUARD)
+                while b"\r\n\r\n" not in received:
+                    chunk = peer.recv(65536)
+                    if not chunk:
+                        break
+                    received += chunk
+                head, _, body = received.partition(b"\r\n\r\n")
+                length = next((int(line.split(b":", 1)[1]) for line in head.split(b"\r\n")
+                               if line.lower().startswith(b"content-length:")), 0)
+                while len(body) < length:
+                    chunk = peer.recv(65536)
+                    if not chunk:
+                        break
+                    body += chunk
+            except OSError:
+                pass
+            if kind == "connection reset":
+                # The whole request was read; a close without lingering sends RST.
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                peer.close()
+            else:
+                self.held.append(peer)
+
+    def fail(self, kind, contact):
+        """Make the real ``contact`` (register, stream or heartbeat) fail with ``kind``; raise what the client raises."""
+        port = self.listeners[kind].getsockname()[1] if kind in self.listeners else self.closed_port
+        host = "room.invalid" if kind == "DNS failure" else "127.0.0.1"
+        api = protocol.RoomProtocol(f"http://{host}:{port}/api", "credential", timeout=0.3)
+        calls = {"register": lambda: api.register_connector("room-1", "inst-1", {}),
+                 "stream": lambda: api.stream_events("room-1", 0, lambda _event: True),
+                 "heartbeat": lambda: api.heartbeat("room-1", "session-1")}
+        real_urlopen = protocol._urlopen
+
+        def timed_out(*_args, **_kwargs):
+            raise TimeoutError("timed out")
+
+        def unresolved(*_args, **_kwargs):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        with contextlib.ExitStack() as patches:
+            # The stream's 75 s read bound, shortened; the request path's is the client's timeout.
+            patches.enter_context(mock.patch.object(protocol, "_urlopen", lambda request, *, timeout: real_urlopen(
+                request, timeout=min(timeout, 0.3))))
+            if kind == "connect timeout":
+                patches.enter_context(mock.patch("socket.create_connection", timed_out))
+            if kind == "DNS failure":
+                patches.enter_context(mock.patch("socket.getaddrinfo", unresolved))
+            calls[contact]()
+        raise AssertionError(f"{kind}: the {contact} did not fail")
+
+
+def recorded_statuses(instance):
+    """Every (connection, error_code) the loops report for the Room, in order."""
+    statuses, report = [], instance._status_room
+
+    def record(binding, room_id="", **fields):
+        statuses.append((fields.get("connection"), fields.get("error_code")))
+        return report(binding, room_id, **fields)
+
+    instance._status_room = record
+    return statuses
+
 
 # The one log line of a stop (adapter._fail_closed_on_request), as captured below.
 STOP_LINE = (f"{adapter.logger.name} ERROR Room room-1 request refused by the runtime before any I/O "
@@ -1000,6 +1203,15 @@ def turn_kinds(**options):
                                                 **options).text, "\nMissed earlier: #42 Owner; "),
         "discussion start as the current item": (build_message(attempt_ready(50, 1, source="start-2"), attempt=cycle(),
                                                                **options).text, "\n\nOwner: Patient and doctor\n\n"),
+        # The source message older than the loaded context, found by the bounded
+        # older-source scan (P1a-8, the P1a-12 fixture; OP-12 P7c r3 N3, a9).
+        "source found by the older-source scan": (
+            build_message(attempt_ready(1250, 1, source="msg-1020"), attempt=cycle(used=0), roster=CODING_ROSTER,
+                          context=(CODING_START, coding_message(1020, "owner-1", "human_owner", CODING_OWNER_BODY),
+                                   *(coding_message(1100 + 8 * index, "paula-1" if index % 2 else "member-1",
+                                                    "participant_agent", f"Later note {index}.") for index in range(16))),
+                          starts_at=1002, **options).text,
+            f"#1020 TJE: {CODING_OWNER_BODY}"),
     }
 
 
