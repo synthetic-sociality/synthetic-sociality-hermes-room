@@ -188,21 +188,42 @@ P2c-3 Self-reconnect. After a network loss or an expired connector session, the 
 session and event stream by itself, with bounded backoff, without a host restart, as long as its credential is valid.
 A credential that is revoked or expired follows the existing revocation/renewal rules instead.
 
-P2c-3a Reconnect schedule (2026-10-05). A failed contact with the Room (a network error, an HTTP 5xx or 429, a response
-that is not the expected JSON, or an event page whose active epoch metadata is invalid) is retried on one schedule. The
-wait before the n-th consecutive retry has a base of min(2^(n-1), 15) seconds (1, 2, 4, 8, 15, 15, ... s) and is
-multiplied by a factor drawn uniformly from [0.8, 1.0], so the first retry follows the failure within 1 s and no wait
-is longer than 15 s. A `Retry-After` on a 5xx or a network error lengthens a wait to at most 15 s; a `Retry-After` on a
-429 lengthens it to at most 120 s (the existing bound, Hermes `parse_retry_after`, OpenClaw `parseRetryAfter`). A
-`Retry-After` never shortens a wait. There is no attempt limit while the credential is valid: the connector never ends a
-Room connection for such a failure and never hands it back to the host to restart (OpenClaw: the channel's start does
-not throw and the host's restart schedule is not used for it). The schedule of a loop resets to its first step after an
-accepted registration and after any other successful contact of the same loop. It applies alike to registration,
-heartbeat, the event stream (SSE or long poll) and the enrollment listing, whatever the Room's base URL (a loopback
-address or the public origin). A failed heartbeat is retried on this schedule, not at the heartbeat interval. A failed
-enrollment listing (other than P2c-3b) leaves the connection state as it is and is tried again at the next heartbeat.
-An invalid event page is never processed; its events are read again from the same cursor. A revoked or expired
-credential follows P2c-3, and the device link (L1-8) uses the same schedule.
+P2c-3a Reconnect schedule (2026-10-05, round 2). A failed contact with the Room is retried on one schedule. A
+failed contact is exactly one of: a network failure (the host runtime's transport failure or a request timeout: Node
+a `TypeError` `fetch failed` with a network cause, Python an `OSError` or `http.client.HTTPException`; an abort is not
+a failure), an HTTP 5xx or 429, an answer whose body is not the Room's JSON, a Room JSON error marked `retryable`, or
+an invalid event page. An answer whose body is not the Room's JSON (a proxy or edge error page), with any HTTP status
+including 401, 403, 404 and 413, is a failed contact: it never ends a loop or the Room connection, never quarantines
+or supersedes a post and never counts as a credential answer. Only the Room's own JSON error decides that a credential
+is revoked or expired, that a session or object is not found, or that a body is too large. Any other failure is not a
+failed contact and is handled as before (OpenClaw: a programming error or a local failure such as a full disk ends the
+channel; Hermes: the loop logs its type and starts its pass again, P2c-3). The wait before the n-th consecutive retry
+has a base of min(2^(n-1), 15) seconds (1, 2, 4, 8, 15, 15, ... s) and is multiplied by a factor drawn uniformly from
+[0.8, 1.0], so the first retry follows the failure within 1 s and no wait is longer than 15 s. A `Retry-After` on a
+5xx or a network error lengthens a wait to at most 15 s; a `Retry-After` on a 429 lengthens it to at most 120 s (the
+existing bound, Hermes `parse_retry_after`, OpenClaw `parseRetryAfter`). A `Retry-After` never shortens a wait. There
+is no attempt limit while the credential is valid: the connector never ends a Room connection for such a failure and
+never hands it back to the host to restart (OpenClaw: neither the channel's start nor a Room contact of the channel
+loop throws for it, and the host's restart schedule is not used for it). The schedule of a loop returns to its first
+step only when the contact that last failed in that loop succeeds, or when a full pass of the loop completes without a
+failure; an accepted registration alone does not reset it. A loop does not register again while the Room still
+accepts its session: it registers again only when the Room said in its JSON that the session is lost (HTTP 404, or
+`connector_not_active` outside P2c-3b) or when no registration was accepted yet in this runtime; two existing
+re-registrations stay: after a credential renewal (P2c-3) and, in Hermes, when the session's lease ran out without an
+accepted heartbeat (the Room expires such a session). It applies alike to registration, heartbeat, the event stream
+(SSE or long poll) and the enrollment listing, whatever the Room's base URL (a loopback address or the public
+origin). A failed heartbeat is retried on this schedule, not at the heartbeat interval, and the heartbeat's schedule
+returns to its first step after a successful heartbeat. A failed enrollment listing (other than P2c-3b) leaves the
+connection state as it is and is tried again at the next heartbeat. An event page is invalid when it is not a JSON
+object whose `events`, when present, is a list of objects, or when its active epoch metadata is invalid where the
+connector reads that metadata (OpenClaw). An invalid event page is never processed, wherever it is read: on the event
+stream and on the context read of a turn its events are read again from the same cursor on this schedule, the turn is
+not lost and the Room connection does not end; a bounded look-up of one earlier item (P2a-3, P2c-2, P5-2, P6-1)
+proceeds without that page, as for any failed read of it. A Room contact made for a turn after its host run (the
+settle of its attempt and the acknowledgement of its source) is retried on this schedule when it fails this way; the
+turn's terminal evidence stays durable meanwhile, and an attempt whose settle is retried is no longer renewed, so the
+Room ends it with its lease (P1-1, P2c-3c). A revoked or expired credential follows P2c-3, and the device link (L1-8)
+uses the same schedule.
 
 P2c-3b Inactive membership (2026-10-05). The Room answers `connector_not_active` (HTTP 401) on the enrollment listing
 when the calling membership is not `active`. A `muted` membership may still register, heartbeat and read the Room state
@@ -210,7 +231,8 @@ and events; a `left` or `removed` membership is refused on every route with `cre
 revocation rule. On `connector_not_active` from the enrollment listing the connector reads the Room state once and
 looks up its own membership in `roster`. When that entry's `status` is `muted`, the membership is inactive: the
 connector keeps its session, heartbeat and event stream, does not register again, and does not call the enrollment
-listing with that membership; the status `connection` is `inactive` and `lastErrorCode` stays `connector_not_active`.
+listing with that membership; the status `connection` is `inactive` and `lastErrorCode` stays `connector_not_active`
+while the connection is otherwise up (P2c-4).
 While inactive it reads the Room state again at most every 60 seconds, at a heartbeat; when the entry is `active`, the
 membership is active again: the enrollment listing resumes at that heartbeat and `connection` returns to `connected`.
 Any other answer (the entry is `active` or missing, or the state read fails) means the Room holds no live session: the
@@ -232,7 +254,9 @@ selection. The connector neither adds nor removes web tools and has no web tool 
 whether a web reading tool is in the host's selection (status `webRead`, P2c-4): `available` with the names found,
 `unavailable` when the host reports a selection without one, `unknown` when the host does not report its selection.
 The names that count are `web_search`, `web_extract`, `web_fetch`, `browser` and `browser_navigate`. Hermes takes the
-selection core resolves for the profile (`_core_tool_selection`, P3-7). OpenClaw 2026.7.1-2 gives a channel plugin no
+selection core resolves for a gateway turn of the platform `synthetic_sociality` (the gateway's own configuration
+loader, core `_get_platform_tools` for that platform and `agent.disabled_toolsets`), never the profile-wide selection
+of P3-7; when core does not offer that resolution to the plugin, the value is `unknown`. OpenClaw 2026.7.1-2 gives a channel plugin no
 resolved tool list; its connector reports `unknown` until the host's own tool-call hook names a web reading tool in a
 Room turn, then `available` with that name. The connector never infers the value from configuration.
 
@@ -282,9 +306,9 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `webReadTools` | array of strings | P2c-6: the web reading tool names found, names only; empty unless `available` |
 | `rooms` | object | one entry per configured Room, keyed by Room id |
 | `rooms.<id>.membershipId` | string | the Room membership |
-| `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting`, `inactive` (P2c-3b) or `stopped` |
+| `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting`, `inactive` (P2c-3b) or `stopped`; `stopped` and `reconnecting` win over `inactive`, which is shown only while the membership is muted and the connection is otherwise up; a revoked credential shows `stopped` with `credential_revoked`; after an unmute or a new registration the value is `connected` |
 | `rooms.<id>.lastConnectedAt` | string or null | the last accepted registration or heartbeat |
-| `rooms.<id>.lastErrorCode` | string | the last error code (a server code from `errorCodes`, or a connector code such as `network`, `session_lost`, `secret_store_reachable`); empty when none |
+| `rooms.<id>.lastErrorCode` | string | the last error code (a server code from `errorCodes`, or a connector code such as `network`, `session_lost`, `secret_store_reachable`, `http_<status>`, `invalid_json_response` (an answer whose body is not the Room's JSON, P2c-3a) or `invalid_event_page` (P2c-3a)); empty when none |
 | `rooms.<id>.lastErrorAt` | string or null | when it was recorded |
 | `rooms.<id>.lastGateWaitSeconds` | number | the last wait on a host gate before dispatch, in seconds |
 | `rooms.<id>.lastGateWaitAt` | string or null | when that wait ended |

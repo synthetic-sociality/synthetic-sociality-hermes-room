@@ -451,10 +451,17 @@
     "P7a-03 a 5xx with Retry-After 300: the next attempt within the cap": "test_p7a_03_5xx_retry_after_300_waits_at_most_the_cap",
     "P7a-04 a 429 with Retry-After: the 120 s bound is kept": "test_p7a_04_429_retry_after_keeps_the_120_s_bound",
     "P7a-05 a muted membership is inactive, not retried on the seconds schedule, and active again after the slow re-check": "test_p7a_05_a_muted_membership_is_inactive_and_rechecked_slowly",
-    "P7a-06 more than 10 consecutive failures: still retrying": "test_p7a_06_more_than_10_failures_still_retrying",
+    "P7a-06 more than 10 consecutive failures: still retrying, every wait within the schedule and its jitter": "test_p7a_06_more_than_10_failures_still_retrying",
     "P7a-07 a transient attempt-renewal failure is retried within 1 s and never past the lease": "test_p7a_07_attempt_renewal_retries_within_1_s_and_never_past_the_lease",
     "P7a-08 the status records the reconnect time, the outage length and a coded dispatch-wait reason": "test_p7a_08_status_reconnect_time_outage_and_gate_wait_reason",
-    "P7a-09 web reading is reported from the host's own tool selection, unknown when the host cannot report it": "test_p7a_09_web_reading_reported_from_the_host_tool_selection"
+    "P7a-09 web reading is reported from the host's own tool selection, unknown when the host cannot report it": "test_p7a_09_web_reading_reported_from_the_host_tool_selection",
+    "P7a-10 an HTML 403 once and an HTML 404 once on the event read, on the heartbeat and on a post: the loop continues, the post stays retryable, no quarantine": "test_p7a_10_html_error_pages_are_failed_contacts",
+    "P7a-11 an invalid page on the context read of a turn, once: the turn is not lost, the channel does not end, the page is not processed": "test_p7a_11_an_invalid_context_page_is_read_again",
+    "P7a-12 a partial outage, the event read succeeds and a later contact fails every time, or every heartbeat fails: the waits grow to the cap and the registrations stay at one": "test_p7a_12_a_partial_outage_backs_off_without_registering",
+    "P7a-13 a transient failure of the attempt settle and of the acknowledgement after a host run: retried on the schedule inside the connector, the connection stays, the source is acknowledged when the Room answers": "test_p7a_13_settle_and_acknowledgement_retry_inside_the_connector",
+    "P7a-14 the status tells the truth: inactive only while muted and otherwise up, stopped and reconnecting win, a revoked credential shows stopped with credential_revoked, connected after an unmute or a new runtime": "test_p7a_14_status_connection_precedence",
+    "P7a-15 a failed heartbeat is retried on the schedule, not at the heartbeat interval, and its step returns to the first after a successful heartbeat": "test_p7a_15_heartbeat_retry_schedule_and_reset",
+    "P7a-16 the attempt renewal and the re-claim before a post retry on the schedule capped at 5 s at the call": "test_p7a_16_renewal_and_reclaim_capped_at_5_s"
   },
   "parityP7aReconnectSchedule": {"firstSeconds": 1, "capSeconds": 15, "jitterFactor": [0.8, 1.0], "retryAfter5xxMaxSeconds": 15, "retryAfter429MaxSeconds": 120, "attemptRenewalCapSeconds": 5, "inactiveRecheckSeconds": 60},
   "parityP7aWebReadToolNames": ["browser", "browser_navigate", "web_extract", "web_fetch", "web_search"],
@@ -463,7 +470,7 @@
     "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "bef5ce6b849f40d7f6714bfbf8e6a171b101943bdafe496acf9a59e06425d889",
-    "Appendix": "105f61d0c35a24eeee8fce02d146da41868812bfea97cae59594191c2b8e20ee"
+    "P2c": "e7daef299584fbe4a942c1c23bd72979520727f1aeeeff1d272aca484a3508c5",
+    "Appendix": "a7133e1665a45833c71f376f975cc8ab591084beb9db81533f9a4b91f9dde338"
   }
 }
