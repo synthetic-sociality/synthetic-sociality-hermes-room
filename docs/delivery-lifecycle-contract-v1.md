@@ -200,9 +200,11 @@ Room's answer, is never followed to another host and is a failed contact. An abo
 signal is not a failure: every retry loop (start, scan or stream, event read, heartbeat, and the retry of a settle or
 an acknowledgement) ends on it at once, without a further contact (Hermes: on the stop or a cancellation of its task).
 An error raised by the connector's own code before or after the request (a programming error, a local write failure)
-is not a network failure; nor is a request the runtime refuses to form before any I/O (OpenClaw: `fetch` rejecting
-its arguments, such as a header value it does not accept; Hermes: `http.client` rejecting a header or URL), which is
-the connector's own error. An answer whose body is not the Room's JSON (a proxy or edge error page), with any HTTP
+is not a network failure; nor is a request the runtime refuses to form before any I/O (a header value or a Room URL
+it does not accept; OpenClaw: the URL parser and `fetch`'s argument check, run when the client is made and on a
+`Request` built before the request; Hermes: `http.client` forming the request line and headers before it opens a
+connection), which is the connector's own error and is handled as such below (OpenClaw ends the channel; Hermes
+records `connector_error` and starts its pass again on the schedule; in neither does a request leave the host). An answer whose body is not the Room's JSON (a proxy or edge error page), with any HTTP
 status including 401, 403, 404 and 413, is a failed contact: it never ends a loop or the Room connection, never
 quarantines or supersedes a post and never counts as a credential answer. Only the Room's own JSON error decides that
 a credential is revoked or expired, that a session or object is not found, or that a body is too large. Any other
@@ -328,7 +330,7 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `rooms.<id>.lastErrorAt` | string or null | when it was recorded |
 | `rooms.<id>.lastGateWaitSeconds` | number | the last wait on a host gate before dispatch, in seconds |
 | `rooms.<id>.lastGateWaitAt` | string or null | when that wait ended |
-| `rooms.<id>.lastGateWaitReason` | string | why that wait happened: `host_run_busy` (an earlier host run of this Room still held its session) or `host_session_unobservable` (Hermes only: core could not report the release; the bounded wait of P2a-1 ran out) or `held_by_moderator` (a claim was refused while the Room state showed a hold, P7c-5; the wait is 0); empty when the dispatch did not wait on the host (ISSUE-023) |
+| `rooms.<id>.lastGateWaitReason` | string | why that wait happened: `host_run_busy` (an earlier host run of this Room still held its session) or `host_session_unobservable` (Hermes only: core could not report the release; the bounded wait of P2a-1 ran out) or `held_by_moderator` (a claim was refused with `cycle_no_attempt` while the Room state showed a hold, P7c-5; the wait is 0; cleared when a later claim of that Room succeeds); empty when the dispatch did not wait on the host (ISSUE-023) |
 | `rooms.<id>.lastReconnectedAt` | string or null | when the connection was last re-established by an accepted registration after a failure (P2c-3a); `lastConnectedAt` keeps its meaning |
 | `rooms.<id>.lastOutageSeconds` | number | seconds from the first failure of that outage to `lastReconnectedAt`; 0 before the first reconnect |
 | `rooms.<id>.acknowledgedSeq` | integer | the Room's acknowledged seq (P3-3) |
@@ -690,11 +692,16 @@ active cycle, so the connector does not try to decide this itself. A response tu
 like any cycle turn: the message named by its `sourceEventId` is the current item, and `phaseInstruction` is passed
 verbatim as the Room's instruction (P1a-2); the connector adds no wording about the interruption. A reply names the
 turn's source in `respondsTo` only when that source is a message: when the connector knows the source to be a
-`human.command` (the source of an `ask` or `summarize` cycle), the post carries no `respondsTo`.
+`human.command` (the source of an `ask` or `summarize` cycle), the post carries no `respondsTo`. The connector
+decides this once for the turn, when it builds the turn, and keeps the fact where a lease renewal cannot replace it (a
+renewal's claim answer is a new object without it; OpenClaw: the turn's reply target; Hermes: a record per turn beside
+the attempt). The request frozen for delivery carries it: a restart after the freeze posts as frozen; a restart
+before the freeze builds the turn again from the Room's events and decides again.
 
 P7c-2 Own voice. In every transcript the connector renders for the model (the Room context of a turn, including the
 closing-summary turn, the Room-context tool and the history tool), an entry whose `actorId` is the connector's own
-membership id is marked as the agent's own: its speaker label (P1a-7) is followed by ` (you)`. A transcript entry is
+membership id is marked as the agent's own: its speaker label (P1a-7) is followed by ` (you)`; by `actorId` only, so
+an entry of another member with the same display name is not marked and is never named `you`. A transcript entry is
 rendered identically in both connectors: `#<seq> ` (only for a seq of at least 1), the speaker label, ` (you)` for an
 own entry, then ` (reply to <names>)` when the entry's `respondsTo` names posts, then `: ` and the body, trimmed.
 The names are the labels of the referenced posts among the messages the connector read for that context (`you` for an
@@ -715,8 +722,10 @@ sentence: "Say nothing in a Room message about your tools, access, credentials, 
 read a source, answer from what you have; do not claim to have read it and invent nothing about its content. You may
 say what your answer is based on." When the Room guidance rendered for that turn (P6-4) already contains this text,
 the frame does not add it again. The comparison tolerates surrounding white space and paragraph breaks and nothing
-else: in the guidance, every run of white space that contains a line break counts as one space, and the sentence must
-then occur in it character for character (no case folding, no other white space, no punctuation tolerance). The
+else: in the guidance, every run of ASCII white space (space, tab, CR, LF, FF, VT) that contains a line feed counts as
+one space, and the sentence must then occur in it character for character (no case folding, no other white space, no
+punctuation tolerance). A tab, a carriage return or any other white space without a line feed in its run is not a
+paragraph break. The
 Harness default guidance of every mode carries the sentence as its own paragraph (Harness b70aff3e,
 `packages/client/ui-sociality-room/src/client/policy-mode-texts.ts`, `POLICY_MODE_COMMON_TEXT`); both repositories
 pin the stored Showroom text, `parityP7cShowroomGuidance` in `conformance.json`. It is an instruction to the model, not a filter: the connector posts any reply
@@ -726,7 +735,9 @@ body; a missing web tool is reported only as `webRead` (P2c-6).
 P7c-5 Hold (ISSUE-026). A claim refused with `409 cycle_no_attempt` is dropped as before: no post, no retry, the
 event acknowledged, the source noted as missed (P2a-3). When the Room state read for that turn has an `activeHold`
 object, the connector also records the coded reason `held_by_moderator` for that Room in its status
-(`lastGateWaitReason`, with `lastGateWaitSeconds` 0, P2c-4); never the holder's name or any text. The announcement
+(`lastGateWaitReason`, with `lastGateWaitSeconds` 0, P2c-4); never for another refusal such as `cycle_superseded`,
+and never the holder's name or any text. The reason is cleared (empty, wait 0) when a later claim of that Room
+succeeds, a renewal included. The announcement
 the Room repeats after the hold (idempotency key ending `-hold-<n>`) is an ordinary new offer and is claimed and
 answered once. A turn already claimed keeps renewing through a hold. The Room sends no instruction text about a hold;
 the connector renders none of its own.
