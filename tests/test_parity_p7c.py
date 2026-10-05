@@ -682,17 +682,18 @@ class P7cLeftoverTests(unittest.TestCase):
         # P6-5: remembered per Room and source. An entry for another source of
         # the same Room never stands in for this turn's source.
         older = [{"id": f"m-{seq}", "seq": seq, "type": "message.posted", "actorRole": "human_owner",
-                  "actorId": "owner-1", "payload": {"body": f"Message {seq}."}} for seq in range(42, 80)]
+                  "actorId": "owner-1", "payload": {"body": f"Message {seq}."}} for seq in range(42, 251)]
 
         # Two turns of one connector: the first scans for m-43, the second for m-44.
+        # Both lie outside the first context chunk (CONTEXT_SCAN_CHUNK = 100 before the turn).
         kept = []
-        first = build_message(attempt_ready(80, 2, source="m-43"), attempt=claimed_attempt(),
+        first = build_message(attempt_ready(300, 2, source="m-43"), attempt=claimed_attempt(),
                               context=(START, *older), keep_instance=kept)
         self.assertIn("#43 Owner: Message 43.", first.text)
         instance, binding = kept[0]
         captured = []
         instance.handle_message = lambda message: asyncio.sleep(0, result=captured.append(message))
-        second_event = attempt_ready(81, 2, source="m-44")
+        second_event = attempt_ready(301, 2, source="m-44")
         instance._cycle_attempts[second_event["id"]] = claimed_attempt()
         instance._event_epoch[second_event["id"]] = "epoch-2"
         self.assertTrue(asyncio.run(instance._dispatch_room_event(binding, second_event, "generation")))
