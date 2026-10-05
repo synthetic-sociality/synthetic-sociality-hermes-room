@@ -5300,7 +5300,7 @@ class ConnectorEnrollmentTests(unittest.TestCase):
     def test_protocol_normalizes_successful_html_spa_fallback(self):
         protocol = adapter.RoomProtocol("https://room.example/api", "credential")
         response = self._Response(b"<!doctype html><title>Room</title>")
-        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+        with mock.patch.object(room_protocol, "_urlopen", return_value=response):
             with self.assertRaises(adapter.ProtocolError) as raised:
                 protocol.connector_enrollments("installation-1")
 
@@ -5321,13 +5321,13 @@ class ConnectorEnrollmentTests(unittest.TestCase):
             {},
             io.BytesIO(b""),
         )
-        with mock.patch.object(room_protocol.urllib.request, "urlopen", side_effect=missing):
+        with mock.patch.object(room_protocol, "_urlopen", side_effect=missing):
             with self.assertRaises(adapter.ProtocolError) as raised:
                 protocol.connector_enrollments("installation-1")
         self.assertEqual(raised.exception.status, 404)
 
         response = self._Response(b"")
-        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+        with mock.patch.object(room_protocol, "_urlopen", return_value=response):
             with self.assertRaisesRegex(adapter.ProtocolError, "malformed connector enrollments"):
                 protocol.connector_enrollments("installation-1")
 
@@ -5335,13 +5335,13 @@ class ConnectorEnrollmentTests(unittest.TestCase):
         protocol = adapter.RoomProtocol("https://room.example/api", "credential")
 
         response = self._Response(b"[null]")
-        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+        with mock.patch.object(room_protocol, "_urlopen", return_value=response):
             with self.assertRaises(adapter.ProtocolError) as raised:
                 protocol.connector_enrollments("installation-1")
         self.assertEqual(raised.exception.code, "connector_enrollments_malformed")
 
         response = self._Response(b"[]")
-        with mock.patch.object(room_protocol.urllib.request, "urlopen", return_value=response):
+        with mock.patch.object(room_protocol, "_urlopen", return_value=response):
             with self.assertRaises(adapter.ProtocolError) as raised:
                 protocol.claim_connector_enrollment("invite-1", "installation-1")
         self.assertEqual(raised.exception.code, "connector_enrollment_malformed")

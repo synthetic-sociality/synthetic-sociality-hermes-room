@@ -119,6 +119,26 @@ def _error_envelope(raw: bytes) -> dict[str, Any] | None:
     return envelope if isinstance(envelope, dict) else None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Contract P2c-3a: the Room never redirects. A 3xx is answered as the
+    HTTPError it is, never followed, so the credential never goes to another
+    host (as link.py)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401, ANN001
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
+def _urlopen(request: urllib.request.Request, *, timeout: float):
+    return _OPENER.open(request, timeout=timeout)
+
+
+def _redirect(error: urllib.error.HTTPError) -> bool:
+    return 300 <= error.code < 400
+
+
 @dataclass(frozen=True)
 class InvitationCapability:
     base_url: str
@@ -192,7 +212,7 @@ class RoomProtocol:
             headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(self.base_url + path, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _urlopen(request, timeout=self.timeout) as response:
                 raw = response.read(MAX_JSON_RESPONSE_BYTES + 1)
                 if len(raw) > MAX_JSON_RESPONSE_BYTES:
                     raise ProtocolError(
@@ -218,10 +238,11 @@ class RoomProtocol:
         except urllib.error.HTTPError as error:
             raw = error.read(1 << 16)
             retry_after = parse_retry_after(error.headers.get("Retry-After", "") if error.headers else "")
-            envelope = _error_envelope(raw)
+            envelope = None if _redirect(error) else _error_envelope(raw)
             if envelope is None:
                 # Contract P2c-3a: an edge or proxy page (HTML, text, empty),
-                # whatever its status, is a failed contact, not a Room answer.
+                # whatever its status, or a redirect, is a failed contact,
+                # not a Room answer.
                 raise ProtocolError(
                     f"Room API answered HTTP {error.code} without the Room's JSON",
                     status=error.code, retryable=True, retry_after=retry_after, non_json=True,
@@ -239,6 +260,9 @@ class RoomProtocol:
         # as an OSError/HTTPException while opening or reading the response.
         # Normalize all transport failures so the long-running adapter loops
         # apply their bounded reconnect policy instead of terminating a task.
+        # Contract P2c-3a: this covers every transport reason (refused, reset,
+        # DNS, timeout, TLS and certificate failures are OSErrors; a non-HTTP
+        # answer and a cut body are HTTPExceptions); no cause is listed.
         except (OSError, http.client.HTTPException) as error:
             raise ProtocolError(f"Room API unavailable: {error}", retryable=True) from None
 
@@ -428,7 +452,7 @@ class RoomProtocol:
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=75) as response:
+            with _urlopen(request, timeout=75) as response:
                 content_type = response.headers.get("Content-Type", "")
                 if not content_type.startswith("text/event-stream"):
                     raise ProtocolError(f"SSE unavailable: unexpected content type {content_type!r}", retryable=True)
@@ -436,7 +460,11 @@ class RoomProtocol:
                 ready: dict[str, Any] = {}
                 cursor = after
                 for encoded in response:
-                    line = encoded.decode("utf-8").rstrip("\r\n")
+                    try:
+                        line = encoded.decode("utf-8").rstrip("\r\n")
+                    except UnicodeDecodeError:
+                        # Contract P2c-3a: a body that cannot be decoded.
+                        raise ProtocolError("SSE returned a body that is not UTF-8", retryable=True) from None
                     if line.startswith(":"):
                         if not on_event({}):
                             break
@@ -474,9 +502,10 @@ class RoomProtocol:
         except urllib.error.HTTPError as error:
             raw = error.read(1 << 16)
             retry_after = parse_retry_after(error.headers.get("Retry-After", "") if error.headers else "")
-            envelope = _error_envelope(raw)
+            envelope = None if _redirect(error) else _error_envelope(raw)
             if envelope is None:
-                # Contract P2c-3a: an edge or proxy page is a failed contact.
+                # Contract P2c-3a: an edge or proxy page, or a redirect, is a
+                # failed contact.
                 raise ProtocolError(
                     f"SSE answered HTTP {error.code} without the Room's JSON",
                     status=error.code, retryable=True, retry_after=retry_after, non_json=True,

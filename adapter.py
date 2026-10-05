@@ -3584,6 +3584,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         try:
             while not self._stop.is_set() and binding.enabled and not binding.revoked:
                 await asyncio.sleep(interval if retry_delay is None else retry_delay)
+                if self._stop.is_set():
+                    return  # Contract P2c-3a: no contact after the stop.
                 retry_delay = None
                 if not await self._refresh_binding(binding):
                     return
@@ -4636,6 +4638,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                                    binding.room_id, _status_error_code(error))
                 self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                 await asyncio.sleep(reconnect_delay(step, retry_after=error.retry_after, status=error.status))
+                if stop is not None and stop.is_set():
+                    raise  # Contract P2c-3a: no contact after the stop.
                 step += 1
         failure = payload.get("executionFailure") or {}
         logger.info(
@@ -5945,6 +5949,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 stop = getattr(self, "_stop", None) or asyncio.Event()
                 while not stop.is_set() and binding.enabled and not binding.revoked:
                     await asyncio.sleep(reconnect_delay(step, retry_after=last.retry_after, status=last.status))
+                    if stop.is_set():
+                        return  # Contract P2c-3a: no contact after the stop.
                     step += 1
                     seq = binding.acknowledged_cursor + 1
                     if not self._terminal_evidence_valid(

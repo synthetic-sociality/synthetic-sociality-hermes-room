@@ -67,7 +67,7 @@ class ProtocolAddressesTests(unittest.TestCase):
             captured.update(json.loads(request.data.decode()))
             return self._Response()
 
-        with mock.patch.object(room_protocol.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with mock.patch.object(room_protocol, "_urlopen", side_effect=fake_urlopen):
             protocol.post_message("room-1", "", 10, "source-10", "Answer", "epoch-1", **kwargs)
         return captured
 

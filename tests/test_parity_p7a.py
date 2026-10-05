@@ -15,8 +15,11 @@ the calling function) and compressed to milliseconds.
 from __future__ import annotations
 
 import asyncio
+import http.server
 import io
 import json
+import socketserver
+import ssl
 import sys
 import tempfile
 import threading
@@ -56,7 +59,7 @@ class Waits:
 def edge_error(status, body=b"<html><body>edge error page</body></html>"):
     """The ProtocolError the real client raises for an edge or proxy page."""
     failure = protocol.urllib.error.HTTPError("https://room.example/api/x", status, "edge", {}, io.BytesIO(body))
-    with mock.patch.object(protocol.urllib.request, "urlopen", side_effect=failure):
+    with mock.patch.object(protocol, "_urlopen", side_effect=failure):
         try:
             protocol.RoomProtocol("https://room.example/api", "credential").request("GET", "/rooms/room-1/x")
         except adapter.ProtocolError as error:
@@ -97,6 +100,7 @@ class FakeRoom:
         self.enrollments = 0
         self.state_reads = 0
         self.pending_events: list[dict] = []
+        self.log: list[str] = []  # registration and heartbeat attempts, in order
 
     def status(self):
         return {"protocolCapabilities": []}
@@ -104,14 +108,19 @@ class FakeRoom:
     def register_connector(self, _room, _installation, _metadata):
         with self.lock:
             if self.register_errors:
-                raise self.register_errors.pop(0)
+                self.log.append("register failed")
+                failure = self.register_errors.pop(0)
+                raise failure() if callable(failure) else failure  # a callable makes the real failing request
+            self.log.append("register")
             self.registrations += 1
             return {"sessionId": f"session-{self.registrations}", "leaseExpiresAt": LEASE, "heartbeatIntervalSeconds": 15}
 
     def heartbeat(self, _room, _session):
         with self.lock:
             if self.heartbeat_errors:
+                self.log.append("heartbeat failed")
                 raise self.heartbeat_errors.pop(0)
+            self.log.append("heartbeat")
             self.heartbeats += 1
         return {"leaseExpiresAt": LEASE}
 
@@ -131,7 +140,8 @@ class FakeRoom:
     def stream_events(self, _room, after, on_event):
         with self.lock:
             if self.stream_errors:
-                raise self.stream_errors.pop(0)
+                failure = self.stream_errors.pop(0)
+                raise failure() if callable(failure) else failure
             events, self.pending_events = self.pending_events, []
         for offset, event in enumerate(events, start=1):
             on_event({**event, "seq": after + offset})
@@ -200,7 +210,7 @@ def run_watch(instance, binding, until, *, timeout=20.0, after=None):
 class P7aConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP7aCases"]
-        self.assertEqual(len(cases), 16)
+        self.assertEqual(len(cases), 18)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P7a-{index:02d} "), name)
@@ -519,7 +529,7 @@ class P7aRound2Tests(unittest.TestCase):
         self.assertTrue(marked.retryable)
         self.assertFalse(adapter._uncoded_contact_failure(marked))  # an answer, never retried as a contact
         network = protocol.urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
-        with mock.patch.object(protocol.urllib.request, "urlopen", side_effect=network):
+        with mock.patch.object(protocol, "_urlopen", side_effect=network):
             with self.assertRaises(adapter.ProtocolError) as raised:
                 protocol.RoomProtocol("https://room.example/api", "credential").request("GET", "/status")
         self.assertTrue(raised.exception.retryable and not raised.exception.code)
@@ -890,3 +900,253 @@ class P7aRound2Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Elsewhere(http.server.BaseHTTPRequestHandler):
+    """Another host: a followed redirect would reach it."""
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        self.server.hits += 1
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"sessionId": "elsewhere"}')
+
+    do_POST = do_GET
+
+    def log_message(self, *_args):
+        pass
+
+
+class _Faulty(http.server.BaseHTTPRequestHandler):
+    """A redirect to another host, or a body that cannot be decoded."""
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        if self.server.kind == "redirect":
+            self.send_response(302)
+            self.send_header("Location", self.server.location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        stream = "/events/stream" in self.path
+        body = b"event: ready\ndata: \xff\xfe\xfd\n\n" if stream else b"\xff\xfe\xfd not text"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream" if stream else "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_POST = do_GET
+
+    def log_message(self, *_args):
+        pass
+
+
+class _NotHttp(socketserver.BaseRequestHandler):
+    def handle(self):
+        received = b""
+        while b"\r\n\r\n" not in received:
+            chunk = self.request.recv(4096)
+            if not chunk:
+                return
+            received += chunk
+        self.request.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+
+
+class TransportFaults:
+    """Round 3 (OP-12 r2 B1): real urllib against local servers for a redirect
+    to another host, an answer that is not HTTP and a body that cannot be
+    decoded; a certificate failure as urllib raises it (a URLError whose reason
+    is ssl.SSLCertVerificationError)."""
+
+    KINDS = ("certificate", "redirect", "non-HTTP", "corrupt")
+
+    def __enter__(self):
+        self.elsewhere = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Elsewhere)
+        self.elsewhere.hits = 0
+        self.servers = {"non-HTTP": socketserver.ThreadingTCPServer(("127.0.0.1", 0), _NotHttp)}
+        for kind in ("redirect", "corrupt"):
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Faulty)
+            server.kind, server.location = kind, f"http://127.0.0.1:{self.elsewhere.server_port}/api/x"
+            self.servers[kind] = server
+        for server in (self.elsewhere, *self.servers.values()):
+            server.daemon_threads = True
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        return self
+
+    def __exit__(self, *_exc):
+        for server in (self.elsewhere, *self.servers.values()):
+            server.shutdown()
+            server.server_close()
+
+    def fail(self, kind, contact):
+        """Make the real request of ``contact`` fail with ``kind``; raise what the client raises."""
+        port = self.servers[kind].server_address[1] if kind in self.servers else 9
+        api = protocol.RoomProtocol(f"http://127.0.0.1:{port}/api", "credential")
+        request = (lambda: api.register_connector("room-1", "inst-1", {})) if contact == "register" else (
+            lambda: api.stream_events("room-1", 0, lambda _event: True))
+        if kind == "certificate":
+            reason = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                                                     "self-signed certificate (_ssl.c:1010)")
+            with mock.patch.object(protocol, "_urlopen", side_effect=protocol.urllib.error.URLError(reason)):
+                request()
+        else:
+            request()
+        raise AssertionError(f"{kind}: the {contact} did not fail")
+
+
+def lost_session():
+    """The Room's answer to a heartbeat on a session it does not hold (server
+    c1f5c4a, deployed 2026-10-04T22:19Z: api/connector_sessions.go:218-219,
+    ErrSessionNotFound): HTTP 404 with its JSON code not_found."""
+    return edge_error(404, json.dumps({"code": "not_found", "message": "room or object not found",
+                                       "requestId": "request-1"}).encode())
+
+
+class P7aRound3Tests(unittest.TestCase):
+    def test_p7a_17_transport_failures_are_failed_contacts(self):
+        with TransportFaults() as faults:
+            room = FakeRoom()
+            room.register_errors = [lambda kind=kind: faults.fail(kind, "register") for kind in faults.KINDS]
+            room.stream_errors = [lambda kind=kind: faults.fail(kind, "stream") for kind in faults.KINDS]
+            room.pending_events = [{"id": "evt-after-transport", "type": "message.posted"}]
+            instance, binding = watched(room)
+            waits = Waits()
+            with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO") as logs:
+                outcome = run_watch(instance, binding, lambda: instance.consumed == ["evt-after-transport"])
+            self.assertTrue(outcome["reached"], instance.consumed)
+            self.assertFalse(outcome["exited"])
+            self.assertEqual(instance.connects, [])
+            self.assertEqual(room.registrations, 1)
+            self.assertEqual(room.log[:5], ["register failed"] * 4 + ["register"])
+            self.assertEqual(faults.elsewhere.hits, 0)  # the redirect was never followed
+            failures = waits.of("_watch")[:8]
+            self.assertEqual(len(failures), 8, failures)
+            on_schedule(self, failures)
+            # Each was a failed contact (ProtocolError), none an unexpected error.
+            self.assertFalse([line for line in logs.output if "connector loop failed" in line], logs.output)
+            self.assertFalse([line for line in logs.output if "quarantin" in line.lower()], logs.output)
+            for kind in faults.KINDS:  # what the client raises: a failed contact, retryable, no Room code
+                for contact in ("register", "stream"):
+                    with self.assertRaises(adapter.ProtocolError, msg=(kind, contact)) as raised:
+                        faults.fail(kind, contact)
+                    self.assertTrue(raised.exception.retryable and not raised.exception.code, (kind, contact))
+
+    def test_p7a_18_a_lost_session_is_registered_again(self):
+        # The heartbeat loop: the Room no longer holds the session; the
+        # enrollment listing answers [] and does not ask for a registration.
+        room = FakeRoom()
+        room.heartbeat_errors = [lost_session()]
+        room.register_errors = [http_error(502), http_error(502)]
+        instance, binding = watched(room)
+        instance._registered_rooms.add(binding.room_id)
+        waits = Waits()
+
+        async def heartbeat():
+            task = asyncio.create_task(instance._heartbeat_loop(binding, 15))
+            while "heartbeat" not in room.log:
+                await REAL_SLEEP(0.01)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            asyncio.run(asyncio.wait_for(heartbeat(), 20))
+        self.assertEqual(room.log[:5], ["heartbeat failed", "register failed", "register failed", "register", "heartbeat"])
+        self.assertEqual(room.registrations, 1)
+        retries = waits.of("_heartbeat_loop")[1:4]  # after the interval: the first step, then the schedule
+        on_schedule(self, retries)
+        self.assertEqual(binding.connector_session_id, "session-1")
+
+        # The event-read path (the stream loop's own heartbeat, no heartbeat loop yet).
+        room = FakeRoom()
+        room.heartbeat_errors = [lost_session()]
+        room.register_errors = [http_error(502), http_error(502)]
+        room.pending_events = [{"id": "evt-after-restart", "type": "message.posted"}]
+        instance, binding = watched(room)
+        instance._registered_rooms.add(binding.room_id)
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: instance.consumed == ["evt-after-restart"])
+        self.assertTrue(outcome["reached"], instance.consumed)
+        self.assertEqual(room.log[:4], ["heartbeat failed", "register failed", "register failed", "register"])
+        self.assertEqual(room.registrations, 1)
+        on_schedule(self, waits.of("_watch")[:2])
+
+    def test_every_retry_loop_ends_on_the_stop_without_a_further_contact(self):
+        # OP-12 r2 s4: the stop (disconnect sets it, then cancels) arrives
+        # during a loop's retry wait; by its own check the loop ends without
+        # contacting the Room again. A cancellation ends it at once.
+        for mode in ("stop", "cancel"):
+            with self.subTest(mode=mode):
+                contacts = {}
+                # The start and stream loop.
+                room = FakeRoom()
+                room.register_errors = Endless(lambda: http_error(502))
+                instance, binding = watched(room)
+                contacts["_watch"] = self._run_until_wait(instance, instance._watch(binding, is_reconnect=False),
+                                                          "_watch", mode, lambda: room.log.count("register failed"))
+                # The heartbeat loop.
+                room = FakeRoom()
+                room.heartbeat_errors = Endless(lambda: http_error(502))
+                instance, binding = watched(room)
+                instance._registered_rooms.add(binding.room_id)
+                contacts["_heartbeat_loop"] = self._run_until_wait(
+                    instance, instance._heartbeat_loop(binding, 15), "_heartbeat_loop", mode,
+                    lambda: room.log.count("heartbeat failed"))
+                # The settle retry.
+                attempt = cycle_attempt()
+                instance, binding, api, _published, _dispatched = room_instance(attempt)
+                settles = []
+
+                def failing_complete(*_args):
+                    settles.append(True)
+                    raise http_error(502)
+
+                api.complete_discussion_attempt = failing_complete
+                contacts["_complete_cycle_attempt"] = self._run_until_wait(
+                    instance, instance._complete_cycle_attempt(binding, attempt, "pass"), "_complete_cycle_attempt",
+                    mode, lambda: len(settles))
+                # The acknowledgement retry of a durable skip.
+                instance, binding, api, _published, _dispatched = room_instance(cycle_attempt())
+                acks = []
+
+                def failing_acknowledge(_room_id, seq):
+                    acks.append(seq)
+                    raise http_error(502)
+
+                api.acknowledge = failing_acknowledge
+
+                async def acknowledgement():
+                    await instance._complete_event_durably(binding, 5, terminal_status="skipped", source_id="evt-5",
+                                                           reason="model_no_visible_reply")
+                    await instance._ack_retry_tasks[binding.room_id]
+
+                contacts["retry"] = self._run_until_wait(instance, acknowledgement(), "retry", mode, lambda: len(acks))
+                self.assertEqual(contacts, {"_watch": 1, "_heartbeat_loop": 1, "_complete_cycle_attempt": 1, "retry": 1})
+
+    def _run_until_wait(self, instance, coroutine, caller, mode, count):
+        """Run ``coroutine`` until ``caller``'s first retry wait; stop or cancel it there; return the contacts made."""
+        waiting = asyncio.Event()
+
+        def sleep(delay, result=None):
+            if sys._getframe(1).f_code.co_name == caller and delay < 15:  # a retry wait, not the heartbeat interval
+                if mode == "stop":
+                    instance._stop.set()
+                waiting.set()
+                return REAL_SLEEP(0.002 if mode == "stop" else 30, result)
+            return REAL_SLEEP(0.002 if delay > 0 else 0, result)
+
+        async def run():
+            task = asyncio.ensure_future(coroutine)
+            await asyncio.wait_for(waiting.wait(), 10)
+            if mode == "cancel":
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 10)
+            await REAL_SLEEP(0.05)
+            self.assertTrue(task.done())
+
+        with mock.patch.object(asyncio, "sleep", sleep), mock.patch.object(adapter, "logger", mock.Mock()):
+            asyncio.run(run())
+        return count()
