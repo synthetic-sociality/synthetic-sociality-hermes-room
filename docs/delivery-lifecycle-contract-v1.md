@@ -205,8 +205,9 @@ it does not accept, a Room URL without a scheme, with a broken IPv6 bracket or w
 included; OpenClaw: the URL parser, its scheme and `fetch`'s argument check, run when the client is made and on a
 `Request` built before the request; Hermes: `urllib` building the request and `http.client` forming the request line
 and headers, the Host header included, before it opens a connection; OpenClaw also a port `fetch` blocks, the Fetch
-standard's bad ports; a host outside Latin-1 is refused by Hermes' Host header and written in punycode and sent by
-OpenClaw's URL parser), which is the connector's own error: the connector raises its own error with a fixed message
+standard's bad ports, and a header value `fetch` refuses only when it dispatches, a control character such as DEL,
+which Hermes' `http.client` sends; a host outside Latin-1 is refused by Hermes' Host header and written in punycode
+and sent by OpenClaw's URL parser), which is the connector's own error: the connector raises its own error with a fixed message
 and the code `request_not_formed`, never the runtime's message (it can quote the header value, that is the
 credential, or the Room URL), and the loop fails closed (status `stopped` with that code, no retry; no request leaves
 the host). No error object, log line, status field or thrown message of the connector carries the credential, a
