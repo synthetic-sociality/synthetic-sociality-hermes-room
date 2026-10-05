@@ -463,7 +463,9 @@
     "P7a-15 a failed heartbeat is retried on the schedule, not at the heartbeat interval, and its step returns to the first after a successful heartbeat": "test_p7a_15_heartbeat_retry_schedule_and_reset",
     "P7a-16 the attempt renewal and the re-claim before a post retry on the schedule capped at 5 s at the call": "test_p7a_16_renewal_and_reclaim_capped_at_5_s",
     "P7a-17 a certificate failure, a redirect, a non-HTTP answer and a corrupt body, each once on the event read and once at start: the loop continues, one registration, no quarantine": "test_p7a_17_transport_failures_are_failed_contacts",
-    "P7a-18 the Room's JSON 404 not_found for the session on a heartbeat, with the enrollment listing not asking for it: exactly one new registration follows promptly, retried on the schedule until accepted, and the same on the event-read path": "test_p7a_18_a_lost_session_is_registered_again"
+    "P7a-18 the Room's JSON 404 not_found for the session on a heartbeat, with the enrollment listing not asking for it: exactly one new registration follows promptly, retried on the schedule until accepted, and the same on the event-read path": "test_p7a_18_a_lost_session_is_registered_again",
+    "P7a-19 the settle of an attempt gets no Room answer three times while a claim would still succeed: no renewal or re-claim is sent once the settle starts, the settle is retried on the schedule, nothing is posted twice": "test_p7a_19_a_retried_settle_does_not_renew",
+    "P7a-20 the Room's JSON credential_revoked and credential_expired, each on the event read and on the heartbeat: both loops end at once, no further contact, status stopped with that code": "test_p7a_20_a_revoked_or_expired_credential_ends_both_loops"
   },
   "parityP7aReconnectSchedule": {"firstSeconds": 1, "capSeconds": 15, "jitterFactor": [0.8, 1.0], "retryAfter5xxMaxSeconds": 15, "retryAfter429MaxSeconds": 120, "attemptRenewalCapSeconds": 5, "inactiveRecheckSeconds": 60},
   "parityP7aWebReadToolNames": ["browser", "browser_navigate", "web_extract", "web_fetch", "web_search"],
@@ -472,7 +474,7 @@
     "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "1514bb016b7eb2f5b95cd425e86398e0538ae67a75c485f633043b344c927283",
+    "P2c": "98d93a4b18a72ab573c8bac0e0269b6163f87c64a1fb7fe0b0f429ee9728a7d1",
     "Appendix": "a7133e1665a45833c71f376f975cc8ab591084beb9db81533f9a4b91f9dde338"
   }
 }

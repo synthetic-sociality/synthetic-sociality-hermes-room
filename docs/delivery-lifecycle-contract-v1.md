@@ -232,8 +232,9 @@ stream and on the context read of a turn its events are read again from the same
 not lost and the Room connection does not end; a bounded look-up of one earlier item (P2a-3, P2c-2, P5-2, P6-1)
 proceeds without that page, as for any failed read of it. A Room contact made for a turn after its host run (the
 settle of its attempt and the acknowledgement of its source) is retried on this schedule while the Room has not
-answered it (a network failure, a 5xx or 429 without a code, or an answer that is not the Room's JSON); a coded Room
-JSON answer to it, even one marked `retryable`, is an answer and is handled as before; the
+answered it or answered that it failed (a network failure, an HTTP 5xx or 429 with or without a Room code, or an
+answer that is not the Room's JSON); any other Room JSON answer to it, even one marked `retryable`, is an answer and is
+handled as before; the
 turn's terminal evidence stays durable meanwhile, and an attempt whose settle is retried is no longer renewed, so the
 Room ends it with its lease (P1-1, P2c-3c). A revoked or expired credential follows P2c-3, and the device link (L1-8)
 uses the same schedule.
