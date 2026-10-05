@@ -873,6 +873,26 @@ class P7cTests(unittest.TestCase):
                 self.assertIn(STOP_LINE, logs.split("\n"))
                 self.assertNotIn(secret, logs)
                 self.assertNotIn(secret, status_text)
+        # The other side (OP-12 P7c r3 OpenClaw B1, the same forms here): a
+        # credential http.client sends is formed and reaches the connect: a
+        # trailing line feed, spaces at both ends, a tab inside, é, ÿ, U+0080.
+        attempts = []
+
+        def refused(address, *_args, **_kwargs):
+            attempts.append(address[0])
+            raise ConnectionRefusedError(111, "Connection refused")
+
+        with mock.patch("socket.create_connection", refused):
+            for credential in (f"{secret}\n", f"  {secret}  ", f"{secret}\tX", f"{secret}é", f"{secret}ÿ", f"{secret}\x80X"):
+                api = protocol.RoomProtocol("https://room.example/api", credential)
+                for contact, call in (("request", lambda: api.request("GET", "/rooms/room-1/state")),
+                                      ("stream", lambda: api.stream_events("room-1", 40, lambda _event: True))):
+                    with self.subTest(credential=repr(credential), contact=contact, formed=True):
+                        attempts.clear()
+                        with self.assertRaises(adapter.ProtocolError) as raised:
+                            call()
+                        self.assertNotIsInstance(raised.exception, protocol.RequestNotFormed)
+                        self.assertEqual(attempts, ["room.example"], "formed: the connect was attempted")
 
 
     def test_p7c_22_held_by_moderator_only_for_a_hold_of_the_refused_cycle(self):
@@ -1203,6 +1223,20 @@ def turn_kinds(**options):
                                                 **options).text, "\nMissed earlier: #42 Owner; "),
         "discussion start as the current item": (build_message(attempt_ready(50, 1, source="start-2"), attempt=cycle(),
                                                                **options).text, "\n\nOwner: Patient and doctor\n\n"),
+        # The Room's phases opening and initial_greeting in round 1, and a word
+        # bound frozen in the cycle (as OpenClaw, OP-12 P7c r3 OpenClaw B2, N2).
+        "opening": (build_message(attempt_ready(50, 1, source="m-43", phase="opening"), attempt=cycle(used=0),
+                                  **options).text, "[Autonomous discussion phase opening, round 1,"),
+        "initial greeting": (build_message(attempt_ready(50, 1, source="m-43", phase="initial_greeting"),
+                                           attempt=cycle(used=0), **options).text,
+                             "[Autonomous discussion phase initial_greeting, round 1,"),
+        "word bound frozen in the cycle": (
+            build_message(attempt_ready(50, 2, source="m-43"), attempt=cycle(maxContributionWords=120), **options).text,
+            "At most 120 words per response (Room policy maxContributionWords, as frozen for this discussion cycle); "
+            "there is no minimum."),
+        "open message offering a kept reply": (build_message({**HUMAN, "id": "m-56", "seq": 56}, prepare=keep,
+                                                             **options).text,
+                                               "\nMy kept earlier reply.\n[/Your own earlier reply]"),
         # The source message older than the loaded context, found by the bounded
         # older-source scan (P1a-8, the P1a-12 fixture; OP-12 P7c r3 N3, a9).
         "source found by the older-source scan": (
@@ -1252,6 +1286,67 @@ class P7cLeftoverTests(unittest.TestCase):
     """P7c items 4 and 8: tests for mutations that survived the P6 round-2 and
     P7a round-3 reviews (REVIEW-20261004-parity-P6-r2.md finding 4;
     REVIEW-20261005-parity-P7a-r3-hermes.md N1: j, q2, q3, q8)."""
+
+    def test_the_header_check_refuses_a_credential_exactly_when_http_client_does(self):
+        # OP-12 P7c r3 (OpenClaw N4, the equal here): the connector refuses a
+        # credential exactly when the running http.client refuses the header it
+        # would send (the stored credential is trimmed first). Every code point
+        # 0x00-0xFF and a few above, alone, inside, first and last; both through
+        # real requests to a loopback listener.
+        import http.client
+        import http.server
+
+        class Answer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server API
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+
+        def runtime(value):
+            token = value.strip()
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            try:
+                connection.request("GET", "/x", headers={"Authorization": f"Bearer {token}"} if token else {})
+                connection.getresponse().read()
+                return "sent"
+            except (ValueError, http.client.HTTPException):
+                return "refused"
+            finally:
+                connection.close()
+
+        def plugin(value):
+            try:
+                protocol.RoomProtocol(f"http://127.0.0.1:{port}/api", value).request("GET", "/rooms/room-1/state")
+                return "sent"
+            except protocol.RequestNotFormed:
+                return "refused"
+            except Exception as error:  # noqa: BLE001 - reported as a disagreement
+                return f"failed {type(error).__name__}"
+
+        outcomes, disagreements = {"sent": 0, "refused": 0}, []
+        try:
+            for point in (*range(0x100), 0x100, 0x2019, 0x3042, 0xD800, 0xFEFF, 0xFFFD, 0xFFFF):
+                character = chr(point)
+                for value in (character, f"a{character}b", f"{character}ab", f"ab{character}"):
+                    expected, actual = runtime(value), plugin(value)
+                    outcomes[expected] += 1
+                    if actual != expected:
+                        disagreements.append(f"U+{point:04X} in {value!r}: http.client {expected}, plugin {actual}")
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(disagreements, [])
+        self.assertTrue(outcomes["sent"] and outcomes["refused"], outcomes)
 
     def test_every_start_read_takes_a_string_start_as_unknown(self):
         # A start "45" is unknown (P6-2); int() would read it as 45 and fence
