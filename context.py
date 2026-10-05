@@ -60,6 +60,25 @@ OPEN_EXCHANGE_PREAMBLE_VERSION = "Open Exchange – Room Behaviour Preamble v1"
 OPEN_EXCHANGE_PREAMBLE_SHA256 = "04291ee8dd2582aec3f86c52458bb1f1e9c7af10af35d27c0784cce653906865"
 
 
+EPOCH_START_MAX = 2**53 - 1
+
+
+def known_epoch_start(value: Any) -> int:
+    """The active epoch's start when it is known, else 0 (contract P6-2).
+
+    Known only for a JSON number whose value is an integer from 1 to 2^53 - 1
+    (``41.0`` counts as 41, as in JavaScript); a boolean, string, fraction,
+    list, object, null, 0 or a negative number is unknown. Never raises
+    (same in OpenClaw ``knownEpochStart``).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not value.is_integer():
+        return 0
+    number = int(value)
+    return number if 1 <= number <= EPOCH_START_MAX else 0
+
+
 def room_actor_name(state: dict[str, Any], event: dict[str, Any]) -> str:
     """Attribute a Room input truthfully (contract P1a-7, same in OpenClaw).
 
@@ -86,9 +105,18 @@ def room_actor_name(state: dict[str, Any], event: dict[str, Any]) -> str:
     return UNKNOWN_ACTOR
 
 
+def own_actor_label(state: dict[str, Any], event: dict[str, Any], own_membership_id: str = "") -> str:
+    """Contract P7c-2: the speaker label, followed by " (you)" for the agent's own entry."""
+    label = room_actor_name(state, event)
+    own = str(own_membership_id or "").strip()
+    if own and str(event.get("actorId") or "").strip() == own:
+        return f"{label} (you)"
+    return label
+
+
 def canonical_room_context(
     state: dict[str, Any], events: list[dict[str, Any]], current_event_id: str = "",
-    policy: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None, own_membership_id: str = "",
 ) -> str:
     """Render a bounded, named excerpt of the shared canonical Room memory."""
     messages = [
@@ -101,13 +129,18 @@ def canonical_room_context(
     for item in messages[-CONTEXT_MESSAGE_LIMIT:]:
         payload = item.get("payload") or {}
         body = str(payload.get("body") or payload.get("text") or "").strip()
-        actor = room_actor_name(state, item)
+        # Contract P7c-2: the agent's own entries are marked as its own, and a
+        # reference to one of them names "you" (same in OpenClaw).
+        actor = own_actor_label(state, item, own_membership_id)
         if body:
             reply_names: list[str] = []
             for reference in payload.get("respondsTo") or []:
                 reference_id = str(reference or "").strip()
                 target = by_id.get(reference_id)
-                label = room_actor_name(state, target) if target else f"canonical event {reference_id}"
+                if target and own_actor_label(state, target, own_membership_id) != room_actor_name(state, target):
+                    label = "you"
+                else:
+                    label = room_actor_name(state, target) if target else f"canonical event {reference_id}"
                 if reference_id and label not in reply_names:
                     reply_names.append(label)
             reply = f" (reply to {', '.join(reply_names)})" if reply_names else ""

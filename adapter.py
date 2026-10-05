@@ -33,6 +33,8 @@ from .context import epoch_start_event as _epoch_start_event
 from .context import recent_room_messages as _recent_room_messages
 from .context import room_actor_name as _room_actor_name
 from .context import ROOM_SYSTEM_ACTOR
+from .context import saved_guidance as _saved_guidance
+from .context import EPOCH_START_MAX, known_epoch_start
 from .context import source_artifact_context as _source_artifact_context
 from .origin_context import forget_room_context, is_room_context
 from .protocol import (
@@ -78,7 +80,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.82"
+CONNECTOR_VERSION = "1.0.83"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -192,6 +194,16 @@ ROOM_RESPONSE_INSTRUCTION = (
     "to the Room as your contribution, as plain natural text, not wrapped in JSON, XML or a code fence."
 )
 ROOM_IDENTITY_FACT = "Your reply is posted to the Room under your own Room membership."
+# Contract P7c-3: where the word bound comes from (same in OpenClaw).
+WORD_BOUND_CYCLE_SOURCE = "Room policy maxContributionWords, as frozen for this discussion cycle"
+WORD_BOUND_POLICY_SOURCE = "Room policy maxContributionWords"
+# Contract P7c-4 (ISSUE-031): the owner's sentence, verbatim, once per turn
+# frame unless the Room guidance already carries it (same in OpenClaw).
+ROOM_NO_SYSTEM_STATUS_INSTRUCTION = (
+    "Say nothing in a Room message about your tools, access, credentials, model or system status. "
+    "If you cannot read a source, answer from what you have; do not claim to have read it and invent "
+    "nothing about its content. You may say what your answer is based on."
+)
 # Model-visible tool fence for a Room-origin turn (procedural: delivery path).
 ROOM_ORIGIN_POST_BLOCK_MESSAGE = (
     "This is already a Synthetic Sociality Room-origin turn. The platform adapter owns "
@@ -738,23 +750,8 @@ def _acknowledge_peer(api: Any, room_id: str, source_event_id: str) -> dict[str,
 
 
 # Contract P6-2: the largest start a JavaScript connector can hold exactly.
-_EPOCH_START_MAX = 2**53 - 1
-
-
-def _known_epoch_start(value: Any) -> int:
-    """The active epoch's start when it is known, else 0 (contract P6-2).
-
-    Known only for a JSON number whose value is an integer from 1 to 2^53 - 1
-    (``41.0`` counts as 41, as in JavaScript); a boolean, string, fraction,
-    list, object, null, 0 or a negative number is unknown. Never raises
-    (same in OpenClaw ``knownEpochStart``).
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0
-    if isinstance(value, float) and not value.is_integer():
-        return 0
-    number = int(value)
-    return number if 1 <= number <= _EPOCH_START_MAX else 0
+_EPOCH_START_MAX = EPOCH_START_MAX
+_known_epoch_start = known_epoch_start
 
 
 def _cycle_source_body(event: dict[str, Any], payload: dict[str, Any]) -> str:
@@ -933,13 +930,49 @@ def _contribution_word_limit(policy: dict[str, Any], cycle: dict[str, Any] | Non
     mode) the Room policy's ``maxContributionWords`` (GET /rooms/{id}/policy,
     omitempty) applies. Absent or 0 means no cap.
     """
-    def words(value: Any) -> int:
-        return value if type(value) is int and value > 0 else 0
     if cycle is not None:
-        budget = words((cycle.get("budgets") or {}).get("maxContributionWords"))
-        return (budget, "cycle budget") if budget else (0, "")
-    limit = words(policy.get("maxContributionWords"))
-    return (limit, "Room policy") if limit else (0, "")
+        budget = _positive_word_limit((cycle.get("budgets") or {}).get("maxContributionWords"))
+        return (budget, WORD_BOUND_CYCLE_SOURCE) if budget else (0, "")
+    limit = _positive_word_limit(policy.get("maxContributionWords"))
+    return (limit, WORD_BOUND_POLICY_SOURCE) if limit else (0, "")
+
+
+def _positive_word_limit(value: Any) -> int:
+    """A JSON number with a positive integer value (100.0 counts, as in OpenClaw); else 0."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not value.is_integer():
+        return 0
+    number = int(value)
+    return number if 1 <= number <= _EPOCH_START_MAX else 0
+
+
+# ASCII white space only, so both connectors count the same characters.
+_PARAGRAPH_BREAK = re.compile(r"[ \t\r\f\v]*\n[ \t\r\n\f\v]*")
+
+
+def guidance_carries_no_status_sentence(texts: list[str]) -> bool:
+    """Contract P7c-4: the rendered Room guidance already has the owner's sentence.
+
+    Tolerant of surrounding white space and of paragraph breaks only: a run of
+    white space containing a line break counts as one space; otherwise the
+    sentence must occur character for character (same in OpenClaw).
+    """
+    return any(
+        ROOM_NO_SYSTEM_STATUS_INSTRUCTION in _PARAGRAPH_BREAK.sub(" ", str(text or ""))
+        for text in texts
+    )
+
+
+def _guidance_carries_no_status_sentence(state: dict[str, Any]) -> bool:
+    """Contract P7c-4: the Room guidance rendered for the turn (P6-4) has the sentence."""
+    preamble, lines = _saved_guidance(state.get("rules"))
+    return guidance_carries_no_status_sentence([preamble, *lines])
+
+
+def _word_bound_fact(words: int, source: str) -> str:
+    """Contract P7c-3: the word bound, stated as guidance; never enforced."""
+    return f"At most {words} words per response ({source}); there is no minimum." if words else ""
 
 
 def _cycle_delivery_payload(
@@ -951,12 +984,27 @@ def _cycle_delivery_payload(
     follow_ups = int(cycle.get("followUps") or 0)
     max_follow_ups = int((cycle.get("budgets") or {}).get("maxFollowUps") or 0)
     recipient = _next_cycle_recipient(cycle, membership_id) if follow_ups < max_follow_ups else ""
-    return {
+    payload = {
         "cycle_id": str(cycle["id"]),
         "attempt_id": str(attempt["id"]),
         "generation": int(cycle["generation"]),
         "recipients": [recipient] if recipient else [],
     }
+    # Contract P7c-1: a turn whose source is a human command (an ask or
+    # summarize cycle) names no reply target; frozen with the request.
+    if cycle_attempt.get("sourceIsCommand"):
+        payload["standalone"] = True
+    return payload
+
+
+def _turn_source_is_command(payload: dict[str, Any], known: list[Any]) -> bool:
+    """Contract P7c-1: the turn's source is known to be a human command."""
+    source_id = str(payload.get("sourceEventId") or "").strip()
+    return bool(source_id) and any(
+        isinstance(item, dict) and str(item.get("id") or "") == source_id
+        and item.get("type") == "human.command"
+        for item in known
+    )
 
 
 def _cycle_attempt_owner_key(
@@ -3037,6 +3085,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             cycle_generation=int(cycle_payload.get("generation") or 0),
                             recipient_membership_ids=list(cycle_payload.get("recipients") or []),
                             responds_to_id=str(cycle_payload.get("responds_to") or source_id),
+                            standalone=bool(cycle_payload.get("standalone")),
                             addresses=addresses,
                         )
                     return _with_message_payload_dialect(
@@ -3356,6 +3405,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             binding.room_id,
                         )
                         return
+                    if not binding.enabled or binding.revoked:
+                        return  # Contract P7c-8: ended meanwhile; its status stays stopped.
                     logger.warning("Room %s temporarily unavailable: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     step = next_step(error)
@@ -3365,6 +3416,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     # An unexpected failure must not end this Room's event
                     # stream until a gateway restart: reconnect with the same
                     # bounded backoff. Logged by type only (no body, no trace).
+                    if not binding.enabled or binding.revoked:
+                        return  # Contract P7c-8: ended meanwhile; its status stays stopped.
                     logger.warning(
                         "Room %s connector loop failed (%s); reconnecting", binding.room_id, type(error).__name__,
                     )
@@ -3626,15 +3679,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         return
                     logger.warning("Room %s heartbeat failed; lease will truthfully expire: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
-                    if error.session_lost:
-                        # Contract P2c-3a: only the Room's own JSON answer
-                        # loses the session; the next heartbeat registers.
-                        getattr(self, "_registered_rooms", set()).discard(binding.room_id)
                     # A 429 is a scheduling instruction: its Retry-After is
                     # honoured up to 120 s, a 5xx one up to the cap (P2c-3a);
                     # the room will truthfully show unavailable if its lease
                     # expires meanwhile.
                     retry_delay = reconnect_delay(step, retry_after=error.retry_after, status=error.status)
+                    if error.session_lost:
+                        # Contract P2c-3a: only the Room's own JSON answer
+                        # loses the session; the next heartbeat registers,
+                        # within the schedule's first step whatever failed
+                        # before (P7c-8), then on the schedule until accepted.
+                        getattr(self, "_registered_rooms", set()).discard(binding.room_id)
+                        retry_delay = reconnect_delay(0)
                     step += 1
                     self._expire_lease_if_due(binding)
                 except Exception as error:  # noqa: BLE001 - contract P2c-3a
@@ -3956,6 +4012,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if (
                 self._stop.is_set()
                 or generations.get(binding.room_id) != generation
+                or not binding.enabled
+                or binding.revoked
             ):
                 return False
             if event:
@@ -3968,6 +4026,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         ))
         try:
             while not future.done():
+                if not binding.enabled or binding.revoked:
+                    # Contract P7c-8: the heartbeat saw the credential revoked
+                    # or expired; the open stream ends now, unread.
+                    return
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1)
                 except asyncio.TimeoutError:
@@ -4404,6 +4466,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if ready_for_self:
                 # Unclaimed or expired: the model never saw its source (P2a-3).
                 self._note_missed_source(binding, str(payload.get("sourceEventId") or ""))
+                if isinstance(receive_state.get("activeHold"), dict):
+                    # Contract P7c-5: refused while a human holds the Room; a
+                    # coded reason only, never the holder or any text.
+                    self._status_room(binding, gate_wait_seconds=0, gate_wait_reason="held_by_moderator")
             await self._complete_event(
                 binding, seq, terminal_status="superseded", source_id=event_id,
                 reason="discussion_attempt_unavailable",
@@ -4979,6 +5045,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             body = "\n\n".join(value for value in _active_topic(state, prompt_event) if value)
         shared_context = _canonical_room_context(
             state, context_events, prompt_event_id, _policy_view(context_policy),
+            own_membership_id=binding.membership_id,
         )
         attempt_ready = event.get("type") == "discussion.cycle_attempt_ready"
         missed_facts, missed_offered, missed_mark = [], [], ""
@@ -5005,6 +5072,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         cycle_source = await self._cycle_document_source(
             binding, cycle_attempt, [prompt_event, event, *context_events], seq, starts_at,
         )
+        if cycle_attempt and attempt_ready and _turn_source_is_command(payload, [*current_page, cycle_source]):
+            cycle_attempt["sourceIsCommand"] = True
         try:
             artifact_context = await self._call(
                 binding,
@@ -5047,8 +5116,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         word_limit, word_limit_source = _contribution_word_limit(
             _policy_view(context_policy), cycle_attempt["cycle"] if cycle_attempt else None,
         )
-        word_limit_fact = (
-            f"Word limit per response: {word_limit} words ({word_limit_source}). " if word_limit else ""
+        word_limit_fact = _word_bound_fact(word_limit, word_limit_source)
+        word_limit_fact = f"{word_limit_fact} " if word_limit_fact else ""
+        # Contract P7c-4: added once, unless the Room guidance rendered for
+        # this turn already carries the same sentence.
+        no_status_fact = (
+            "" if _guidance_carries_no_status_sentence(state)
+            else f" {ROOM_NO_SYSTEM_STATUS_INSTRUCTION}"
         )
         prompt = (
             # No sequence number here: for a cycle turn it is the system
@@ -5060,6 +5134,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             f"{ROOM_IDENTITY_FACT} "
             f"{word_limit_fact}"
             f"{ROOM_RESPONSE_INSTRUCTION}"
+            f"{no_status_fact}"
         )
         # Offered once, then cleared durably before core runs the turn (P2a-3,
         # P2c-2).

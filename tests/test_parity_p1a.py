@@ -177,7 +177,7 @@ class ParityP1aTests(unittest.TestCase):
                 self.assert_no_behavioural_wording(name, prompt)
         rich = every_prompt()["rich_human_reply"]
         for block in ("[Reviewed handover from", "[Room-shared document context", "[Room document library",
-                      "Word limit per response: 150 words",
+                      "At most 150 words per response (Room policy maxContributionWords); there is no minimum.",
                       "Research grounding policy: cite_sources; maximum sources 3; freshness window 86400 seconds."):
             self.assertIn(block, rich)  # the scan above covered each block
         # The Room-origin tool fence the model receives when it calls the post tool.
@@ -235,8 +235,10 @@ class ParityP1aTests(unittest.TestCase):
                 # The tail is procedural only; the word limit is the one optional fact.
                 tail = re.compile(
                     re.escape(f"{adapter.ROOM_HISTORY_INSTRUCTION} {adapter.ROOM_IDENTITY_FACT} ")
-                    + r"(Word limit per response: \d+ words \((cycle budget|Room policy)\)\. )?"
-                    + re.escape(adapter.ROOM_RESPONSE_INSTRUCTION) + r"\Z"
+                    + r"(At most \d+ words per response \(Room policy maxContributionWords"
+                    + r"(, as frozen for this discussion cycle)?\); there is no minimum\. )?"
+                    + re.escape(adapter.ROOM_RESPONSE_INSTRUCTION)
+                    + re.escape(f" {adapter.ROOM_NO_SYSTEM_STATUS_INSTRUCTION}") + r"\Z"
                 )
                 self.assertRegex(prompt, tail, name)
         prompts = every_prompt(policy={"researchGroundingMode": ""})
@@ -303,10 +305,11 @@ class ParityP1aTests(unittest.TestCase):
         open_turns = [build_prompt({**HUMAN, "id": f"m-{seq}", "seq": seq}, policy={
             "coordinationMode": "open", "maxContributionWords": 120}) for seq in (56, 57)]
         for prompt in open_turns:
-            self.assertIn("Word limit per response: 120 words (Room policy).", prompt)
+            self.assertIn("At most 120 words per response (Room policy maxContributionWords); there is no minimum.", prompt)
         coordinated = build_prompt(attempt_ready(50, 1), attempt=cycle(maxContributionWords=80),
                                    policy={"coordinationMode": "coordinated", "maxContributionWords": 120})
-        self.assertIn("Word limit per response: 80 words (cycle budget).", coordinated)
+        self.assertIn("At most 80 words per response (Room policy maxContributionWords, as frozen for this discussion cycle); "
+                      "there is no minimum.", coordinated)
         self.assertNotIn("120 words", coordinated)
         # With an assigned attempt only the enforced cycle budget counts; a
         # budget of 0 or none is no cap and never falls back to the policy.
@@ -315,11 +318,11 @@ class ParityP1aTests(unittest.TestCase):
                 coordinated_policy_only = build_prompt(
                     attempt_ready(50, 1), attempt=cycle(**budget),
                     policy={"coordinationMode": "coordinated", "maxContributionWords": 120})
-                self.assertNotIn("Word limit", coordinated_policy_only)
+                self.assertNotIn("words per response", coordinated_policy_only)
                 self.assertNotIn("120", coordinated_policy_only)
         for unset in ({}, {"maxContributionWords": 0}, {"maxContributionWords": True}, {"maxContributionWords": "90"}):
             with self.subTest(policy=unset):
-                self.assertNotIn("Word limit", build_prompt({**HUMAN, "id": "m-58", "seq": 58}, policy=unset))
+                self.assertNotIn("words per response", build_prompt({**HUMAN, "id": "m-58", "seq": 58}, policy=unset))
 
 
 class ReplyMarkerTargetTests(unittest.TestCase):

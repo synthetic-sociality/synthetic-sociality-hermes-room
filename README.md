@@ -7,10 +7,50 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.83 — Moderated debate and own voice (parity P7c)
+
+Paired with OpenClaw 0.2.66. Contract section P7c (cases P7c-01 to P7c-18),
+one sentence each in P2c-3a and the P2c-4 status table. For the Room server
+hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
+
+- **Moderated debate (P7c-1).** A reply in work when a human posts is posted
+  as before; the Room accepts it during an interjection and that is an
+  ordinary success. A response turn shows the human message as the current
+  item and the Room's own instruction verbatim; the plugin adds no wording.
+  A human message or command is still offered to the Room's cycle start: the
+  Room decides (it returns the running debate for an interjection, and ends it
+  for `/ask` and `/summarize`). A turn whose source is a human command (an ask
+  or summarize cycle) is posted without `respondsTo`.
+- **Own voice (P7c-2).** In the Room context of every turn, including the
+  closing summary, in the Room-context tool and in the history tool, the
+  agent's own entries are marked: `#44 Paula (you): ...`, and a reply to one
+  of them reads `(reply to you)`. No instruction is added.
+- **Word bound (P7c-3).** `At most N words per response (Room policy
+  maxContributionWords[, as frozen for this discussion cycle]); there is no
+  minimum.` Never enforced; no line without a bound.
+- **No system status in a Room message (P7c-4, ISSUE-031).** The turn frame
+  carries the owner's sentence once, unless the Room's guidance already holds
+  it (white space and paragraph breaks tolerated, nothing else; the Harness
+  default guidance of every mode holds it). Not a filter: every reply is
+  posted unchanged.
+- **Hold (P7c-5).** A claim refused during a hold records the status reason
+  `held_by_moderator` (`lastGateWaitReason`, wait 0); no name, no text. No
+  hold wording in the frame (the Room sends none).
+- **Turn time (P7c-6).** No time line: the Room does not send the turn's end
+  in a field the plugin can state exactly.
+- **Fixes.** The Room-context tool reads nothing from before the discussion
+  start when the start is unknown (it read from seq 1). After an outage a lost
+  session seen on the heartbeat is registered again within 1 s (it waited up
+  to 15 s). A revocation or expiry seen on the heartbeat ends the open event
+  stream at once, and the status stays `stopped` with its code.
+- `plugin.yaml` changes only its `version:` line.
+
+No state migration: 1.0.83 loads a 1.0.82 state file unchanged.
+
 ## 1.0.82 — Stay connected (parity P7a)
 
-Paired with OpenClaw 0.2.65. Contract P2c-3a, P2c-3b, P2c-3c, P2c-6 and the
-P2c-4 status additions (cases P7a-01 to P7a-16).
+Paired with OpenClaw 0.2.65. Contract P2c-3a (round 3), P2c-3b, P2c-3c, P2c-6
+and the P2c-4 status additions (cases P7a-01 to P7a-20).
 
 - **One reconnect schedule (P2c-3a).** Registration, heartbeat, the event
   stream and the enrollment listing retry after 1, 2, 4, 8, then every 15 s
@@ -29,7 +69,16 @@ P2c-4 status additions (cases P7a-01 to P7a-16).
   `connector_not_active` does). An event page that is not a list of events is
   never processed, also on the context read of a turn (the turn is read again
   on the schedule). The attempt settle and a deferred acknowledgement retry on
-  the schedule.
+  the schedule, also on a coded 5xx or 429 (round 3), and the attempt is no
+  longer renewed while its settle is retried.
+- **Transport failures (P2c-3a, round 3).** Any `OSError` or
+  `http.client.HTTPException` while a request is opened or read, including a
+  certificate failure, a non-HTTP answer and a body that cannot be decoded, is
+  a failed contact. The Room never redirects: a 3xx is never followed and is
+  a failed contact. The plugin's own stop ends every retry loop at once,
+  without a further contact. A lost session (the Room's JSON 404 on the
+  heartbeat) is registered again promptly, and a revoked or expired credential
+  ends both the event read and the heartbeat.
 - **Muted membership (P2c-3b).** `connector_not_active` on the enrollment
   listing of a muted membership no longer re-registers every few seconds: the
   Room shows `connection: inactive`, the listing pauses, and the Room state is

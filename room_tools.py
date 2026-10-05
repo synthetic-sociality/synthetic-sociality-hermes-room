@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .context import canonical_room_context, recent_room_messages, room_actor_name
+from .context import canonical_room_context, known_epoch_start, own_actor_label, recent_room_messages, room_actor_name
 from .origin_context import is_room_context
 from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
@@ -197,11 +197,12 @@ def room_context(args: dict[str, Any], **_kwargs: Any) -> str:
             return _result({"success": False, "error": "That room is not configured for this Hermes profile."})
         api = RoomProtocol(binding.base_url, binding.credential)
         head = int(state.get("headSeq") or 0)
-        active_epoch = state.get("activeEpoch") or {}
+        active_epoch = state.get("activeEpoch") if isinstance(state.get("activeEpoch"), dict) else {}
         context_events = recent_room_messages(
             lambda after: api.events(binding.room_id, after, 0),
             before_seq=head + 1,
-            active_epoch_starts_at=int(active_epoch.get("startsAtSeq") or 1),
+            # Contract P7c-7 (P6-2): an unknown start gives no earlier entry.
+            active_epoch_starts_at=known_epoch_start(active_epoch.get("startsAtSeq")),
         )
     except (ProtocolError, OSError, ValueError) as error:
         return _result({"success": False, "error": f"Room context is temporarily unavailable: {error}"})
@@ -210,7 +211,7 @@ def room_context(args: dict[str, Any], **_kwargs: Any) -> str:
         "roomId": binding.room_id,
         "title": str(state.get("title") or binding.room_id),
         "headSeq": int(state.get("headSeq") or 0),
-        "context": canonical_room_context(state, context_events),
+        "context": canonical_room_context(state, context_events, own_membership_id=binding.membership_id),
     })
 
 
@@ -773,7 +774,8 @@ def room_history(args: dict[str, Any], **_kwargs: Any) -> str:
                     continue
                 body_truncated = len(body) > HISTORY_BODY_CHARACTER_LIMIT
                 entry = {
-                    "seq": seq, "id": str(event.get("id") or ""), "actor": room_actor_name(state, event),
+                    "seq": seq, "id": str(event.get("id") or ""),
+                    "actor": own_actor_label(state, event, binding.membership_id),
                     "body": body[:HISTORY_BODY_CHARACTER_LIMIT] + ("…" if body_truncated else ""),
                     "bodyTruncated": body_truncated,
                     "respondsTo": [str(item) for item in (payload.get("respondsTo") or [])],

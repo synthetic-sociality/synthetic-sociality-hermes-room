@@ -1001,6 +1001,18 @@ class TransportFaults:
         raise AssertionError(f"{kind}: the {contact} did not fail")
 
 
+class RecordingTasks(dict):
+    """A task map that remembers every task put in it (P7a-20 waits on them)."""
+
+    def __init__(self):
+        super().__init__()
+        self.started = []
+
+    def __setitem__(self, key, task):
+        self.started.append(task)
+        super().__setitem__(key, task)
+
+
 def lost_session():
     """The Room's answer to a heartbeat on a session it does not hold (server
     c1f5c4a, deployed 2026-10-04T22:19Z: api/connector_sessions.go:218-219,
@@ -1206,6 +1218,11 @@ class P7aRound3AddendumTests(unittest.TestCase):
                     room = FakeRoom()
                     refusal = edge_error(401, json.dumps({"code": code, "message": "refused"}).encode())
                     instance, binding = watched(room, path)
+                    # P7c item 8 (r3 N8): no real-time deadline. Every loop task
+                    # is recorded, and the stream double waits on an event set
+                    # when the binding ends.
+                    instance._tasks, instance._heartbeat_tasks = RecordingTasks(), RecordingTasks()
+                    binding_ended = threading.Event()
                     if where == "event read":
                         instance._registered_rooms.add(binding.room_id)
                         room.stream_errors = [refusal]
@@ -1214,9 +1231,7 @@ class P7aRound3AddendumTests(unittest.TestCase):
 
                         def blocking_stream(_room_id, after, _on_event):
                             # The stream stays open until the binding ends.
-                            deadline = time.monotonic() + 10
-                            while binding.enabled and not binding.revoked and time.monotonic() < deadline:
-                                time.sleep(0.005)
+                            binding_ended.wait(60)
                             return {"cursor": after, "ready": {"ok": True}}
 
                         room.stream_events = blocking_stream
@@ -1230,18 +1245,19 @@ class P7aRound3AddendumTests(unittest.TestCase):
                         def end(target, original=getattr(instance, name)):
                             ended.setdefault("contacts", len(started))
                             original(target)
+                            binding_ended.set()
                         setattr(instance, name, end)
                     with mock.patch.object(adapter, "update", lambda change: change(types.SimpleNamespace(binding=lambda _room: None))), \
                             mock.patch.object(asyncio, "sleep", Waits()), mock.patch.object(adapter, "logger", mock.Mock()):
                         async def heartbeat_ended():
-                            # Both loops end by themselves (run_watch would cancel them).
-                            deadline = time.monotonic() + 2
-                            while (instance._heartbeat_tasks or instance._tasks) and time.monotonic() < deadline:
-                                await REAL_SLEEP(0.01)
-                            ended["loops"] = not instance._heartbeat_tasks and not instance._tasks
+                            # Both loops end by themselves (run_watch would cancel
+                            # them): wait for the tasks, not for a clock.
+                            tasks = [*instance._tasks.started, *instance._heartbeat_tasks.started]
+                            _done, pending = await asyncio.wait(tasks, timeout=60)
+                            ended["loops"] = not pending and not instance._heartbeat_tasks and not instance._tasks
                             await REAL_SLEEP(0.05)
 
-                        outcome = run_watch(instance, binding, lambda: bool(ended), timeout=5.0, after=heartbeat_ended)
+                        outcome = run_watch(instance, binding, lambda: bool(ended), timeout=60.0, after=heartbeat_ended)
                     entry = local_status.read(path)["rooms"]["room-1"]
                     key = f"{code} on the {where}"
                     outcomes[key] = (ended.get("loops", False), outcome["exited"], len(started) - ended.get("contacts", -1),

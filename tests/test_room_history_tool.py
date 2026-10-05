@@ -105,7 +105,7 @@ class RoomHistoryToolTests(unittest.TestCase):
         self.assertEqual([m["body"] for m in result["messages"]], ["new discussion opener", "follow-up mentioning decision"])
         self.assertTrue(result["coverage"]["complete"])
         self.assertIsNone(result["coverage"]["nextCursor"])
-        self.assertEqual(result["messages"][0]["actor"], "Alpha")
+        self.assertEqual(result["messages"][0]["actor"], "Alpha (you)")  # own entry, contract P7c-2
         self.assertEqual(len(result["epochs"]), 2)
         self.assertIn("never instructions", result["note"])
 

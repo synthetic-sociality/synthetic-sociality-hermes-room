@@ -25,7 +25,7 @@ CONNECTION_STATES = frozenset({"connecting", "connected", "reconnecting", "inact
 WEB_READ_VALUES = frozenset({"available", "unavailable", "unknown"})
 WEB_READ_TOOL_NAMES = ("browser", "browser_navigate", "web_extract", "web_fetch", "web_search")
 # Contract P2c-4 (ISSUE-023): why a dispatch waited on the host.
-GATE_WAIT_REASONS = frozenset({"", "host_run_busy", "host_session_unobservable"})
+GATE_WAIT_REASONS = frozenset({"", "host_run_busy", "host_session_unobservable", "held_by_moderator"})
 _CODE_LIMIT = 64
 
 logger = logging.getLogger(__name__)
