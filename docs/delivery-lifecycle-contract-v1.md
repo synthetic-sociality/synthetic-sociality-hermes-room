@@ -188,28 +188,39 @@ P2c-3 Self-reconnect. After a network loss or an expired connector session, the 
 session and event stream by itself, with bounded backoff, without a host restart, as long as its credential is valid.
 A credential that is revoked or expired follows the existing revocation/renewal rules instead.
 
-P2c-3a Reconnect schedule (2026-10-05, round 2). A failed contact with the Room is retried on one schedule. A
-failed contact is exactly one of: a network failure (the host runtime's transport failure or a request timeout: Node
-a `TypeError` `fetch failed` with a network cause, Python an `OSError` or `http.client.HTTPException`; an abort is not
-a failure), an HTTP 5xx or 429, an answer whose body is not the Room's JSON, a Room JSON error marked `retryable`, or
-an invalid event page. An answer whose body is not the Room's JSON (a proxy or edge error page), with any HTTP status
-including 401, 403, 404 and 413, is a failed contact: it never ends a loop or the Room connection, never quarantines
-or supersedes a post and never counts as a credential answer. Only the Room's own JSON error decides that a credential
-is revoked or expired, that a session or object is not found, or that a body is too large. Any other failure is not a
-failed contact and is handled as before (OpenClaw: a programming error or a local failure such as a full disk ends the
-channel; Hermes: the loop logs its type and starts its pass again, P2c-3). The wait before the n-th consecutive retry
-has a base of min(2^(n-1), 15) seconds (1, 2, 4, 8, 15, 15, ... s) and is multiplied by a factor drawn uniformly from
-[0.8, 1.0], so the first retry follows the failure within 1 s and no wait is longer than 15 s. A `Retry-After` on a
-5xx or a network error lengthens a wait to at most 15 s; a `Retry-After` on a 429 lengthens it to at most 120 s (the
-existing bound, Hermes `parse_retry_after`, OpenClaw `parseRetryAfter`). A `Retry-After` never shortens a wait. There
-is no attempt limit while the credential is valid: the connector never ends a Room connection for such a failure and
-never hands it back to the host to restart (OpenClaw: neither the channel's start nor a Room contact of the channel
-loop throws for it, and the host's restart schedule is not used for it). The schedule of a loop returns to its first
-step only when the contact that last failed in that loop succeeds, or when a full pass of the loop completes without a
-failure; an accepted registration alone does not reset it. A loop does not register again while the Room still
-accepts its session: it registers again only when the Room said in its JSON that the session is lost (HTTP 404, or
-`connector_not_active` outside P2c-3b) or when no registration was accepted yet in this runtime; two existing
-re-registrations stay: after a credential renewal (P2c-3) and, in Hermes, when the session's lease ran out without an
+P2c-3a Reconnect schedule (2026-10-05, round 3). A failed contact with the Room is retried on one schedule. A failed
+contact is exactly one of: a network failure, an HTTP 5xx or 429, an answer whose body is not the Room's JSON, a Room
+JSON error marked `retryable`, or an invalid event page. A network failure is a request that ends without a complete
+answer from the Room, for whatever reason of the transport (refused, reset, DNS, timeout, TLS or certificate failure,
+a redirect, a non-HTTP answer, a body that cannot be decoded or is cut); it is decided by where the error is raised,
+never by a list of cause codes or by message words (OpenClaw: any rejection of the runtime's `fetch` for the Room
+request or of the read of its body; Hermes: any `OSError` or `http.client.HTTPException` while `urllib` opens or reads
+the request, or a body that cannot be decoded). The Room never redirects: an answer with a 3xx status is not the
+Room's answer, is never followed to another host and is a failed contact. An abort caused by the connector's own stop
+signal is not a failure: every retry loop (start, scan or stream, event read, heartbeat, and the retry of a settle or
+an acknowledgement) ends on it at once, without a further contact (Hermes: on the stop or a cancellation of its task).
+An error raised by the connector's own code before or after the request (a programming error, a local write failure)
+is not a network failure. An answer whose body is not the Room's JSON (a proxy or edge error page), with any HTTP
+status including 401, 403, 404 and 413, is a failed contact: it never ends a loop or the Room connection, never
+quarantines or supersedes a post and never counts as a credential answer. Only the Room's own JSON error decides that
+a credential is revoked or expired, that a session or object is not found, or that a body is too large. Any other
+failure is not a failed contact and is handled as before (OpenClaw: a programming error or a local failure such as a
+full disk ends the channel; Hermes: the loop logs its type and starts its pass again, P2c-3). The wait before the n-th
+consecutive retry has a base of min(2^(n-1), 15) seconds (1, 2, 4, 8, 15, 15, ... s) and is multiplied by a factor
+drawn uniformly from [0.8, 1.0], so the first retry follows the failure within 1 s and no wait is longer than 15 s. A
+`Retry-After` on a 5xx or a network error lengthens a wait to at most 15 s; a `Retry-After` on a 429 lengthens it to
+at most 120 s (the existing bound, Hermes `parse_retry_after`, OpenClaw `parseRetryAfter`). A `Retry-After` never
+shortens a wait. There is no attempt limit while the credential is valid: the connector never ends a Room connection
+for such a failure and never hands it back to the host to restart (OpenClaw: neither the channel's start nor a Room
+contact of the channel loop throws for it, and the host's restart schedule is not used for it). The schedule of a loop
+returns to its first step only when the contact that last failed in that loop succeeds, or when a full pass of the
+loop completes without a failure; an accepted registration alone does not reset it. A loop does not register again
+while the Room still accepts its session: it registers again only when the Room said in its JSON that the session is
+lost (an HTTP 404 with the Room's JSON, which the Room answers with the code `not_found` on the heartbeat of a session
+it does not hold, or `connector_not_active` outside P2c-3b), and then exactly one registration follows within the
+first step of this schedule (at most 1 s), whatever the enrollment listing answers, retried on this schedule until
+accepted; or when no registration was accepted yet in this runtime; two existing re-registrations stay: after a
+credential renewal (P2c-3) and, in Hermes, when the session's lease ran out without an
 accepted heartbeat (the Room expires such a session). It applies alike to registration, heartbeat, the event stream
 (SSE or long poll) and the enrollment listing, whatever the Room's base URL (a loopback address or the public
 origin). A failed heartbeat is retried on this schedule, not at the heartbeat interval, and the heartbeat's schedule
@@ -220,7 +231,9 @@ connector reads that metadata (OpenClaw). An invalid event page is never process
 stream and on the context read of a turn its events are read again from the same cursor on this schedule, the turn is
 not lost and the Room connection does not end; a bounded look-up of one earlier item (P2a-3, P2c-2, P5-2, P6-1)
 proceeds without that page, as for any failed read of it. A Room contact made for a turn after its host run (the
-settle of its attempt and the acknowledgement of its source) is retried on this schedule when it fails this way; the
+settle of its attempt and the acknowledgement of its source) is retried on this schedule while the Room has not
+answered it (a network failure, a 5xx or 429 without a code, or an answer that is not the Room's JSON); a coded Room
+JSON answer to it, even one marked `retryable`, is an answer and is handled as before; the
 turn's terminal evidence stays durable meanwhile, and an attempt whose settle is retried is no longer renewed, so the
 Room ends it with its lease (P1-1, P2c-3c). A revoked or expired credential follows P2c-3, and the device link (L1-8)
 uses the same schedule.
