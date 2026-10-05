@@ -691,6 +691,8 @@ class P7cTests(unittest.TestCase):
         for changed in (text.replace("system status.", "system status!"),
                         text.replace("Say nothing", "say nothing"),
                         text.replace("tools, access", "tools,  access"),
+                        # The sentence without its final full stop (OP-12 P7c r2 OpenClaw N6, d5).
+                        text.replace("is based on.", "is based on"),
                         # A tab or a lone carriage return is not a paragraph break (no line feed).
                         text.replace("tools, access", "tools,\taccess"),
                         text.replace("tools, access", "tools,\raccess")):
@@ -914,6 +916,8 @@ def refused_request_run(api):
         room = FakeRoom()
         room.register_errors = [lambda: api.request("POST", "/connectors"), lambda: api.request("POST", "/connectors")]
         instance, binding = watched(room, path)
+        # The binding holds the refused credential, as it does live.
+        binding.credential = api.credential
         with mock.patch.object(asyncio, "sleep", Waits()):
             outcome = run_watch(instance, binding, lambda: "register failed" in room.log
                                 and binding.room_id not in instance._tasks, timeout=HANG_GUARD)
@@ -935,6 +939,7 @@ def refused_heartbeat_run(api):
 
         room.heartbeat = heartbeat
         instance, binding = watched(room, path)
+        binding.credential = api.credential
         instance._registered_rooms.add(binding.room_id)
 
         async def run():
