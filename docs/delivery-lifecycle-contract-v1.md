@@ -203,8 +203,11 @@ An error raised by the connector's own code before or after the request (a progr
 is not a network failure; nor is a request the runtime refuses to form before any I/O (a header value or a Room URL
 it does not accept; OpenClaw: the URL parser and `fetch`'s argument check, run when the client is made and on a
 `Request` built before the request; Hermes: `http.client` forming the request line and headers before it opens a
-connection), which is the connector's own error and is handled as such below (OpenClaw ends the channel; Hermes
-records `connector_error` and starts its pass again on the schedule; in neither does a request leave the host). An answer whose body is not the Room's JSON (a proxy or edge error page), with any HTTP
+connection; OpenClaw also a port `fetch` blocks, the Fetch standard's bad ports), which is the connector's own error:
+the connector raises its own error with a fixed message and the code `request_not_formed`, never the runtime's message
+(it can quote the header value, that is the credential), and the loop fails closed (status `stopped` with that code, no
+retry; no request leaves the host). No error object, log line, status field or thrown message of the connector carries
+the credential or a header value. An answer whose body is not the Room's JSON (a proxy or edge error page), with any HTTP
 status including 401, 403, 404 and 413, is a failed contact: it never ends a loop or the Room connection, never
 quarantines or supersedes a post and never counts as a credential answer. Only the Room's own JSON error decides that
 a credential is revoked or expired, that a session or object is not found, or that a body is too large. Any other
@@ -326,11 +329,11 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `rooms.<id>.membershipId` | string | the Room membership |
 | `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting`, `inactive` (P2c-3b) or `stopped`; `stopped` and `reconnecting` win over `inactive`, which is shown only while the membership is muted and the connection is otherwise up; a revoked credential shows `stopped` with `credential_revoked`; after an unmute or a new registration the value is `connected` |
 | `rooms.<id>.lastConnectedAt` | string or null | the last accepted registration or heartbeat |
-| `rooms.<id>.lastErrorCode` | string | the last error code (a server code from `errorCodes`, or a connector code such as `network`, `session_lost`, `secret_store_reachable`, `http_<status>`, `invalid_json_response` (an answer whose body is not the Room's JSON, P2c-3a) or `invalid_event_page` (P2c-3a)); empty when none |
+| `rooms.<id>.lastErrorCode` | string | the last error code (a server code from `errorCodes`, or a connector code such as `network`, `session_lost`, `secret_store_reachable`, `http_<status>`, `invalid_json_response` (an answer whose body is not the Room's JSON, P2c-3a), `invalid_event_page` (P2c-3a) or `request_not_formed` (a request the runtime refuses to form before any I/O, P2c-3a)); empty when none |
 | `rooms.<id>.lastErrorAt` | string or null | when it was recorded |
 | `rooms.<id>.lastGateWaitSeconds` | number | the last wait on a host gate before dispatch, in seconds |
 | `rooms.<id>.lastGateWaitAt` | string or null | when that wait ended |
-| `rooms.<id>.lastGateWaitReason` | string | why that wait happened: `host_run_busy` (an earlier host run of this Room still held its session) or `host_session_unobservable` (Hermes only: core could not report the release; the bounded wait of P2a-1 ran out) or `held_by_moderator` (a claim was refused with `cycle_no_attempt` while the Room state showed a hold, P7c-5; the wait is 0; cleared when a later claim of that Room succeeds); empty when the dispatch did not wait on the host (ISSUE-023) |
+| `rooms.<id>.lastGateWaitReason` | string | why that wait happened: `host_run_busy` (an earlier host run of this Room still held its session) or `host_session_unobservable` (Hermes only: core could not report the release; the bounded wait of P2a-1 ran out) or `held_by_moderator` (a claim was refused with `cycle_no_attempt` while the Room state showed a hold of that claim's cycle, P7c-5; the wait is 0; cleared when a later claim of that Room succeeds); empty when the dispatch did not wait on the host (ISSUE-023) |
 | `rooms.<id>.lastReconnectedAt` | string or null | when the connection was last re-established by an accepted registration after a failure (P2c-3a); `lastConnectedAt` keeps its meaning |
 | `rooms.<id>.lastOutageSeconds` | number | seconds from the first failure of that outage to `lastReconnectedAt`; 0 before the first reconnect |
 | `rooms.<id>.acknowledgedSeq` | integer | the Room's acknowledged seq (P3-3) |
@@ -708,7 +711,8 @@ The names are the labels of the referenced posts among the messages the connecto
 own post), otherwise `canonical event <id>`, each name once, in `respondsTo` order, joined by `, `. The history tool's `actor` carries the
 same label with ` (you)` for an own entry. Nothing else changes: no instruction is added, and the closing-summary
 instruction comes from the Room (`phaseInstruction`). Both repositories pin the same vector,
-`parityP7cTranscriptVector` in `conformance.json`.
+`parityP7cTranscriptVector` in `conformance.json`. The tools mark entries as registered with the host, with the
+membership id of the saved binding the runtime uses.
 
 P7c-3 Word bound. When a word bound applies (P1a-3), the connector states it on every turn as exactly
 `At most <N> words per response (<source>); there is no minimum.`, where `<source>` is
@@ -717,7 +721,8 @@ cycle's `budgets.maxContributionWords`) and `Room policy maxContributionWords` o
 rendered when the bound is missing, 0 or not a positive integer. The Room server sends no instruction text about
 words. The connector never counts, cuts, refuses or rewrites a reply for its length.
 
-P7c-4 No system status in a Room message (ISSUE-031). The turn frame carries, exactly once and verbatim, the owner's
+P7c-4 No system status in a Room message (ISSUE-031). Every turn frame (each frame shape the connector builds) carries,
+exactly once and verbatim, the owner's
 sentence: "Say nothing in a Room message about your tools, access, credentials, model or system status. If you cannot
 read a source, answer from what you have; do not claim to have read it and invent nothing about its content. You may
 say what your answer is based on." When the Room guidance rendered for that turn (P6-4) already contains this text,
@@ -734,9 +739,10 @@ body; a missing web tool is reported only as `webRead` (P2c-6).
 
 P7c-5 Hold (ISSUE-026). A claim refused with `409 cycle_no_attempt` is dropped as before: no post, no retry, the
 event acknowledged, the source noted as missed (P2a-3). When the Room state read for that turn has an `activeHold`
-object, the connector also records the coded reason `held_by_moderator` for that Room in its status
-(`lastGateWaitReason`, with `lastGateWaitSeconds` 0, P2c-4); never for another refusal such as `cycle_superseded`,
-and never the holder's name or any text. The reason is cleared (empty, wait 0) when a later claim of that Room
+object whose `cycleId` is the cycle of the refused claim, the connector also records the coded reason
+`held_by_moderator` for that Room in its status (`lastGateWaitReason`, with `lastGateWaitSeconds` 0, P2c-4); not for
+an empty object or a hold of another cycle, never for another refusal such as `cycle_superseded`, and never the
+holder's name, membership id or any text. The reason is cleared (empty, wait 0) when a later claim of that Room
 succeeds, a renewal included. The announcement
 the Room repeats after the hold (idempotency key ending `-hold-<n>`) is an ordinary new offer and is claimed and
 answered once. A turn already claimed keeps renewing through a hold. The Room sends no instruction text about a hold;

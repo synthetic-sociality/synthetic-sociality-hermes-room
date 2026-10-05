@@ -490,7 +490,9 @@
     "P7c-17 a request the runtime refuses to form is the connector's own error, never a failed contact, and no request leaves the host": "test_p7c_17_a_request_the_runtime_refuses_to_form_is_not_a_failed_contact",
     "P7c-18 with the stored Showroom guidance of Harness b70aff3e as the Room rules the frame does not add the ISSUE-031 sentence again, with one character of it changed it does": "test_p7c_18_the_stored_showroom_guidance_already_carries_the_sentence",
     "P7c-19 a command-source turn whose attempt is renewed by a fresh claim answer before the post posts without respondsTo, a message-source turn names its source": "test_p7c_19_the_command_source_is_kept_through_a_renewal",
-    "P7c-20 a Room URL the runtime refuses to form is the connector's own error, never a failed contact, and no request leaves the host": "test_p7c_20_a_room_url_the_runtime_refuses_to_form_is_the_connectors_own_error"
+    "P7c-20 a Room URL the runtime refuses to form is the connector's own error, never a failed contact, and no request leaves the host": "test_p7c_20_a_room_url_the_runtime_refuses_to_form_is_the_connectors_own_error",
+    "P7c-21 a credential the runtime refuses in a header is never in an error, a log line or the status, and the loop fails closed": "test_p7c_21_a_refused_credential_never_appears_in_an_error_a_log_line_or_the_status",
+    "P7c-22 held_by_moderator only for cycle_no_attempt while the Room state holds the refused cycle, and never the holder's name or membership id": "test_p7c_22_held_by_moderator_only_for_a_hold_of_the_refused_cycle"
   },
   "parityP7cNoStatusSentence": "Say nothing in a Room message about your tools, access, credentials, model or system status. If you cannot read a source, answer from what you have; do not claim to have read it and invent nothing about its content. You may say what your answer is based on.",
   "parityP7cWordBound": {
@@ -661,8 +663,8 @@
     "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "bd3e3fdd4673335b8fac340f8d0ca01c2072c9188aaebebeb6a53b5c7e9d6308",
-    "Appendix": "9c1576e3fdb139c53affa3f2e1355bc9afa98d62b4d54ce5a79b1be102447a47",
-    "P7c": "7b7294cec71ea11423facc1d36a984600757d7335d3aa04aa5472cfc09de1097"
+    "P2c": "fdeb61df3c31907fe057b56260d25ed637d5cce554c754a83bdd64bd1b748742",
+    "Appendix": "4270ab1b5c24e6846bfa83cd0642a262510eb4cce82ad41d977687819012bad8",
+    "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc"
   }
 }
