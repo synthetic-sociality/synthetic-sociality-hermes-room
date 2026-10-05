@@ -284,20 +284,24 @@ class P7cTests(unittest.TestCase):
                                      roster=roster).text
                 self.assertIn("#44 Agent (you) (reply to Peer): My own earlier point.", text)
                 self.assertIn("#43 Peer: Disclosure first, then support.", text)
-        # The Room-context tool and the history tool.
+        # The Room-context tool and the history tool. Another member with the
+        # agent's display name is never marked there either (by actorId only).
         tools = __import__(adapter.__name__.rsplit(".", 1)[0] + ".room_tools", fromlist=["room_tools"])
-        events = [START, HUMAN, PEER, OWN]
+        namesake = {"id": "m-45", "seq": 45, "type": "message.posted", "actorRole": "participant_agent",
+                    "actorId": "member-9", "payload": {"body": "Same name, another member."}}
+        events = [START, HUMAN, PEER, OWN, namesake]
+        tool_roster = [*roster, {"membershipId": "member-9", "displayName": "Agent"}]
 
         class Protocol:
             def __init__(self, *_args):
                 pass
 
             def room_state(self, _room):
-                return {"title": "Room", "headSeq": 44, "roster": roster,
+                return {"title": "Room", "headSeq": 45, "roster": tool_roster,
                         "activeEpoch": {"id": "epoch-2", "ordinal": 2, "startsAtSeq": 41}}
 
             def events(self, _room, after, *_args, **_kwargs):
-                return {"events": [item for item in events if item["seq"] > after], "headSeq": 44}
+                return {"events": [item for item in events if item["seq"] > after], "headSeq": 45}
 
             def epochs(self, _room):
                 return {"epochs": [{"id": "epoch-2", "ordinal": 2, "startsAtSeq": 41, "status": "active"}]}
@@ -314,8 +318,10 @@ class P7cTests(unittest.TestCase):
             context_result = json.loads(handlers["synthetic_sociality_room_context"]({}))
             history = json.loads(handlers["synthetic_sociality_room_history"]({}))
         self.assertIn("#44 Agent (you) (reply to Peer): My own earlier point.", context_result["context"])
+        self.assertIn("\n#45 Agent: Same name, another member.", context_result["context"])
+        self.assertEqual(context_result["context"].count("(you)"), 1)
         self.assertEqual({entry["seq"]: entry["actor"] for entry in history["messages"]},
-                         {42: "Owner", 43: "Peer", 44: "Agent (you)"})
+                         {42: "Owner", 43: "Peer", 44: "Agent (you)", 45: "Agent"})
 
     def test_p7c_08_the_word_bound_wording(self):
         policy_text = build_message({**HUMAN, "id": "m-56", "seq": 56},
@@ -364,6 +370,20 @@ class P7cTests(unittest.TestCase):
                 self.assertTrue(text.rstrip().endswith(f" {SENTENCE}"), "the last sentence of the frame")
                 self.assertEqual(with_guidance[name].count(SENTENCE), 1, "the guidance's copy only")
                 self.assertFalse(with_guidance[name].rstrip().endswith(SENTENCE))
+        # The turn kinds every_prompt does not build (OP-12 P7c r2 B1, N6): what
+        # _dispatch_room_event varies the frame by is the event type, the claimed
+        # attempt, the Room's phase and phaseInstruction, the kind of the cycle
+        # source (message, command, discussion start, unresolved) and the
+        # optional blocks (handover, documents, word bound, missed source, kept reply).
+        for name, (text, marker) in turn_kinds().items():
+            with self.subTest(turn_kind=name):
+                self.assertIn(marker, text)
+                self.assertEqual(text.count(SENTENCE), 1)
+                self.assertTrue(text.rstrip().endswith(f" {SENTENCE}"), "the last sentence of the frame")
+        for name, (text, _marker) in turn_kinds(rules=carried).items():
+            with self.subTest(turn_kind=name, guidance="carries it"):
+                self.assertEqual(text.count(SENTENCE), 1, "the guidance's copy only")
+                self.assertFalse(text.rstrip().endswith(SENTENCE))
         # Not a filter: a reply about missing access is posted unchanged, and
         # the status file holds no message body.
         body = "I have no internet access, so I answer from the brief."
@@ -727,9 +747,14 @@ class P7cTests(unittest.TestCase):
         # raised before any connection, the connector's own error, never a
         # failed contact; the loop fails closed with request_not_formed and no
         # request leaves the host.
+        # Also (OP-12 P7c r2 N2, N3) a URL without a scheme or with a broken IPv6
+        # bracket (urllib cannot build the request), a host outside Latin-1 (the
+        # Host header) and a scheme other than http or https: the same error,
+        # whose text never quotes the URL.
         connects = []
         with mock.patch("socket.create_connection", lambda *args, **_kwargs: connects.append(args)):
-            for url in ("http://127.0.0.1:port/api", "http:///api"):
+            for url in ("http://127.0.0.1:port/api", "http:///api", "room.example/api", "//room.example/api",
+                        "http://[::1/api", "http://例.example/api", "foo://room.example/api"):
                 with self.subTest(url=url):
                     api = protocol.RoomProtocol(url, "credential")
                     for call in (lambda: api.request("GET", "/rooms/room-1/state"),
@@ -739,11 +764,26 @@ class P7cTests(unittest.TestCase):
                         self.assertIsInstance(raised.exception, protocol.RequestNotFormed)
                         self.assertNotIsInstance(raised.exception, adapter.ProtocolError)
                         self.assertNotIsInstance(raised.exception, OSError)
-            outcome, room, entry, _logs, _status_text = refused_request_run(
-                protocol.RoomProtocol("http://127.0.0.1:port/api", "credential"))
-            self.assertTrue(outcome["exited"], "the loop ended")
-            self.assertEqual(room.log.count("register failed"), 1, "not retried")
-            self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", "request_not_formed"))
+                        self.assertIsNone(raised.exception.__context__)
+                        self.assertNotIn("example", str(raised.exception) + repr(raised.exception.args))
+                    outcome, room, entry, _logs, _status_text = refused_request_run(api)
+                    self.assertTrue(outcome["exited"], "the loop ended")
+                    self.assertEqual(room.log.count("register failed"), 1, "not retried")
+                    self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", "request_not_formed"))
+            # The tools print the fixed message only (registered handlers, saved binding).
+            tools = __import__(adapter.__name__.rsplit(".", 1)[0] + ".room_tools", fromlist=["room_tools"])
+            binding = adapter.RoomBinding("room.example/api", "room-1", "member-1", "credential", installation_id="inst-1")
+            tools._ROOM_SCAN_CACHE.clear()
+            with mock.patch.object(tools, "load", lambda: types.SimpleNamespace(bindings=[binding])):
+                registration = mock.MagicMock()
+                adapter.register(registration)
+                handlers = {call.kwargs["name"]: call.kwargs["handler"] for call in registration.register_tool.call_args_list}
+                for name in ("synthetic_sociality_room_context", "synthetic_sociality_room_history"):
+                    with self.subTest(tool=name):
+                        result = handlers[name]({"room": "room-1"})
+                        self.assertFalse(json.loads(result)["success"])
+                        self.assertIn("Room request refused by the runtime before any I/O", result)
+                        self.assertNotIn("example", result)
         self.assertEqual(connects, [])
 
     def test_p7c_21_a_refused_credential_never_appears_in_an_error_a_log_line_or_the_status(self):
@@ -772,7 +812,16 @@ class P7cTests(unittest.TestCase):
                 self.assertTrue(outcome["exited"], "the loop ended")
                 self.assertEqual(room.log.count("register failed"), 1, "not retried")
                 self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", "request_not_formed"))
-                self.assertTrue(logs, "the stop is logged")
+                self.assertIn(STOP_LINE, logs.split("\n"), "the stop is logged")
+                self.assertNotIn(secret, logs)
+                self.assertNotIn(secret, status_text)
+                # The heartbeat loop meets the same refused request first (a
+                # credential renewed after the registration): it ends as well.
+                outcome, beats, entry, logs, status_text = refused_heartbeat_run(api)
+                self.assertTrue(outcome["exited"], "the heartbeat loop ended")
+                self.assertEqual(beats, ["heartbeat refused"], "not retried")
+                self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", "request_not_formed"))
+                self.assertIn(STOP_LINE, logs.split("\n"))
                 self.assertNotIn(secret, logs)
                 self.assertNotIn(secret, status_text)
 
@@ -794,6 +843,9 @@ class P7cTests(unittest.TestCase):
             "hold without a cycle": ({"activeHold": {key: value for key, value in hold.items() if key != "cycleId"}}, None, ""),
             "cycle_superseded during the hold": ({"activeHold": hold}, superseded, ""),
             "no hold": ({"activeHold": None}, None, ""),
+            # A truthy activeHold that is not an object names no cycle (OP-12 P7c r2 N5, h2).
+            **{f"activeHold {value!r}": ({"activeHold": value}, None, "")
+               for value in ("cycle-1", True, 1, ["cycle-1"], [hold])},
         }
         for label, (state, claim, reason) in cases.items():
             with self.subTest(label), tempfile.TemporaryDirectory() as scratch:
@@ -807,11 +859,34 @@ class P7cTests(unittest.TestCase):
                 self.assertEqual((rooms.get("room-1") or {}).get("lastGateWaitReason", ""), reason)
                 for value in ("holder-7k", "Thorsten"):
                     self.assertNotIn(value, text)
+        # P2c-4: cleared by a later successful claim of that Room, a renewal
+        # included (n2); a later refused claim leaves it (n3).
+        for label, later, reason in (("renewal answered", "renewal", ""),
+                                     ("later claim refused without a hold", "refused", "held_by_moderator")):
+            with self.subTest(label), tempfile.TemporaryDirectory() as scratch:
+                path = Path(scratch) / "status.json"
+                answers = {2: claimed_attempt()} if later == "renewal" else {}
+                instance, binding, record, room_state = receive_instance(
+                    state={"activeHold": hold}, claim=lambda n: answers.get(n), status_path=path)
+                asyncio.run(instance._consume(binding, response_ready(51)))
+                self.assertEqual(local_status.read(path)["rooms"]["room-1"]["lastGateWaitReason"], "held_by_moderator")
+                room_state["activeHold"] = None
+                if later == "renewal":
+                    renewed = asyncio.run(instance._claim_held_attempt(binding, "ready-50", claimed_attempt()))
+                    self.assertIsNotNone(renewed)
+                else:
+                    asyncio.run(instance._consume(binding, {**response_ready(52), "id": "ready-51-hold-1"}))
+                self.assertEqual(record.claims, ["cycle-1"] * 2)
+                self.assertEqual(local_status.read(path)["rooms"]["room-1"]["lastGateWaitReason"], reason)
 
-def refused_request_run(api):
-    """Run the watch loop whose registration makes ``api``'s real request (which
-    the runtime refuses to form) until the loop ends. Returns the outcome, the
-    Room double, the status entry, every log line and the status file's text."""
+# The one log line of a stop (adapter._fail_closed_on_request), as captured below.
+STOP_LINE = (f"{adapter.logger.name} ERROR Room room-1 request refused by the runtime before any I/O "
+             "(code request_not_formed); the loop stops")
+
+
+@__import__("contextlib").contextmanager
+def captured_logs():
+    """Every record of the root logger at DEBUG, formatted, while the block runs."""
     import logging
     records = []
 
@@ -824,18 +899,56 @@ def refused_request_run(api):
     root.addHandler(handler)
     root.setLevel(logging.DEBUG)
     try:
-        with tempfile.TemporaryDirectory() as scratch:
-            path = Path(scratch) / "status.json"
-            room = FakeRoom()
-            room.register_errors = [lambda: api.request("POST", "/connectors"), lambda: api.request("POST", "/connectors")]
-            instance, binding = watched(room, path)
-            with mock.patch.object(asyncio, "sleep", Waits()):
-                outcome = run_watch(instance, binding, lambda: "register failed" in room.log
-                                    and binding.room_id not in instance._tasks, timeout=HANG_GUARD)
-            return outcome, room, local_status.read(path)["rooms"]["room-1"], "\n".join(records), path.read_text()
+        yield records
     finally:
         root.removeHandler(handler)
         root.setLevel(previous)
+
+
+def refused_request_run(api):
+    """Run the watch loop whose registration makes ``api``'s real request (which
+    the runtime refuses to form) until the loop ends. Returns the outcome, the
+    Room double, the status entry, every log line and the status file's text."""
+    with captured_logs() as records, tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "status.json"
+        room = FakeRoom()
+        room.register_errors = [lambda: api.request("POST", "/connectors"), lambda: api.request("POST", "/connectors")]
+        instance, binding = watched(room, path)
+        with mock.patch.object(asyncio, "sleep", Waits()):
+            outcome = run_watch(instance, binding, lambda: "register failed" in room.log
+                                and binding.room_id not in instance._tasks, timeout=HANG_GUARD)
+        return outcome, room, local_status.read(path)["rooms"]["room-1"], "\n".join(records), path.read_text()
+
+
+def refused_heartbeat_run(api):
+    """Run the heartbeat loop whose heartbeat makes ``api``'s real request (which
+    the runtime refuses to form) until it ends or has tried three times.
+    Returns the outcome, the heartbeats tried, the status entry, every log line
+    and the status file's text."""
+    with captured_logs() as records, tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "status.json"
+        room, beats, outcome = FakeRoom(), [], {}
+
+        def heartbeat(room_id, session):
+            beats.append("heartbeat refused")
+            return api.request("POST", f"/rooms/{room_id}/connectors/{session}/heartbeat")
+
+        room.heartbeat = heartbeat
+        instance, binding = watched(room, path)
+        instance._registered_rooms.add(binding.room_id)
+
+        async def run():
+            task = asyncio.create_task(instance._heartbeat_loop(binding, 15))
+            deadline = time.monotonic() + HANG_GUARD
+            while not task.done() and len(beats) < 3 and time.monotonic() < deadline:
+                await REAL_SLEEP(0.01)
+            outcome["exited"] = task.done()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        with mock.patch.object(asyncio, "sleep", Waits()):
+            asyncio.run(run())
+        return outcome, beats, local_status.read(path)["rooms"]["room-1"], "\n".join(records), path.read_text()
 
 
 CRASHED = []
@@ -845,6 +958,44 @@ def fresh_attempt(source):
     attempt = claimed_attempt()
     attempt["cycle"]["sourceEventId"] = source
     return attempt
+
+
+def turn_kinds(**options):
+    """P7c-4: the frame of each turn kind every_prompt does not build, with a
+    marker that shows the kind was rendered: (text, marker) per name."""
+    kept_reply = {"source_event_id": "m-42", "source_seq": 42, "epoch_id": "epoch-2",
+                  "produced_at": "2026-10-05T09:52:30Z", "reason": "turn_expired", "text": "My kept earlier reply."}
+
+    def keep(_instance, binding):
+        binding.kept_reply = dict(kept_reply)
+
+    def miss(_instance, binding):
+        binding.missed_sources = [{"source_event_id": "m-42", "source_seq": 42}]
+
+    def command_turn(name):
+        source = command(46, name, arguments={"instruction": "Your view?"})
+        kept = []
+        text = build_message(attempt_ready(52, 1, source="cmd-46"), attempt=fresh_attempt("cmd-46"),
+                             context=(START, HUMAN, PEER, source), keep_instance=kept, **options).text
+        assert getattr(kept[0][0], "_cycle_command_sources", set()) == {"ready-52"}, "decided as a command-source turn"
+        return text
+
+    summary = attempt_ready(55, 1, source="term-54", phase="summary", phaseInstruction="Write the closing summary.")
+    return {
+        "response round": (build_message(response_ready(51), attempt=claimed_attempt(),
+                                         context=(START, HUMAN, PEER, INTERJECTION), **options).text,
+                           f"[Room phase instruction — server-provided, verbatim]\n{RESPONSE_INSTRUCTION}\n"),
+        "closing summary": (build_message(summary, attempt=claimed_attempt(), **options).text,
+                            "[Autonomous discussion phase summary, round 2,"),
+        "ask cycle": (command_turn("ask"), "; its source event cmd-46 is not available to the connector]"),
+        "summarize cycle": (command_turn("summarize"), "; its source event cmd-46 is not available to the connector]"),
+        "kept reply offered": (build_message(attempt_ready(50, 2, source="m-43"), attempt=cycle(), prepare=keep,
+                                             **options).text, "\nMy kept earlier reply.\n[/Your own earlier reply]"),
+        "missed source offered": (build_message(attempt_ready(50, 2, source="m-43"), attempt=cycle(), prepare=miss,
+                                                **options).text, "\nMissed earlier: #42 Owner; "),
+        "discussion start as the current item": (build_message(attempt_ready(50, 1, source="start-2"), attempt=cycle(),
+                                                               **options).text, "\n\nOwner: Patient and doctor\n\n"),
+    }
 
 
 async def command_source_turn(source, *, renewals, post_error=None):

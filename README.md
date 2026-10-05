@@ -47,9 +47,11 @@ hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
   session seen on the heartbeat is registered again within 1 s (it waited up
   to 15 s). A revocation or expiry seen on the heartbeat ends the open event
   stream at once, and the status stays `stopped` with its code. A header value
-  or Room URL `http.client` refuses (a line break in the credential, a port
-  that is not a number, no host) is the plugin's own error
-  (`request_not_formed`, a fixed message that never quotes the credential),
+  or Room URL `urllib` or `http.client` refuses (a line break in the
+  credential, a port that is not a number, no host, no scheme, a broken IPv6
+  bracket, a host outside Latin-1, a scheme other than http or https) is the
+  plugin's own error (`request_not_formed`, a fixed message that never quotes
+  the credential or the URL),
   never a network failure: the loop stops with status `stopped`, and no
   request leaves the host.
 - `plugin.yaml` changes only its `version:` line.

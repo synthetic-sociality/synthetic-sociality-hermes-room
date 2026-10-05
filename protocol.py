@@ -147,17 +147,32 @@ def _urlopen(request: urllib.request.Request, *, timeout: float):
     return _OPENER.open(request, timeout=timeout)
 
 
+def _new_request(url: str, **options: Any) -> urllib.request.Request:
+    """Contract P2c-3a: a Room URL ``urllib`` cannot build a request from (no
+    scheme, a broken IPv6 bracket) is the connector's own error as well."""
+    try:
+        request = urllib.request.Request(url, **options)
+    except ValueError:
+        request = None
+    if request is None:
+        raise RequestNotFormed()
+    _form_request(request)
+    return request
+
+
 def _form_request(request: urllib.request.Request) -> None:
     """Contract P2c-3a: form the request line and headers as ``http.client``
     does, before any I/O (it connects only when the request is sent). A Room
     URL or header value it does not accept raises ``RequestNotFormed`` here:
     the connector's own error, never a failed contact."""
-    formed = bool(request.host)
+    formed = bool(request.host) and request.type in {"http", "https"}
     if formed:
         try:
             connection = http.client.HTTPConnection(request.host)
             try:
                 connection.putrequest(request.get_method(), request.selector, skip_host=True, skip_accept_encoding=True)
+                # urllib sends the host as given; http.client refuses one outside Latin-1.
+                connection.putheader("Host", request.host)
                 for name, value in request.header_items():
                     connection.putheader(name, value)
             finally:
@@ -245,8 +260,7 @@ class RoomProtocol:
         token = self.credential if credential is None else credential
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(self.base_url + path, data=body, headers=headers, method=method)
-        _form_request(request)
+        request = _new_request(self.base_url + path, data=body, headers=headers, method=method)
         try:
             with _urlopen(request, timeout=self.timeout) as response:
                 raw = response.read(MAX_JSON_RESPONSE_BYTES + 1)
@@ -477,7 +491,7 @@ class RoomProtocol:
         """
         room = urllib.parse.quote(room_id, safe="")
         query = urllib.parse.urlencode({"after": after, "allEpochs": "true"})
-        request = urllib.request.Request(
+        request = _new_request(
             self.base_url + f"/rooms/{room}/events/stream?{query}",
             headers={
                 "Accept": "text/event-stream",
@@ -487,7 +501,6 @@ class RoomProtocol:
             },
             method="GET",
         )
-        _form_request(request)
         try:
             with _urlopen(request, timeout=75) as response:
                 content_type = response.headers.get("Content-Type", "")
