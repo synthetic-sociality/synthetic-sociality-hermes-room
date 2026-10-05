@@ -10,7 +10,7 @@ Room identity.
 ## 1.0.82 — Stay connected (parity P7a)
 
 Paired with OpenClaw 0.2.65. Contract P2c-3a, P2c-3b, P2c-3c, P2c-6 and the
-P2c-4 status additions (cases P7a-01 to P7a-09).
+P2c-4 status additions (cases P7a-01 to P7a-16).
 
 - **One reconnect schedule (P2c-3a).** Registration, heartbeat, the event
   stream and the enrollment listing retry after 1, 2, 4, 8, then every 15 s
@@ -20,6 +20,16 @@ P2c-4 status additions (cases P7a-01 to P7a-09).
   a 429 up to 120 s as before. A failed heartbeat is retried on the schedule,
   not at the heartbeat interval. The device link uses the same schedule
   (L1-8: cap 15 s instead of 30 s).
+- **Failed contacts, exactly (P2c-3a, round 2).** An answer whose body is not
+  the Room's JSON, with any status, is a failed contact: an edge's HTML 404 no
+  longer drops the session or switches the stream to long poll, an HTML
+  403/404/413 no longer quarantines a reply. A loop's schedule resets only when
+  the contact that failed succeeds or a full cycle completes; a failed
+  heartbeat no longer re-registers (only the Room's JSON 404 or
+  `connector_not_active` does). An event page that is not a list of events is
+  never processed, also on the context read of a turn (the turn is read again
+  on the schedule). The attempt settle and a deferred acknowledgement retry on
+  the schedule.
 - **Muted membership (P2c-3b).** `connector_not_active` on the enrollment
   listing of a muted membership no longer re-registers every few seconds: the
   Room shows `connection: inactive`, the listing pauses, and the Room state is
@@ -29,8 +39,11 @@ P2c-4 status additions (cases P7a-01 to P7a-09).
 - **Status (P2c-4, additive; schema name unchanged).** Per Room
   `lastReconnectedAt`, `lastOutageSeconds` and `lastGateWaitReason`
   (`host_run_busy`, `host_session_unobservable`); per installation `webRead`
-  and `webReadTools` from core's own tool selection (P2c-6: the plugin adds and
-  removes no web tool).
+  and `webReadTools` from the selection core resolves for a gateway turn of
+  `synthetic_sociality` (P2c-6, round 2: not the profile-wide list; `unknown`
+  when core does not offer it; the plugin adds and removes no web tool).
+  `connection: inactive` shows only while a muted membership is otherwise
+  connected; `stopped` and `reconnecting` win.
 - `plugin.yaml` changes only its `version:` line.
 
 No state migration and nothing new on disk: 1.0.82 loads a 1.0.81 state file

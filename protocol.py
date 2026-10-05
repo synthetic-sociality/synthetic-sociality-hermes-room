@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import random
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -27,12 +28,24 @@ RETRY_AFTER_RATE_LIMIT_MAX_SECONDS = 120.0
 
 
 class ProtocolError(RuntimeError):
-    def __init__(self, message: str, *, status: int = 0, code: str = "", retryable: bool = False, retry_after: float = 0):
+    def __init__(self, message: str, *, status: int = 0, code: str = "", retryable: bool = False, retry_after: float = 0,
+                 non_json: bool = False, contact: str = ""):
         super().__init__(message)
         self.status = status
         self.code = code
         self.retryable = retryable
         self.retry_after = max(0.0, float(retry_after or 0))
+        # Contract P2c-3a: an answer whose body is not the Room's JSON (an
+        # edge or proxy page, any status). It is a failed contact, never a
+        # Room answer: no caller reads not found, a credential or a size from it.
+        self.non_json = non_json
+        # The contact (method and path) that failed; "" when not a request.
+        self.contact = contact
+
+    @property
+    def session_lost(self) -> bool:
+        """Contract P2c-3a: the Room said in its JSON that the session is gone."""
+        return not self.non_json and (self.status == 404 or self.code == "connector_not_active")
 
     @property
     def revoked(self) -> bool:
@@ -44,11 +57,66 @@ class ProtocolError(RuntimeError):
 
     @property
     def hard_sse_unavailable(self) -> bool:
-        """Whether the server or proxy definitively cannot provide SSE."""
+        """Whether the server definitively cannot provide SSE.
+
+        Contract P2c-3a: a status without the Room's JSON is a failed contact
+        and is retried, never read as a missing route.
+        """
+        if self.non_json and "unexpected content type" not in str(self).lower():
+            return False
         return self.status in (404, 405, 406, 415, 501) or self.code in {
             "sse_not_supported",
             "unsupported_media_type",
         } or "unexpected content type" in str(self).lower()
+
+
+class InvalidEventPage(ProtocolError):
+    """Contract P2c-3a: an event page that is not a JSON object whose
+    ``events``, when present, is a list of objects. Never processed; read
+    again from the same cursor on the schedule."""
+
+    def __init__(self, message: str = "Room event page is not a list of events"):
+        super().__init__(message, code="invalid_event_page", retryable=True)
+
+
+def valid_event_page(page: Any) -> dict[str, Any]:
+    """Return ``page`` when it is a valid event page, else raise InvalidEventPage."""
+    events = page.get("events") if isinstance(page, dict) else None
+    if not isinstance(page, dict) or (
+        events is not None and not (isinstance(events, list) and all(isinstance(item, dict) for item in events))
+    ):
+        raise InvalidEventPage()
+    return page
+
+
+# Contract P2c-3a: successful answers per contact (base URL, method and path
+# without the query), so a loop resets its schedule when the contact that
+# last failed succeeds.
+_CONTACT_SUCCESSES: dict[str, int] = {}
+_CONTACT_LOCK = threading.Lock()
+
+
+def room_contact(base_url: str, method: str, path: str) -> str:
+    return f"{base_url.rstrip('/')} {method} {path.split('?', 1)[0]}"
+
+
+def contact_successes(contact: str) -> int:
+    with _CONTACT_LOCK:
+        return _CONTACT_SUCCESSES.get(contact, 0)
+
+
+def _contact_succeeded(contact: str) -> None:
+    with _CONTACT_LOCK:
+        _CONTACT_SUCCESSES[contact] = _CONTACT_SUCCESSES.get(contact, 0) + 1
+
+
+def _error_envelope(raw: bytes) -> dict[str, Any] | None:
+    """The Room's JSON error object, or None for any other body (P2c-3a)."""
+    try:
+        envelope = json.loads(raw) if raw else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return envelope if isinstance(envelope, dict) else None
 
 
 @dataclass(frozen=True)
@@ -105,6 +173,16 @@ class RoomProtocol:
         return self._idempotency_key_override or fallback
 
     def request(self, method: str, path: str, payload: Any = None, *, credential: str | None = None) -> Any:
+        contact = room_contact(self.base_url, method, path)
+        try:
+            result = self._request_once(method, path, payload, credential=credential)
+        except ProtocolError as error:
+            error.contact = error.contact or contact
+            raise
+        _contact_succeeded(contact)
+        return result
+
+    def _request_once(self, method: str, path: str, payload: Any = None, *, credential: str | None = None) -> Any:
         body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
         headers = {"Accept": "application/json", "User-Agent": "synthetic-sociality-hermes/1.0"}
         if body is not None:
@@ -130,19 +208,24 @@ class RoomProtocol:
                     # their HTML SPA fallback with HTTP 200.  Normalize that
                     # compatibility response at the protocol boundary: raw
                     # decoder errors must never escape into a long-running
-                    # Room watcher.
+                    # Room watcher. Contract P2c-3a: a failed contact.
                     raise ProtocolError(
                         "Room API returned a non-JSON response",
                         status=int(getattr(response, "status", 0) or 0),
-                        code="invalid_json_response",
-                        retryable=False,
+                        retryable=True,
+                        non_json=True,
                     ) from None
         except urllib.error.HTTPError as error:
             raw = error.read(1 << 16)
-            try:
-                envelope = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                envelope = {}
+            retry_after = parse_retry_after(error.headers.get("Retry-After", "") if error.headers else "")
+            envelope = _error_envelope(raw)
+            if envelope is None:
+                # Contract P2c-3a: an edge or proxy page (HTML, text, empty),
+                # whatever its status, is a failed contact, not a Room answer.
+                raise ProtocolError(
+                    f"Room API answered HTTP {error.code} without the Room's JSON",
+                    status=error.code, retryable=True, retry_after=retry_after, non_json=True,
+                ) from None
             message = envelope.get("message") or f"Room API returned HTTP {error.code}"
             code = envelope.get("code", "")
             raise ProtocolError(
@@ -150,7 +233,7 @@ class RoomProtocol:
                 status=error.code,
                 code=code,
                 retryable=bool(envelope.get("retryable")) or error.code == 429 or error.code >= 500,
-                retry_after=parse_retry_after(error.headers.get("Retry-After", "")),
+                retry_after=retry_after,
             ) from None
         # urllib can surface peer disconnects either as URLError or directly
         # as an OSError/HTTPException while opening or reading the response.
@@ -310,6 +393,22 @@ class RoomProtocol:
         after: int,
         on_event: Callable[[dict[str, Any]], bool],
     ) -> dict[str, Any]:
+        """One bounded SSE connection; its contact counts for P2c-3a."""
+        contact = room_contact(self.base_url, "GET", f"/rooms/{urllib.parse.quote(room_id, safe='')}/events/stream")
+        try:
+            result = self._stream_events_once(room_id, after, on_event)
+        except ProtocolError as error:
+            error.contact = error.contact or contact
+            raise
+        _contact_succeeded(contact)
+        return result
+
+    def _stream_events_once(
+        self,
+        room_id: str,
+        after: int,
+        on_event: Callable[[dict[str, Any]], bool],
+    ) -> dict[str, Any]:
         """Consume one bounded SSE connection.
 
         ``on_event`` runs in the transport thread and returns False to close
@@ -374,16 +473,20 @@ class RoomProtocol:
                 return {"cursor": cursor, "ready": ready}
         except urllib.error.HTTPError as error:
             raw = error.read(1 << 16)
-            try:
-                envelope = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                envelope = {}
+            retry_after = parse_retry_after(error.headers.get("Retry-After", "") if error.headers else "")
+            envelope = _error_envelope(raw)
+            if envelope is None:
+                # Contract P2c-3a: an edge or proxy page is a failed contact.
+                raise ProtocolError(
+                    f"SSE answered HTTP {error.code} without the Room's JSON",
+                    status=error.code, retryable=True, retry_after=retry_after, non_json=True,
+                ) from None
             raise ProtocolError(
                 envelope.get("message") or f"SSE returned HTTP {error.code}",
                 status=error.code,
                 code=envelope.get("code", ""),
                 retryable=bool(envelope.get("retryable")) or error.code == 429 or error.code >= 500,
-                retry_after=parse_retry_after(error.headers.get("Retry-After", "")),
+                retry_after=retry_after,
             ) from None
         except (OSError, http.client.HTTPException) as error:
             raise ProtocolError(f"SSE unavailable: {error}", retryable=True) from None

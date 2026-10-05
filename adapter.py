@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import re
+import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -36,10 +37,13 @@ from .context import source_artifact_context as _source_artifact_context
 from .origin_context import forget_room_context, is_room_context
 from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
+    InvalidEventPage,
     ProtocolError,
     RoomProtocol,
+    contact_successes,
     reconnect_delay,
     stable_key,
+    valid_event_page,
 )
 from .room_tools import (
     ROOM_CONTEXT_SCHEMA,
@@ -441,11 +445,24 @@ def _kept_reply_text(kept: dict[str, Any], source: dict[str, Any] | None, state:
 
 def _status_error_code(error: "ProtocolError") -> str:
     """A status code for a Room failure: the server code, else a fixed class."""
+    if getattr(error, "non_json", False):
+        return "invalid_json_response"
     if error.code:
         return error.code
     if error.status:
         return f"http_{int(error.status)}"
     return "network"
+
+
+def _uncoded_contact_failure(error: BaseException) -> bool:
+    """Contract P2c-3a: a failed contact the Room has not answered yet.
+
+    A network failure, a timeout, a 5xx or 429 without a code, or an answer
+    whose body is not the Room's JSON. A coded Room answer is an answer and is
+    never retried as a failed contact (same rule as OpenClaw
+    uncodedContactFailure).
+    """
+    return isinstance(error, ProtocolError) and error.retryable and not error.code
 
 
 def _secret_store_dirs() -> list[Any]:
@@ -510,6 +527,45 @@ def _core_tool_selection() -> tuple[set[str] | None, list[str]]:
         return {name for name in names if name}, mcp
     except Exception:  # noqa: BLE001 - core cannot report its selection
         return None, mcp
+
+
+def _room_turn_tool_selection() -> set[str] | None:
+    """Contract P2c-6: the tool names core resolves for a gateway turn of the
+    platform ``synthetic_sociality``, the way the gateway does it: its own
+    configuration loader, ``_get_platform_tools`` for this platform, then
+    ``agent.disabled_toolsets``. This adapter overrides no toolsets.
+
+    None (status ``unknown``) when core does not offer that resolution to the
+    plugin (no loaded gateway, an older core, any failure). Never the
+    profile-wide list. Never raises.
+    """
+    try:
+        run = sys.modules.get("gateway.run")
+        load = getattr(run, "_load_gateway_config", None)
+        if not callable(load):
+            return None
+        from hermes_cli.tools_config import _get_platform_tools  # Hermes core
+        import model_tools  # Hermes core
+
+        config = load() or {}
+        enabled = sorted(_get_platform_tools(config, NAME))
+        raw = (config.get("agent") or {}).get("disabled_toolsets")
+        try:
+            from agent.skill_utils import parse_config_string_list  # Hermes core
+
+            disabled = parse_config_string_list(raw) or None
+        except ImportError:  # an older core passes the configured list as it is
+            disabled = raw or None
+        definitions = model_tools.get_tool_definitions(
+            enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True,
+        )
+        names = {
+            str(((item or {}).get("function") or {}).get("name") or (item or {}).get("name") or "")
+            for item in definitions or []
+        }
+        return {name for name in names if name}
+    except Exception:  # noqa: BLE001 - core cannot report the turn's selection
+        return None
 
 
 def _tool_cwd(kwargs: dict[str, Any]) -> str:
@@ -1266,9 +1322,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _secret_store_reasons(self) -> list[str]:
         reasons: list[str] = []
         tool_names, mcp_servers = _core_tool_selection()
-        # Contract P2c-6: the same selection tells whether a web reading tool
-        # is offered; None (not reported) stays unknown.
-        self._tool_selection = None if tool_names is None else set(tool_names)
+        # Contract P2c-6: web reading is what a gateway turn of this platform
+        # gets, not the profile-wide selection used above; None stays unknown.
+        self._tool_selection = _room_turn_tool_selection()
         directories = [self._state_file.parent, *_secret_store_dirs()]
         for index, directory in enumerate(directories):
             if directory in directories[:index]:
@@ -1384,11 +1440,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             task.cancel()
         for task in getattr(self, "_submission_tasks", {}).values():
             task.cancel()
+        acknowledgement_retries = list(getattr(self, "_ack_retry_tasks", {}).values())
+        for task in acknowledgement_retries:
+            task.cancel()
         await asyncio.gather(
             *self._tasks.values(),
             *self._heartbeat_tasks.values(),
             *getattr(self, "_attempt_renewal_tasks", {}).values(),
             *getattr(self, "_submission_tasks", {}).values(),
+            *acknowledgement_retries,
             return_exceptions=True,
         )
         self._tasks.clear()
@@ -3217,8 +3277,21 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     async def _watch(self, binding: RoomBinding, *, is_reconnect: bool) -> None:
         # Contract P2c-3a: one schedule, no attempt limit, never handed back
-        # to the host; it resets after an accepted registration or a cycle.
+        # to the host. It returns to its first step only when the contact that
+        # last failed has succeeded since, or a whole cycle completed; an
+        # accepted registration alone does not reset it.
         step = 0
+        failed: tuple[str, int] | None = None
+
+        def next_step(error: BaseException) -> int:
+            nonlocal failed
+            current = step
+            if failed is not None and failed[0] and contact_successes(failed[0]) > failed[1]:
+                current = 0
+            contact = str(getattr(error, "contact", "") or "")
+            failed = (contact, contact_successes(contact) if contact else 0)
+            return current
+
         try:
             while not self._stop.is_set() and binding.enabled and not binding.revoked:
                 try:
@@ -3233,10 +3306,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             code="orphaned_delivery_intent",
                             retryable=False,
                         )
-                    registrations = self._registration_count(binding.room_id)
                     connector = await self._ensure_connector(binding)
-                    if self._registration_count(binding.room_id) != registrations:
-                        step = 0
                     await self._accept_connector_enrollments(binding)
                     await self._ensure_epoch_session_routing(binding)
                     await self._repair_pending_lifecycles(binding)
@@ -3265,7 +3335,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     await self._transport_cycle(binding)
                     self._report_ledger(binding)
                     self._persist_binding(binding)
-                    step = 0
+                    step, failed = 0, None
                 except asyncio.CancelledError:
                     raise
                 except ProtocolError as error:
@@ -3283,6 +3353,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         return
                     logger.warning("Room %s temporarily unavailable: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
+                    step = next_step(error)
                     await asyncio.sleep(reconnect_delay(step, retry_after=error.retry_after, status=error.status))
                     step += 1
                 except Exception as error:  # noqa: BLE001 - contract P2c-3
@@ -3293,6 +3364,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         "Room %s connector loop failed (%s); reconnecting", binding.room_id, type(error).__name__,
                     )
                     self._status_room(binding, connection="reconnecting", error_code="connector_error")
+                    step = next_step(error)
                     await asyncio.sleep(reconnect_delay(step))
                     step += 1
         finally:
@@ -3343,11 +3415,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._long_poll_once(binding)
 
     async def _long_poll_once(self, binding: RoomBinding) -> None:
+        # Contract P2c-3a: an invalid page is never processed; _watch reads
+        # again from the same frontier on the schedule.
         page = await self._call(
             binding,
-            lambda api: api.events(binding.room_id, self._read_frontier(binding), 8, all_epochs=True),
+            lambda api: valid_event_page(api.events(binding.room_id, self._read_frontier(binding), 8, all_epochs=True)),
         )
-        for event in page.get("events", []):
+        for event in page.get("events") or []:
             await self._consume(binding, event)
 
     def _read_frontier(self, binding: RoomBinding) -> int:
@@ -3392,9 +3466,19 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 self._note_connected(binding, heartbeat)
                 return heartbeat
             except ProtocolError as error:
-                if error.revoked or error.expired:
+                # Contract P2c-3a: register again only when the Room said in
+                # its JSON that the session is lost. A failed contact keeps the
+                # session: the heartbeat loop retries it on its own schedule
+                # and the event stream is read meanwhile (as OpenClaw's scan).
+                if error.session_lost:
+                    binding.connector_session_id = ""
+                elif error.retryable and not error.revoked and not error.expired:
+                    logger.warning("Room %s heartbeat failed (%s); session kept, retried by the heartbeat loop",
+                                   binding.room_id, _status_error_code(error))
+                    self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
+                    return {}
+                else:
                     raise
-                binding.connector_session_id = ""
         metadata = {
             "runtimeName": "Hermes Agent",
             "runtimeVersion": os.environ.get("HERMES_VERSION", "unknown"),
@@ -3533,7 +3617,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         return
                     logger.warning("Room %s heartbeat failed; lease will truthfully expire: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
-                    if error.status == 404 or error.code == "connector_not_active":
+                    if error.session_lost:
+                        # Contract P2c-3a: only the Room's own JSON answer
+                        # loses the session; the next heartbeat registers.
                         getattr(self, "_registered_rooms", set()).discard(binding.room_id)
                     # A 429 is a scheduling instruction: its Retry-After is
                     # honoured up to 120 s, a 5xx one up to the cap (P2c-3a);
@@ -4526,12 +4612,31 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             payload["executionFailure"] = dict(execution_failure or typed_execution_failure("runtime", ""))
         elif execution_failure:
             payload["executionFailure"] = dict(execution_failure)
-        await self._call(
-            binding,
-            lambda api: api.complete_discussion_attempt(
-                binding.room_id, str(cycle["id"]), str(attempt["id"]), payload,
-            ),
-        )
+        # Contract P2c-3a: the settle of a turn's attempt is retried on the
+        # schedule while the Room has not answered; renewal is not part of
+        # it, so the Room ends the attempt with its lease meanwhile (P1-1) and
+        # then answers with a code.
+        step = 0
+        while True:
+            try:
+                await self._call(
+                    binding,
+                    lambda api: api.complete_discussion_attempt(
+                        binding.room_id, str(cycle["id"]), str(attempt["id"]), payload,
+                    ),
+                )
+                break
+            except ProtocolError as error:
+                stop = getattr(self, "_stop", None)
+                if (not _uncoded_contact_failure(error) or (stop is not None and stop.is_set())
+                        or not binding.enabled or binding.revoked):
+                    raise
+                if step == 0:
+                    logger.warning("Room %s attempt settle failed (%s); retrying inside the connector",
+                                   binding.room_id, _status_error_code(error))
+                self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
+                await asyncio.sleep(reconnect_delay(step, retry_after=error.retry_after, status=error.status))
+                step += 1
         failure = payload.get("executionFailure") or {}
         logger.info(
             "Room %s settled attempt %s action %s code %s",
@@ -4789,11 +4894,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 context_events = await self._call(
                     binding,
                     lambda api: _recent_room_messages(
-                        lambda after: api.events(binding.room_id, after, 0),
+                        lambda after: valid_event_page(api.events(binding.room_id, after, 0)),
                         before_seq=seq,
                         active_epoch_starts_at=starts_at,
                     ),
                 )
+        except InvalidEventPage:
+            # Contract P2c-3a: an invalid page is never processed; this turn
+            # is read again from the durable frontier on the schedule.
+            self._inflight_events.discard(event_id)
+            raise
         except Exception as error:
             # Canonical delivery remains available if the bounded enrichment
             # read fails; the next Room event gets another chance to refresh.
@@ -4805,8 +4915,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # earlier event enters the prompt otherwise.
             try:
                 current_page = await self._call(
-                    binding, lambda api: _loaded_page(api.events(binding.room_id, max(0, seq - 101), 0), seq),
+                    binding, lambda api: _loaded_page(valid_event_page(api.events(binding.room_id, max(0, seq - 101), 0)), seq),
                 )
+            except InvalidEventPage:
+                self._inflight_events.discard(event_id)
+                raise
             except Exception as error:
                 logger.warning("Room %s context refresh unavailable: %s", binding.room_id, error)
         self._remember_post_numbers(binding.room_id, [*context_events, event])
@@ -4823,7 +4936,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     start_event = await self._call(
                         binding,
                         lambda api: _epoch_start_event(
-                            lambda after: api.events(binding.room_id, after, 0), starts_at,
+                            lambda after: valid_event_page(api.events(binding.room_id, after, 0)), starts_at,
                         ),
                     )
                 except Exception as error:
@@ -5072,7 +5185,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             def page(after: int) -> dict[str, Any]:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("cycle source lookup deadline")
-                return api.events(binding.room_id, after, 0)
+                return valid_event_page(api.events(binding.room_id, after, 0))
 
             return _cycle_source_message(
                 page, source_id, before_seq=before_seq, active_epoch_starts_at=starts_at,
@@ -5138,7 +5251,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 ), None)
                 if source is None:
                     source = await self._call(binding, lambda api, source_id=source_id: _cycle_source_message(
-                        lambda after: api.events(binding.room_id, after, 0), source_id,
+                        lambda after: valid_event_page(api.events(binding.room_id, after, 0)), source_id,
                         before_seq=current_seq, active_epoch_starts_at=starts_at,
                         types=MISSED_SOURCE_EVENT_TYPES,
                     ))
@@ -5150,7 +5263,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         mark = server_missed
                     continue
                 newer, complete = await self._call(binding, lambda api, source_seq=source_seq: _count_messages_between(
-                    lambda after: api.events(binding.room_id, after, 0), source_seq, current_seq,
+                    lambda after: valid_event_page(api.events(binding.room_id, after, 0)), source_seq, current_seq,
                 ))
                 time_text = ""
                 raw_ts = str(source.get("ts") or "")
@@ -5240,7 +5353,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             ), None)
             if source is None:
                 source = await self._call(binding, lambda api: _cycle_source_message(
-                    lambda after: api.events(binding.room_id, after, 0), source_id,
+                    lambda after: valid_event_page(api.events(binding.room_id, after, 0)), source_id,
                     before_seq=current_seq + 1, active_epoch_starts_at=starts_at,
                 ))
         except ProtocolError as error:
@@ -5300,7 +5413,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             start_event = await self._call(
                 binding,
                 lambda api: _epoch_start_event(
-                    lambda after: api.events(binding.room_id, after, 0), starts_at,
+                    lambda after: valid_event_page(api.events(binding.room_id, after, 0)), starts_at,
                 ),
             )
         rendered = _discussion_handover_context(start_event)
@@ -5771,11 +5884,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if not defer_ack_failure:
                 raise
             # The completion evidence above is durable; the acknowledgement
-            # is retried with the next contiguous frontier (OP-12 P4 r3 #1).
+            # is retried with the next contiguous frontier (OP-12 P4 r3 #1),
+            # and, while the Room has not answered, on the P2c-3a schedule.
             logger.warning(
                 "Room %s acknowledgement deferred at seq %s after durable evidence: %s code %s",
                 binding.room_id, cursor, type(error).__name__, getattr(error, "code", "") or "-",
             )
+            if _uncoded_contact_failure(error):
+                self._retry_acknowledgement(binding, error)
             return
         binding.acknowledged_cursor = cursor
         binding.cursor = max(binding.cursor, cursor)
@@ -5807,6 +5923,47 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if pruned:
             logger.info("Room %s pruned %d terminal delivery intents", binding.room_id, len(pruned))
         self._persist_binding(binding)
+
+    def _retry_acknowledgement(self, binding: RoomBinding, error: ProtocolError) -> None:
+        """Contract P2c-3a: retry a deferred acknowledgement on the schedule.
+
+        One task per Room. Each try acknowledges the contiguous frontier of
+        the durable evidence again; it ends when the frontier moved (here or
+        by a later completion), on a coded Room answer, or on stop.
+        """
+        tasks = getattr(self, "_ack_retry_tasks", None)
+        if tasks is None:
+            tasks = self._ack_retry_tasks = {}
+        running = tasks.get(binding.room_id)
+        if running is not None and not running.done():
+            return
+        self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
+
+        async def retry() -> None:
+            step, last = 0, error
+            try:
+                stop = getattr(self, "_stop", None) or asyncio.Event()
+                while not stop.is_set() and binding.enabled and not binding.revoked:
+                    await asyncio.sleep(reconnect_delay(step, retry_after=last.retry_after, status=last.status))
+                    step += 1
+                    seq = binding.acknowledged_cursor + 1
+                    if not self._terminal_evidence_valid(
+                            str(binding.inbox.get(str(seq)) or ""), dict(binding.terminal_evidence.get(str(seq)) or {})):
+                        return
+                    try:
+                        await self._complete_event(binding, seq)
+                        self._status_room(binding, connected=True)
+                        return
+                    except ProtocolError as failure:
+                        if not _uncoded_contact_failure(failure):
+                            logger.warning("Room %s acknowledgement retry ended: code %s",
+                                           binding.room_id, failure.code or "-")
+                            return
+                        last = failure
+            finally:
+                tasks.pop(binding.room_id, None)
+
+        tasks[binding.room_id] = asyncio.create_task(retry(), name=f"synthetic-sociality-ack:{binding.room_id}")
 
     def _report_ledger(self, binding: RoomBinding) -> None:
         """Contract P3-3: holes and held quarantines as status codes, each hole

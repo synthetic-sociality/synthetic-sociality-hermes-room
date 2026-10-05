@@ -15,6 +15,7 @@ the calling function) and compressed to milliseconds.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 import tempfile
@@ -50,6 +51,27 @@ class Waits:
 
     def of(self, caller):
         return [delay for name, delay in self.calls if name == caller]
+
+
+def edge_error(status, body=b"<html><body>edge error page</body></html>"):
+    """The ProtocolError the real client raises for an edge or proxy page."""
+    failure = protocol.urllib.error.HTTPError("https://room.example/api/x", status, "edge", {}, io.BytesIO(body))
+    with mock.patch.object(protocol.urllib.request, "urlopen", side_effect=failure):
+        try:
+            protocol.RoomProtocol("https://room.example/api", "credential").request("GET", "/rooms/room-1/x")
+        except adapter.ProtocolError as error:
+            return error
+    raise AssertionError("no error raised")
+
+
+def base(step, cap=CAP):
+    return min(cap, 2.0 ** step)
+
+
+def on_schedule(case, waits, cap=CAP):
+    """Each wait in [0.8, 1.0] of its base 1, 2, 4, 8, 15, ... s."""
+    for step, delay in enumerate(waits):
+        case.assertTrue(0.8 * base(step, cap) - 1e-9 <= delay <= base(step, cap) + 1e-9, (step, waits))
 
 
 def http_error(status, *, code="", retry_after="", message=""):
@@ -178,7 +200,7 @@ def run_watch(instance, binding, until, *, timeout=20.0, after=None):
 class P7aConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP7aCases"]
-        self.assertEqual(len(cases), 9)
+        self.assertEqual(len(cases), 16)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P7a-{index:02d} "), name)
@@ -338,6 +360,9 @@ class P7aTests(unittest.TestCase):
         failures = waits.of("_watch")[:12]
         self.assertEqual(len(failures), 12)
         self.assertTrue(all(delay <= CAP for delay in failures), failures)
+        on_schedule(self, failures)  # the jitter bound: [0.8, 1.0] of each base
+        # The factor is drawn, not fixed: twelve waits never all sit on their base.
+        self.assertTrue(any(delay < base(step) - 1e-9 for step, delay in enumerate(failures)), failures)
         self.assertEqual(instance.connects, [])
 
     def test_p7a_07_attempt_renewal_retries_within_1_s_and_never_past_the_lease(self):
@@ -446,12 +471,421 @@ class P7aTests(unittest.TestCase):
                     instance._tasks = {}
                     instance._renewal_task = None
                     instance.config = types.SimpleNamespace(extra={})
-                    with mock.patch.object(adapter, "_core_tool_selection", lambda: selection), \
+                    with mock.patch.object(adapter, "_core_tool_selection", lambda: (set(), [])), \
+                            mock.patch.object(adapter, "_room_turn_tool_selection", lambda: selection[0]), \
                             self.assertLogs(adapter.logger, level="DEBUG"):
                         adapter.logger.debug("connect")
                         asyncio.run(instance.connect())
                     written = local_status.read(path)
                     self.assertEqual((written["webRead"], written["webReadTools"]), expected)
+
+
+
+class Endless(list):
+    """A scripted failure that never runs out (``FakeRoom`` pops its errors)."""
+
+    def __init__(self, make):
+        super().__init__([None])
+        self.make = make
+
+    def pop(self, _index=-1):
+        return self.make()
+
+
+def html_page_room():
+    room = FakeRoom()
+    room.stream_errors = [edge_error(403), edge_error(404)]
+    room.pending_events = [{"id": "evt-after-edge", "type": "message.posted"}]
+    return room
+
+
+class P7aRound2Tests(unittest.TestCase):
+    def test_the_failed_contacts_are_the_listed_ones(self):
+        # Contract P2c-3a: an edge page with any status is a failed contact;
+        # the Room's own JSON decides everything else.
+        for status in (401, 403, 404, 413, 502):
+            with self.subTest(status=status):
+                error = edge_error(status)
+                self.assertTrue(error.non_json and error.retryable and not error.code, status)
+                self.assertFalse(error.revoked or error.expired or error.session_lost)
+                self.assertFalse(error.hard_sse_unavailable)
+                self.assertTrue(adapter._uncoded_contact_failure(error))
+                self.assertEqual(adapter._status_error_code(error), "invalid_json_response")
+        room_404 = edge_error(404, json.dumps({"code": "not_found", "message": "room or object not found"}).encode())
+        self.assertTrue(room_404.session_lost and not room_404.retryable)
+        revoked = edge_error(401, json.dumps({"code": "credential_revoked"}).encode())
+        self.assertTrue(revoked.revoked and not revoked.retryable)
+        marked = edge_error(409, json.dumps({"code": "stale_context", "retryable": True}).encode())
+        self.assertTrue(marked.retryable)
+        self.assertFalse(adapter._uncoded_contact_failure(marked))  # an answer, never retried as a contact
+        network = protocol.urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        with mock.patch.object(protocol.urllib.request, "urlopen", side_effect=network):
+            with self.assertRaises(adapter.ProtocolError) as raised:
+                protocol.RoomProtocol("https://room.example/api", "credential").request("GET", "/status")
+        self.assertTrue(raised.exception.retryable and not raised.exception.code)
+
+    def test_p7a_10_html_error_pages_are_failed_contacts(self):
+        # The event read: the loop continues, the SSE route stays in use.
+        room = html_page_room()
+        instance, binding = watched(room)
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: instance.consumed == ["evt-after-edge"])
+        self.assertTrue(outcome["reached"], instance.consumed)
+        self.assertFalse(outcome["exited"])
+        self.assertNotEqual(binding.transport, "long_poll_fallback")
+        self.assertEqual(len(waits.of("_watch")), 2)
+        self.assertEqual(room.registrations, 1)
+
+        # The heartbeat: the loop and the session stay; no registration.
+        room = FakeRoom()
+        room.heartbeat_errors = [edge_error(403), edge_error(404)]
+        instance, binding = watched(room)
+        instance._registered_rooms.add(binding.room_id)
+
+        async def heartbeat():
+            task = asyncio.create_task(instance._heartbeat_loop(binding, 0.01))
+            while room.heartbeats < 2:
+                await REAL_SLEEP(0.01)
+            alive = not task.done()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return alive
+
+        with mock.patch.object(asyncio, "sleep", Waits()), self.assertLogs(adapter.logger, level="INFO"):
+            alive = asyncio.run(asyncio.wait_for(heartbeat(), 20))
+        self.assertTrue(alive)
+        self.assertEqual(room.registrations, 0)
+        self.assertIn(binding.room_id, instance._registered_rooms)
+
+        # The post: an edge page leaves the reply retryable, never quarantined.
+        for status in (403, 404, 413):
+            error = edge_error(status)
+            self.assertEqual(adapter.post_refusal_outcome(error.code, error.retryable), "retryable", status)
+
+    def test_p7a_11_an_invalid_context_page_is_read_again(self):
+        from test_parity_p1a import HUMAN, PEER, START
+
+        invalid = {"events": [{**START, "id": "never", "seq": 40, "type": "message.posted",
+                               "payload": {"body": "Never processed."}}, "garbage"]}
+        reads = {"context": 0}
+        event = {**HUMAN, "id": "m-44", "seq": 44}
+
+        def events(_room, after, _wait):
+            reads["context"] += 1
+            if reads["context"] == 1:
+                return invalid
+            return {"events": [item for item in (START, HUMAN, PEER) if item["seq"] > after]}
+
+        captured = []
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        instance.platform = adapter.Platform(adapter.NAME)
+        instance._inflight_events, instance._event_seq, instance._event_epoch = set(), {}, {"m-44": "epoch-2"}
+        instance._latest_source, instance._run_for_event, instance._epoch_handovers = {}, {}, {}
+        instance._cycle_attempts = {}
+        state = {"title": "Room", "headSeq": 60, "activeEpoch": {"id": "epoch-2", "startsAtSeq": 41}, "rules": [],
+                 "roster": [{"membershipId": "owner-1", "displayName": "Owner"},
+                            {"membershipId": "member-1", "displayName": "Agent"}]}
+        api = types.SimpleNamespace(room_state=lambda _room: state, room_policy=lambda _room: {"policy": {}},
+                                    events=events, artifacts=lambda _room: {"items": []}, artifact=lambda _r, _a: {})
+        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+        instance.build_source = types.MethodType(
+            lambda self, **kwargs: types.SimpleNamespace(platform=self.platform, **kwargs), instance)
+        instance.handle_message = lambda message: asyncio.sleep(0, result=captured.append(message))
+        binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential",
+                                      installation_id="inst-1", display_name="Agent")
+        binding.epoch_session_routing_initialized = True
+        binding.legacy_session_epoch_id = "epoch-1"
+        # The invalid page is never processed: the dispatch stops before the model.
+        with self.assertRaises(adapter.ProtocolError) as raised:
+            asyncio.run(instance._dispatch_room_event(binding, event, "generation-1"))
+        self.assertEqual(adapter._status_error_code(raised.exception), "invalid_event_page")
+        self.assertEqual(captured, [])
+        self.assertNotIn("m-44", instance._inflight_events)
+        # Read again (as _watch does from the durable frontier): the turn is not lost.
+        self.assertTrue(asyncio.run(instance._dispatch_room_event(binding, event, "generation-2")))
+        self.assertEqual(len(captured), 1)
+        self.assertNotIn("Never processed.", captured[0].text)
+
+        # The loop does not end: the failure is retried on the schedule.
+        room = FakeRoom()
+        room.pending_events = [{"id": "evt-1", "type": "message.posted"}]
+        instance, binding = watched(room)
+        attempts = []
+
+        async def consume(_binding, item):
+            attempts.append(item["id"])
+            if len(attempts) == 1:
+                raise raised.exception
+            instance.consumed.append(item["id"])
+
+        instance._consume = consume
+        original = room.stream_events
+
+        def stream(room_id, after, on_event):
+            if not room.pending_events and not instance.consumed:
+                room.pending_events = [{"id": "evt-1", "type": "message.posted"}]
+            return original(room_id, after, on_event)
+
+        room.stream_events = stream
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: instance.consumed == ["evt-1"])
+        self.assertTrue(outcome["reached"], attempts)
+        self.assertFalse(outcome["exited"])
+        self.assertLessEqual(waits.of("_watch")[0], 1.0)
+
+    def test_p7a_12_a_partial_outage_backs_off_without_registering(self):
+        # The event read succeeds and the processing of its event fails every time.
+        room = FakeRoom()
+        instance, binding = watched(room)
+
+        async def consume(_binding, _event):
+            raise http_error(503)
+
+        instance._consume = consume
+        original = room.stream_events
+
+        def stream(room_id, after, on_event):
+            room.pending_events = [{"id": "evt-1", "type": "message.posted"}]
+            return original(room_id, after, on_event)
+
+        room.stream_events = stream
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: len(waits.of("_watch")) >= 7)
+        self.assertTrue(outcome["reached"])
+        on_schedule(self, waits.of("_watch")[:7])
+        self.assertEqual(room.registrations, 1)
+
+        # OP-12 Hermes N4: every heartbeat fails and the stream fails while the
+        # Room would accept a registration.
+        room = FakeRoom()
+        room.heartbeat_errors = Endless(lambda: http_error(502))
+        room.stream_errors = Endless(lambda: http_error(502))
+        instance, binding = watched(room)
+        waits = Waits()
+        with mock.patch.object(adapter, "HEARTBEAT_MIN_INTERVAL_SECONDS", 3600), \
+                mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: len(waits.of("_watch")) >= 7)
+        self.assertTrue(outcome["reached"])
+        on_schedule(self, waits.of("_watch")[:7])
+        self.assertEqual(room.registrations, 1)
+
+    def test_p7a_13_settle_and_acknowledgement_retry_inside_the_connector(self):
+        attempt = cycle_attempt()
+        instance, binding, api, _published, _dispatched = room_instance(attempt)
+        settles, acks = [], []
+        complete = api.complete_discussion_attempt
+        acknowledge = api.acknowledge
+
+        def flaky_complete(*args):
+            settles.append(True)
+            if len(settles) <= 2:
+                raise http_error(502)
+            return complete(*args)
+
+        def flaky_acknowledge(room_id, seq):
+            acks.append(seq)
+            if len(acks) == 1:
+                raise edge_error(503)
+            if len(acks) == 2:
+                raise adapter.ProtocolError("Room API unavailable: [Errno 104] Connection reset by peer", retryable=True)
+            return acknowledge(room_id, seq)
+
+        api.complete_discussion_attempt = flaky_complete
+        api.acknowledge = flaky_acknowledge
+        waits = Waits()
+
+        async def run():
+            await instance._complete_cycle_attempt(binding, attempt, "pass")
+            await instance._complete_event_durably(binding, 5, terminal_status="skipped", source_id="evt-5",
+                                                   reason="model_no_visible_reply")
+            deadline = time.monotonic() + 10
+            while binding.acknowledged_cursor < 5 and time.monotonic() < deadline:
+                await REAL_SLEEP(0.01)
+
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            asyncio.run(run())
+        self.assertEqual(len(settles), 3)
+        self.assertEqual(api.completions[-1][0], "attempt-1")
+        self.assertEqual(binding.acknowledged_cursor, 5)
+        self.assertEqual(api.acks, [5])
+        self.assertLessEqual(waits.of("_complete_cycle_attempt")[0], 1.0)
+        self.assertLessEqual(waits.of("retry")[0], 1.0)
+        self.assertEqual(len(waits.of("_complete_cycle_attempt")) + len(waits.of("retry")), 4)
+
+    def test_p7a_14_status_connection_precedence(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "status.json"
+            status = local_status.LocalStatus(path, plugin="hermes", version=adapter.CONNECTOR_VERSION, host_label="h")
+            seen = []
+
+            def note():
+                entry = local_status.read(path)["rooms"]["room-1"]
+                seen.append((entry["connection"], entry["lastErrorCode"]))
+
+            status.room("room-1", "member-1", connected=True, registered=True); note()
+            status.room("room-1", connection="inactive", inactive=True, error_code="connector_not_active"); note()
+            status.room("room-1", connected=True); note()  # a heartbeat while muted
+            status.room("room-1", connection="reconnecting", error_code="network"); note()
+            status.room("room-1", connected=True); note()  # up again, still muted
+            status.room("room-1", error_code="credential_revoked")
+            status.room("room-1", connection="stopped"); note()
+            status.room("room-1", connected=True, registered=True); note()  # a new runtime registers
+            status.room("room-1", connection="inactive", inactive=True, error_code="connector_not_active")
+            status.room("room-1", inactive=False, connection="connected", error_code=""); note()  # unmuted
+            self.assertEqual(seen, [
+                ("connected", ""), ("inactive", "connector_not_active"), ("inactive", "connector_not_active"),
+                ("reconnecting", "network"), ("inactive", "network"), ("stopped", "credential_revoked"),
+                ("connected", "credential_revoked"), ("connected", ""),
+            ])
+
+    def test_p7a_15_heartbeat_retry_schedule_and_reset(self):
+        room = FakeRoom()
+        script = [False, False, True, False, True]
+        heartbeat = room.heartbeat
+
+        def scripted(room_id, session):
+            with room.lock:
+                calls = getattr(room, "calls", 0) + 1
+                room.calls = calls
+            if calls <= len(script) and not script[calls - 1]:
+                raise http_error(503)
+            return heartbeat(room_id, session)
+
+        room.heartbeat = scripted
+        instance, binding = watched(room)
+        instance._registered_rooms.add(binding.room_id)
+        waits = Waits()
+
+        async def run():
+            task = asyncio.create_task(instance._heartbeat_loop(binding, 60))
+            while getattr(room, "calls", 0) < len(script) + 1:
+                await REAL_SLEEP(0.01)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            asyncio.run(asyncio.wait_for(run(), 20))
+        delays = waits.of("_heartbeat_loop")[:6]
+        # interval, fail -> step 0, fail -> step 1, success -> interval, fail -> step 0 again, success -> interval
+        self.assertEqual(delays[0], 60, delays)
+        on_schedule(self, delays[1:3])
+        self.assertEqual(delays[3], 60, delays)
+        on_schedule(self, delays[4:5])
+        self.assertEqual(delays[5], 60, delays)
+
+    def test_p7a_16_renewal_and_reclaim_capped_at_5_s(self):
+        # One function serves the renewal and the re-claim before a post.
+        def lease_in(seconds):
+            at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            return at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+        attempt = cycle_attempt(lease=lease_in(600))
+        instance, binding, _api, _published, _dispatched = room_instance(attempt)
+        outcomes = [http_error(503) for _ in range(6)] + [attempt]
+
+        async def claim(_binding, _cycle, _bound=None):
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        instance._claim_discussion_attempt = claim
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="WARNING"):
+            self.assertIs(asyncio.run(instance._claim_held_attempt(binding, "evt-5", attempt)), attempt)
+        on_schedule(self, waits.of("_claim_held_attempt")[:6], cap=5.0)
+        self.assertEqual(len(waits.of("_claim_held_attempt")), 6)
+
+        # The re-claim before a post goes through the same call.
+        attempt = cycle_attempt(lease=lease_in(600))
+        instance, binding, api, _published, _dispatched = room_instance(attempt)
+        api.claim = lambda number: (_ for _ in ()).throw(http_error(503)) if number <= 6 else attempt
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="WARNING"):
+            result = asyncio.run(instance._send_final("room-1", adapter._dispatch_source_ref("evt-5", "g5"), "An answer."))
+        self.assertTrue(result.success)
+        self.assertEqual(len(api.posts), 1)
+        on_schedule(self, waits.of("_claim_held_attempt")[:6], cap=5.0)
+
+    def test_the_stream_loop_resets_after_a_full_cycle_never_after_a_registration(self):
+        # A full cycle resets the schedule.
+        room = FakeRoom()
+        instance, binding = watched(room)
+        script = [False, False, False, True, False, False]
+        calls = []
+
+        async def consume(_binding, event):
+            calls.append(event["id"])
+            if not script[min(len(calls), len(script)) - 1]:
+                raise http_error(503)
+            instance.consumed.append(event["id"])
+
+        instance._consume = consume
+        original = room.stream_events
+
+        def stream(room_id, after, on_event):
+            room.pending_events = [{"id": f"evt-{len(calls) + 1}", "type": "message.posted"}]
+            return original(room_id, after, on_event)
+
+        room.stream_events = stream
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: len(waits.of("_watch")) >= 5)
+        self.assertTrue(outcome["reached"])
+        delays = waits.of("_watch")[:5]
+        on_schedule(self, delays[:3])
+        on_schedule(self, delays[3:5])  # the first step again after the full cycle
+
+        # The Room says the session is lost at every heartbeat and accepts each
+        # registration while the stream fails: the registrations reset nothing.
+        room = FakeRoom()
+        room.heartbeat_errors = Endless(lambda: http_error(404, code="not_found"))
+        room.stream_errors = Endless(lambda: http_error(502))
+        instance, binding = watched(room)
+        waits = Waits()
+        with mock.patch.object(adapter, "HEARTBEAT_MIN_INTERVAL_SECONDS", 3600), \
+                mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: len(waits.of("_watch")) >= 6)
+        self.assertTrue(outcome["reached"])
+        on_schedule(self, waits.of("_watch")[:6])
+        self.assertGreaterEqual(room.registrations, 5)
+
+    def test_web_read_uses_the_gateway_turn_selection(self):
+        # OP-12 Hermes N2: a saved platform list without web tools gives a Room
+        # turn no web tool, whatever the profile-wide selection has.
+        try:
+            from hermes_cli.tools_config import _get_platform_tools  # noqa: F401 - Hermes core
+            import model_tools  # Hermes core
+        except Exception as error:  # noqa: BLE001
+            self.skipTest(f"Hermes core not importable: {type(error).__name__}")
+        names = {"web": ["web_search", "web_extract"], "terminal": ["terminal"], "file": ["read_file"]}
+
+        def definitions(enabled_toolsets=None, disabled_toolsets=None, quiet_mode=False, **_kwargs):
+            chosen = [name for toolset in (enabled_toolsets or []) for name in names.get(toolset, [])
+                      if toolset not in (disabled_toolsets or [])]
+            return [{"function": {"name": name}} for name in chosen]
+
+        def resolve(config):
+            run = types.ModuleType("gateway.run")
+            run._load_gateway_config = lambda: config
+            with mock.patch.dict(sys.modules, {"gateway.run": run}), \
+                    mock.patch.object(model_tools, "get_tool_definitions", definitions):
+                return adapter._room_turn_tool_selection()
+
+        without_web = resolve({"platform_toolsets": {adapter.NAME: ["terminal", "file"]}})
+        self.assertIsNotNone(without_web)
+        self.assertFalse(without_web & set(local_status.WEB_READ_TOOL_NAMES), without_web)
+        with_web = resolve({"platform_toolsets": {adapter.NAME: ["terminal", "web"]}})
+        self.assertIn("web_search", with_web)
+        disabled = resolve({"platform_toolsets": {adapter.NAME: ["terminal", "web"]}, "agent": {"disabled_toolsets": ["web"]}})
+        self.assertNotIn("web_search", disabled)
+        # No gateway loader offered to the plugin: unknown, never the wider list.
+        with mock.patch.dict(sys.modules, {"gateway.run": types.ModuleType("gateway.run")}):
+            self.assertIsNone(adapter._room_turn_tool_selection())
 
 
 if __name__ == "__main__":

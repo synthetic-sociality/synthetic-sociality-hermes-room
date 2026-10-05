@@ -286,6 +286,9 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             attempt = {"cycle": {"id": "cycle-1", "generation": 3},
                        "attempt": {"id": "attempt-1", "membershipId": "member-1"}}
             snapshots, completions, committed_actions = [], [], []
+            # The gateway stops right after the lost completion response: the
+            # P2c-3a settle retry ends there and the restart recovers it.
+            stopping = asyncio.Event()
 
             class API:
                 def room_state(self, _room_id):
@@ -296,6 +299,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     if len(completions) == 1:
                         if committed:
                             committed_actions.append(payload["action"])
+                        stopping.set()
                         raise adapter.ProtocolError("lost completion response", retryable=True)
                     if not committed_actions:
                         committed_actions.append(payload["action"])
@@ -319,6 +323,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 return instance
 
             instance = configure(attempt)
+            instance._stop = stopping
             with self.assertRaises(adapter.ProtocolError):
                 await instance._send_final(binding.room_id, adapter._dispatch_source_ref("evt-5", "first"),
                                           "Sorry, I encountered an unexpected error.\n"
@@ -5300,8 +5305,12 @@ class ConnectorEnrollmentTests(unittest.TestCase):
                 protocol.connector_enrollments("installation-1")
 
         self.assertEqual(raised.exception.status, 200)
-        self.assertEqual(raised.exception.code, "invalid_json_response")
-        self.assertFalse(raised.exception.retryable)
+        # Contract P2c-3a (round 2): a body that is not the Room's JSON is a
+        # failed contact, whatever its status; never a coded Room answer.
+        self.assertEqual(raised.exception.code, "")
+        self.assertTrue(raised.exception.non_json)
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(adapter._status_error_code(raised.exception), "invalid_json_response")
 
     def test_protocol_normalizes_missing_and_empty_enrollment_routes(self):
         protocol = adapter.RoomProtocol("https://room.example/api", "credential")

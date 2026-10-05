@@ -68,8 +68,10 @@ class LocalStatus:
         # Contract P2c-3a: when the current outage of a Room began (monotonic
         # process memory only; never written).
         self._outage_started: dict[str, float] = {}
-        # Contract P2c-3b: Rooms whose membership is inactive (muted).
+        # Contract P2c-3b: Rooms whose membership is inactive (muted), and each
+        # Room's own connection state under that mark (P2c-4).
         self._inactive: set[str] = set()
+        self._connection: dict[str, str] = {}
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -130,19 +132,26 @@ class LocalStatus:
             if membership_id:
                 entry["membershipId"] = str(membership_id)
             key = str(room_id)
+            # Contract P2c-4: `connection` is the connection's own state, with
+            # `inactive` shown over `connected` only while the membership is
+            # muted (P2c-3b); `stopped` and `reconnecting` win over it. A stop
+            # or a new registration (a new runtime, an unmute) ends the mark.
             if inactive is True:
                 self._inactive.add(key)
-            elif inactive is False:
+            elif inactive is False or connection == "stopped" or (connected and registered):
                 self._inactive.discard(key)
-            if connection in CONNECTION_STATES:
-                entry["connection"] = connection
+            state = self._connection.get(key, entry["connection"])
+            if connection == "inactive":
+                state = "connected"
+            elif connection in CONNECTION_STATES:
+                state = connection
             if connection == "reconnecting":
                 # Contract P2c-3a: the first failure of an outage starts it.
                 self._outage_started.setdefault(key, time.monotonic())
             elif connection in {"stopped", "inactive"}:
                 self._outage_started.pop(key, None)
             if connected:
-                entry["connection"] = "connected"
+                state = "connected"
                 entry["lastConnectedAt"] = _now()
                 started = self._outage_started.pop(key, None)
                 if started is not None and registered:
@@ -150,10 +159,8 @@ class LocalStatus:
                     # failure; a heartbeat that survived ends the outage only.
                     entry["lastReconnectedAt"] = entry["lastConnectedAt"]
                     entry["lastOutageSeconds"] = round(max(0.0, time.monotonic() - started), 1)
-            if key in self._inactive:
-                # Contract P2c-3b: a muted membership stays inactive while its
-                # session and heartbeat continue.
-                entry["connection"] = "inactive"
+            self._connection[key] = state
+            entry["connection"] = "inactive" if state == "connected" and key in self._inactive else state
             if error_code is not None:
                 code = _code(error_code)
                 entry["lastErrorCode"] = code
