@@ -10,6 +10,7 @@ ISSUE-023 follow-ups. No test uses a real credential or talks to a live Room.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import sys
 import tempfile
@@ -31,6 +32,9 @@ context_module = sys.modules[adapter.__name__.rsplit(".", 1)[0] + ".context"]
 SENTENCE = CONFORMANCE["parityP7cNoStatusSentence"]
 # The Room server's instruction for a response turn, verbatim (hold-signal-47320f7
 # server/application/cycles/moderation.go:27-30).
+# A bound against a hang only: every wait below ends on an event or a condition,
+# none of them on the clock (P7c-10, P7c-16, N10).
+HANG_GUARD = 120.0
 RESPONSE_INSTRUCTION = (
     "The moderator has intervened; the message this turn answers is the moderator's. Respond to it first: "
     "acknowledge it briefly, then answer it. If the moderator's point is unclear to you, ask one short clarifying "
@@ -137,7 +141,7 @@ def claimed_attempt(attempt_id="attempt-1"):
 class P7cConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP7cCases"]
-        self.assertEqual(len(cases), 18)
+        self.assertEqual(len(cases), 20)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P7c-{index:02d} "), name)
@@ -243,24 +247,13 @@ class P7cTests(unittest.TestCase):
 
     def test_p7c_06_a_turn_whose_source_is_a_command_posts_without_responds_to(self):
         cases = {}
-        for label, source, context in (("command", "cmd-45", (START, HUMAN, PEER, ASK)),
-                                       ("message", "m-43", (START, HUMAN, PEER, ASK))):
-            attempt = claimed_attempt()
-            attempt["cycle"]["sourceEventId"] = source
-            build_message(attempt_ready(52, 1, source=source), attempt=attempt, context=context)
-
-            async def run(attempt=attempt, source=source):
-                instance, binding, api, _published, _dispatched = room_instance(attempt)
-                instance._cycle_response_sources["evt-5"] = source
-                recording = RecordingRoom(api)
-                result = await instance._send_final("room-1", source_ref(), "My answer.")
-                return recording, result, binding
-
-            recording, result, binding = asyncio.run(run())
+        for label, source in (("command", "cmd-45"), ("message", "m-43")):
+            # The send-time claim answers a fresh object (as the Room does).
+            recording, result, decided, _binding = asyncio.run(command_source_turn(source, renewals=0))
             self.assertTrue(result.success)
-            cases[label] = (recording.standalone, recording.responds_to)
-        self.assertEqual(cases["command"], ([True], ["cmd-45"]))
-        self.assertEqual(cases["message"], ([False], ["m-43"]))
+            cases[label] = (decided, recording.standalone, recording.responds_to)
+        self.assertEqual(cases["command"], ({"ready-52"}, [True], ["cmd-45"]))
+        self.assertEqual(cases["message"], (set(), [False], ["m-43"]))
         # The wire: a standalone post carries no respondsTo.
         sent = []
         api = protocol.RoomProtocol("https://room.example/api", "credential")
@@ -400,20 +393,44 @@ class P7cTests(unittest.TestCase):
             text = path.read_text()
             self.assertNotIn("Thorsten", text)
             self.assertNotIn("family", text)
+            # The later claim of that Room succeeded: the reason is cleared (P2c-4).
+            entry = local_status.read(path)["rooms"]["room-1"]
+            self.assertEqual((entry["lastGateWaitReason"], entry["lastGateWaitSeconds"]), ("", 0))
+        # Only cycle_no_attempt is a hold refusal: cycle_superseded during a hold records no reason.
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "status.json"
+
+            def superseded(_n):
+                raise adapter.ProtocolError("superseded", status=409, code="cycle_superseded")
+
+            instance, binding, record, _room_state = receive_instance(
+                state={"activeHold": hold}, claim=superseded, status_path=path)
+            asyncio.run(instance._consume(binding, response_ready(51)))
+            self.assertEqual(record.claims, ["cycle-1"])
+            self.assertEqual(record.completed[-1]["reason"], "discussion_attempt_unavailable")
+            rooms = (local_status.read(path).get("rooms") or {}) if path.exists() else {}
+            self.assertEqual((rooms.get("room-1") or {}).get("lastGateWaitReason", ""), "")
         # A turn already claimed keeps renewing through a hold (the Room answers
         # the renewal as before).
 
         async def renew():
             instance, binding, api, _published, _dispatched = room_instance(cycle_attempt(lease=_lease_in(3)))
             api.claim = lambda _n: cycle_attempt(lease=_lease_in(3))
-            instance._start_attempt_renewal(binding, "evt-5", instance._cycle_attempts["evt-5"])
-            await asyncio.sleep(1.3)
+            # The renewal's waits are compressed; it is awaited by count, not by time.
+            with mock.patch.object(asyncio, "sleep", Waits()):
+                instance._start_attempt_renewal(binding, "evt-5", instance._cycle_attempts["evt-5"])
+                held = instance._cycle_attempts["evt-5"]
+                for _ in range(100_000):
+                    if api.claims >= 2 and instance._cycle_attempts.get("evt-5") is not held:
+                        break
+                    await REAL_SLEEP(0)
+                await instance._stop_attempt_renewal("evt-5")
             renewals = api.claims
             result = await instance._send_final("room-1", source_ref(), "Answer after the hold.")
             return renewals, result, api
 
         renewals, result, api = asyncio.run(renew())
-        self.assertGreaterEqual(renewals, 1)
+        self.assertGreaterEqual(renewals, 2)
         self.assertTrue(result.success)
         self.assertEqual(len(api.posts), 1)
 
@@ -529,25 +546,30 @@ class P7cTests(unittest.TestCase):
 
     def test_p7c_16_a_revocation_on_the_heartbeat_ends_the_stream(self):
         for code, when in (("credential_revoked", "released later"), ("credential_expired", "released later"),
-                           ("credential_revoked", "fails at once"), ("credential_expired", "fails at once")):
+                           ("credential_revoked", "fails at once"), ("credential_expired", "fails at once"),
+                           ("credential_revoked", "fails at once with its own error")):
             with self.subTest(code=code, stream=when), tempfile.TemporaryDirectory() as scratch:
                 path = Path(scratch) / "status.json"
                 room = FakeRoom()
                 room.heartbeat_errors = [edge_error(401, json.dumps({"code": code, "message": "refused"}).encode())]
                 instance, binding = watched(room, path)
-                stream = types.SimpleNamespace(release=__import__("threading").Event(), reads=0)
+                stream = types.SimpleNamespace(release=__import__("threading").Event(), reads=0, late=[])
 
-                def open_stream(_room_id, after, _on_event):
+                def open_stream(_room_id, after, on_event):
                     # The Room keeps the stream open and sends nothing; it ends
                     # with a network error once released.
                     stream.reads += 1
                     stream.opened.set()
-                    if when == "fails at once":
+                    if when.startswith("fails at once"):
                         # The stream breaks right after the revocation, before
-                        # the loop looks at the binding again.
-                        stream.revoked.wait(10)
+                        # the loop looks at the binding again; an event read
+                        # after the revocation is refused by the reader.
+                        stream.revoked.wait(HANG_GUARD)
+                        stream.late.append(on_event({**INTERJECTION, "id": "m-late", "seq": 41}))
                     else:
-                        stream.release.wait(10)
+                        stream.release.wait(HANG_GUARD)
+                    if when == "fails at once with its own error":
+                        raise RuntimeError("the stream reader failed")
                     raise adapter.ProtocolError("Room network failure", retryable=True)
 
                 room.stream_events = open_stream
@@ -555,7 +577,7 @@ class P7cTests(unittest.TestCase):
                 original_heartbeat = room.heartbeat
 
                 def heartbeat_once_the_stream_is_open(room_id, session):
-                    stream.opened.wait(10)
+                    stream.opened.wait(HANG_GUARD)
                     return original_heartbeat(room_id, session)
 
                 room.heartbeat = heartbeat_once_the_stream_is_open
@@ -569,7 +591,7 @@ class P7cTests(unittest.TestCase):
                 ended = {}
 
                 async def after():
-                    deadline = time.monotonic() + 10
+                    deadline = time.monotonic() + HANG_GUARD
                     while not instance._tasks.get(binding.room_id, types.SimpleNamespace(done=lambda: True)).done() \
                             and time.monotonic() < deadline:
                         await REAL_SLEEP(0.01)
@@ -579,10 +601,11 @@ class P7cTests(unittest.TestCase):
 
                 with mock.patch.object(adapter, "update", lambda change: change(types.SimpleNamespace(binding=lambda _room: None))), \
                         mock.patch.object(asyncio, "sleep", Waits()), mock.patch.object(adapter, "logger", mock.Mock()):
-                    outcome = run_watch(instance, binding, lambda: not binding.enabled, timeout=10.0, after=after)
+                    outcome = run_watch(instance, binding, lambda: not binding.enabled, timeout=HANG_GUARD, after=after)
                 self.assertTrue(outcome["reached"])
                 self.assertTrue(ended["watch"], "the stream loop ended while the stream was still open")
                 self.assertEqual(stream.reads, 1)
+                self.assertEqual(stream.late, [False] if when.startswith("fails at once") else [])
                 entry = local_status.read(path)["rooms"]["room-1"]
                 self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", code))
 
@@ -620,8 +643,9 @@ class P7cTests(unittest.TestCase):
         self.assertEqual(frame.count(SENTENCE), 1)
         self.assertIn("- Debate for an audience", frame)
         # Paragraph breaks inside the sentence and white space around it are tolerated.
+        # A tab inside a run that holds a line feed is part of that break.
         broken = text.replace(" If you cannot read", "\n\nIf you cannot read").replace(
-            " You may say", "\r\n  You may say")
+            " You may say", "\r\n  You may say").replace(" model or", "\t\n\tmodel or")
         self.assertTrue(adapter.guidance_carries_no_status_sentence([broken]))
         frame = build_message(attempt_ready(50, 1), attempt=cycle(),
                               rules=[{"enforcement": "guidance", "text": broken}]).text
@@ -630,13 +654,128 @@ class P7cTests(unittest.TestCase):
         # One character changed: the frame adds the sentence.
         for changed in (text.replace("system status.", "system status!"),
                         text.replace("Say nothing", "say nothing"),
-                        text.replace("tools, access", "tools,  access")):
+                        text.replace("tools, access", "tools,  access"),
+                        # A tab or a lone carriage return is not a paragraph break (no line feed).
+                        text.replace("tools, access", "tools,\taccess"),
+                        text.replace("tools, access", "tools,\raccess")):
             with self.subTest(changed=changed[140:200]):
                 self.assertFalse(adapter.guidance_carries_no_status_sentence([changed]))
                 frame = build_message(attempt_ready(50, 1), attempt=cycle(),
                                       rules=[{"enforcement": "guidance", "text": changed}]).text
                 self.assertEqual(frame.count(SENTENCE), 1)
                 self.assertTrue(frame.rstrip().endswith(SENTENCE))
+
+
+    def test_p7c_19_the_command_source_is_kept_through_a_renewal(self):
+        # The fact is decided once at dispatch and kept apart from the attempt,
+        # which each renewal replaces with the Room's fresh claim answer.
+        cases = {}
+        for label, source in (("command", "cmd-45"), ("message", "m-43")):
+            recording, result, decided, _binding = asyncio.run(command_source_turn(source, renewals=1))
+            self.assertTrue(result.success)
+            cases[label] = (decided, recording.standalone, recording.responds_to)
+        self.assertEqual(cases["command"], ({"ready-52"}, [True], ["cmd-45"]))
+        self.assertEqual(cases["message"], (set(), [False], ["m-43"]))
+
+        # A restart after the request was frozen and before the post landed:
+        # the new process holds no in-memory fact; the frozen request carries
+        # it and is posted as frozen.
+        class Crash(BaseException):
+            pass
+
+        def crash(_n):
+            raise Crash()
+
+        async def restarted():
+            try:
+                await command_source_turn("cmd-45", renewals=1, post_error=crash)
+            except Crash:
+                pass
+            crashed = CRASHED[-1]
+            instance, fresh, api, _published, _dispatched = room_instance(fresh_attempt("cmd-45"))
+            fresh.delivery_intents = copy.deepcopy(crashed.delivery_intents)
+            fresh.delivery_authority = copy.deepcopy(crashed.delivery_authority)
+            instance._state = types.SimpleNamespace(binding=lambda room_id: fresh if room_id == "room-1" else None)
+            instance._cycle_response_sources["evt-5"] = "cmd-45"
+            recording = RecordingRoom(api)
+            return await instance._send_final("room-1", source_ref(), "My answer."), recording, instance, crashed
+
+        result, recording, instance, crashed = asyncio.run(restarted())
+        self.assertTrue(crashed.delivery_intents["evt-5"]["post"]["cycle"]["standalone"])
+        self.assertTrue(result.success)
+        self.assertEqual(getattr(instance, "_cycle_command_sources", set()), set())
+        self.assertEqual((recording.standalone, recording.responds_to), ([True], ["cmd-45"]))
+
+    def test_p7c_20_a_room_url_the_runtime_refuses_to_form_is_the_connectors_own_error(self):
+        # A Room URL http.client refuses (a port that is not a number; no host):
+        # raised before any connection, the connector's own error, never a
+        # failed contact; the pass starts again on the schedule (P2c-3), with
+        # connector_error and no request leaving the host.
+        connects = []
+        with mock.patch("socket.create_connection", lambda *args, **_kwargs: connects.append(args)):
+            for url in ("http://127.0.0.1:port/api", "http:///api"):
+                with self.subTest(url=url):
+                    api = protocol.RoomProtocol(url, "credential")
+                    for call in (lambda: api.request("GET", "/rooms/room-1/state"),
+                                 lambda: api.stream_events("room-1", 40, lambda _event: True)):
+                        with self.assertRaises(Exception) as raised:
+                            call()
+                        self.assertNotIsInstance(raised.exception, adapter.ProtocolError)
+                        self.assertNotIsInstance(raised.exception, OSError)
+            api = protocol.RoomProtocol("http://127.0.0.1:port/api", "credential")
+            with tempfile.TemporaryDirectory() as scratch:
+                path = Path(scratch) / "status.json"
+                room = FakeRoom()
+                room.register_errors = [lambda: api.request("POST", "/connectors"),
+                                        lambda: api.request("POST", "/connectors")]
+                instance, binding = watched(room, path)
+                with mock.patch.object(asyncio, "sleep", Waits()), mock.patch.object(adapter, "logger", mock.Mock()):
+                    run_watch(instance, binding, lambda: room.log.count("register failed") == 2, timeout=HANG_GUARD)
+                entry = local_status.read(path)["rooms"]["room-1"]
+                self.assertEqual(entry["lastErrorCode"], "connector_error")
+        self.assertEqual(connects, [])
+
+
+CRASHED = []
+
+
+def fresh_attempt(source):
+    attempt = claimed_attempt()
+    attempt["cycle"]["sourceEventId"] = source
+    return attempt
+
+
+async def command_source_turn(source, *, renewals, post_error=None):
+    """P7c-1: dispatch an ask-cycle turn (source cmd-45 or m-43), let the
+    renewal replace the attempt ``renewals`` times with the Room's fresh claim
+    answer, then send. Returns the posts, the result, the turns the dispatch
+    decided to be command-source turns, and the binding."""
+    attempt = fresh_attempt(source)
+    kept = []
+    await asyncio.to_thread(build_message, attempt_ready(52, 1, source=source), attempt=attempt,
+                            context=(START, HUMAN, PEER, ASK), keep_instance=kept)
+    decided = set(getattr(kept[0][0], "_cycle_command_sources", set()))
+    # The send harness holds the same turn as evt-5; the dispatch's fact for
+    # ready-52 goes with it, as one process carries it from dispatch to send.
+    instance, binding, api, _published, _dispatched = room_instance(attempt)
+    instance._cycle_command_sources = {"evt-5"} if "ready-52" in decided else set()
+    instance._cycle_response_sources["evt-5"] = source
+    api.claim = lambda _n: fresh_attempt(source)  # never the object the connector holds
+    api.post_error = post_error
+    recording = RecordingRoom(api)
+    CRASHED.append(binding)
+    if renewals:
+        with mock.patch.object(asyncio, "sleep", Waits()):
+            instance._start_attempt_renewal(binding, "evt-5", attempt)
+            for _ in range(100_000):  # a bound on loop turns, not on time
+                # Claimed and applied: the stored attempt is the Room's new object.
+                if api.claims >= renewals and instance._cycle_attempts.get("evt-5") is not attempt:
+                    break
+                await REAL_SLEEP(0)
+            await instance._stop_attempt_renewal("evt-5")
+        assert instance._cycle_attempts["evt-5"] is not attempt, "the renewal replaced the attempt"
+    result = await instance._send_final("room-1", source_ref(), "My answer.")
+    return recording, result, decided, binding
 
 
 class P7cLeftoverTests(unittest.TestCase):

@@ -135,6 +135,22 @@ def _urlopen(request: urllib.request.Request, *, timeout: float):
     return _OPENER.open(request, timeout=timeout)
 
 
+def _form_request(request: urllib.request.Request) -> None:
+    """Contract P2c-3a: form the request line and headers as ``http.client``
+    does, before any I/O (it connects only when the request is sent). A Room
+    URL or header value it does not accept raises here (``http.client.InvalidURL``
+    or ``ValueError``): the connector's own error, never a failed contact."""
+    if not request.host:
+        raise http.client.InvalidURL("Room URL has no host")
+    connection = http.client.HTTPConnection(request.host)
+    try:
+        connection.putrequest(request.get_method(), request.selector, skip_host=True, skip_accept_encoding=True)
+        for name, value in request.header_items():
+            connection.putheader(name, value)
+    finally:
+        connection.close()
+
+
 def _redirect(error: urllib.error.HTTPError) -> bool:
     return 300 <= error.code < 400
 
@@ -211,6 +227,7 @@ class RoomProtocol:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(self.base_url + path, data=body, headers=headers, method=method)
+        _form_request(request)
         try:
             with _urlopen(request, timeout=self.timeout) as response:
                 raw = response.read(MAX_JSON_RESPONSE_BYTES + 1)
@@ -451,6 +468,7 @@ class RoomProtocol:
             },
             method="GET",
         )
+        _form_request(request)
         try:
             with _urlopen(request, timeout=75) as response:
                 content_type = response.headers.get("Content-Type", "")

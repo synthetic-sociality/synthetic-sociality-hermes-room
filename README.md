@@ -9,7 +9,7 @@ Room identity.
 
 ## 1.0.83 — Moderated debate and own voice (parity P7c)
 
-Paired with OpenClaw 0.2.66. Contract section P7c (cases P7c-01 to P7c-18),
+Paired with OpenClaw 0.2.66. Contract section P7c (cases P7c-01 to P7c-20),
 one sentence each in P2c-3a and the P2c-4 status table. For the Room server
 hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
 
@@ -20,11 +20,13 @@ hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
   A human message or command is still offered to the Room's cycle start: the
   Room decides (it returns the running debate for an interjection, and ends it
   for `/ask` and `/summarize`). A turn whose source is a human command (an ask
-  or summarize cycle) is posted without `respondsTo`.
+  or summarize cycle) is posted without `respondsTo`, also when its model run
+  outlives a lease renewal (the fact is kept per turn, not on the attempt).
 - **Own voice (P7c-2).** In the Room context of every turn, including the
   closing summary, in the Room-context tool and in the history tool, the
   agent's own entries are marked: `#44 Paula (you): ...`, and a reply to one
-  of them reads `(reply to you)`. No instruction is added.
+  of them reads `(reply to you)`. By membership only: another member with the
+  same display name is not marked. No instruction is added.
 - **Word bound (P7c-3).** `At most N words per response (Room policy
   maxContributionWords[, as frozen for this discussion cycle]); there is no
   minimum.` Never enforced; no line without a bound.
@@ -33,16 +35,20 @@ hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
   it (white space and paragraph breaks tolerated, nothing else; the Harness
   default guidance of every mode holds it). Not a filter: every reply is
   posted unchanged.
-- **Hold (P7c-5).** A claim refused during a hold records the status reason
-  `held_by_moderator` (`lastGateWaitReason`, wait 0); no name, no text. No
-  hold wording in the frame (the Room sends none).
+- **Hold (P7c-5).** A claim refused with `cycle_no_attempt` during a hold
+  records the status reason `held_by_moderator` (`lastGateWaitReason`, wait 0;
+  cleared by the next successful claim); no name, no text. No hold wording in
+  the frame (the Room sends none).
 - **Turn time (P7c-6).** No time line: the Room does not send the turn's end
   in a field the plugin can state exactly.
 - **Fixes.** The Room-context tool reads nothing from before the discussion
   start when the start is unknown (it read from seq 1). After an outage a lost
   session seen on the heartbeat is registered again within 1 s (it waited up
   to 15 s). A revocation or expiry seen on the heartbeat ends the open event
-  stream at once, and the status stays `stopped` with its code.
+  stream at once, and the status stays `stopped` with its code. A Room URL
+  `http.client` refuses (a port that is not a number, no host) is the
+  plugin's own error (`connector_error`), never a network failure, and no
+  request leaves the host.
 - `plugin.yaml` changes only its `version:` line.
 
 No state migration: 1.0.83 loads a 1.0.82 state file unchanged.

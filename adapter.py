@@ -976,7 +976,7 @@ def _word_bound_fact(words: int, source: str) -> str:
 
 
 def _cycle_delivery_payload(
-    cycle_attempt: dict[str, Any] | None, membership_id: str,
+    cycle_attempt: dict[str, Any] | None, membership_id: str, source_is_command: bool = False,
 ) -> dict[str, Any]:
     if not cycle_attempt:
         return {}
@@ -992,7 +992,7 @@ def _cycle_delivery_payload(
     }
     # Contract P7c-1: a turn whose source is a human command (an ask or
     # summarize cycle) names no reply target; frozen with the request.
-    if cycle_attempt.get("sourceIsCommand"):
+    if source_is_command:
         payload["standalone"] = True
     return payload
 
@@ -1326,6 +1326,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._lease_deadline: dict[str, float] = {}
         self._cycle_attempts: dict[str, dict[str, Any]] = {}
         self._cycle_response_sources: dict[str, str] = {}
+        # Contract P7c-1: turns whose source is a human command, decided once
+        # at dispatch; kept apart from the attempt, which a renewal replaces.
+        self._cycle_command_sources: set[str] = set()
         self._attempt_renewal_tasks: dict[str, asyncio.Task] = {}
         self._superseded_sources: set[str] = set()
         self._source_coordination_modes: dict[str, str] = {}
@@ -1538,6 +1541,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         getattr(self, "_submission_tasks", {}).clear()
         getattr(self, "_cycle_attempts", {}).clear()
         getattr(self, "_cycle_response_sources", {}).clear()
+        getattr(self, "_cycle_command_sources", set()).clear()
         getattr(self, "_source_coordination_modes", {}).clear()
         getattr(self, "_open_reply_recipients", {}).clear()
         getattr(self, "_superseded_sources", set()).clear()
@@ -2007,7 +2011,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         cycle_payload = (
             dict(persisted_post.get("cycle") or {})
             if isinstance(persisted_post, dict)
-            else _cycle_delivery_payload(cycle_attempt, binding.membership_id)
+            else _cycle_delivery_payload(
+                cycle_attempt, binding.membership_id,
+                source_is_command=source_id in getattr(self, "_cycle_command_sources", set()),
+            )
         )
         if responds_to_id and responds_to_id != source_id:
             cycle_payload["responds_to"] = responds_to_id
@@ -2410,6 +2417,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     await self._complete_cycle_attempt(binding, cycle_attempt, attempt_action)
                 self._cycle_attempts.pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+                getattr(self, "_cycle_command_sources", set()).discard(source_id)
             await self._publish(
                 binding,
                 source_id,
@@ -2600,6 +2608,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     # granted until timeout and cascade into later attempts.
                     self._cycle_attempts.pop(source_id, None)
                     getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+                    getattr(self, "_cycle_command_sources", set()).discard(source_id)
                     await self._stop_attempt_renewal(source_id)
                     await self._publish(
                         binding,
@@ -2668,6 +2677,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 await self._complete_cycle_attempt(binding, cycle_attempt, "contribute", str(event.get("id") or ""))
                 self._cycle_attempts.pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+                getattr(self, "_cycle_command_sources", set()).discard(source_id)
             elif turn:
                 await self._finish_with_fresh_context(
                     binding, chat_id, str(turn.get("turnId") or ""), int(event.get("seq") or observed), source_id,
@@ -2705,6 +2715,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     logger.exception("Room %s could not stop renewal after durable delivery", binding.room_id)
                 getattr(self, "_cycle_attempts", {}).pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+                getattr(self, "_cycle_command_sources", set()).discard(source_id)
                 await self._publish(
                     binding,
                     source_id,
@@ -2827,6 +2838,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     logger.exception("Room %s could not stop renewal after durable delivery", binding.room_id)
                 getattr(self, "_cycle_attempts", {}).pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+                getattr(self, "_cycle_command_sources", set()).discard(source_id)
                 await self._publish(
                     binding, source_id, "terminal", status="posted",
                     canonical_event_id=event.get("id", ""), suppress_errors=True,
@@ -3002,7 +3014,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
                 cycle_payload = dict(selected.get("cycle") or {})
             else:
-                cycle_payload = _cycle_delivery_payload(cycle_attempt, binding.membership_id)
+                cycle_payload = _cycle_delivery_payload(
+                    cycle_attempt, binding.membership_id,
+                    source_is_command=source_id in getattr(self, "_cycle_command_sources", set()),
+                )
             authority_attempt = _post_cycle_authority_attempt(
                 cycle_payload, dict(selected.get("cycle") or {}), cycle_attempt,
                 binding.membership_id,
@@ -4416,6 +4431,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     )
                     return
         cycle_attempt: dict[str, Any] | None = None
+        claim_refusal = ""
         open_message = coordination_mode == "open" and event_type == "message.posted"
         if (human_source or agent_seed) and not open_message:
             state = receive_state
@@ -4462,13 +4478,22 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         elif payload.get("cycleId") and not summary_for_self:
             cycle_attempt = await self._claim_discussion_attempt(binding, str(payload.get("cycleId")))
+            claim_refusal = "" if cycle_attempt else getattr(self, "_claim_refusals", {}).get(binding.room_id, "")
         if (((human_source or agent_seed) and not open_message) or ready_for_self or (payload.get("cycleId") and not summary_for_self)) and not cycle_attempt:
             if ready_for_self:
                 # Unclaimed or expired: the model never saw its source (P2a-3).
                 self._note_missed_source(binding, str(payload.get("sourceEventId") or ""))
-                if isinstance(receive_state.get("activeHold"), dict):
-                    # Contract P7c-5: refused while a human holds the Room; a
-                    # coded reason only, never the holder or any text.
+                if (
+                    isinstance(receive_state.get("activeHold"), dict)
+                    and claim_refusal == "cycle_no_attempt"
+                ):
+                    # Contract P7c-5: refused with cycle_no_attempt while a human
+                    # holds the Room; a coded reason only, never the holder or any text.
+                    held = getattr(self, "_held_rooms", None)
+                    if held is None:
+                        held = set()
+                        self._held_rooms = held
+                    held.add(binding.room_id)
                     self._status_room(binding, gate_wait_seconds=0, gate_wait_reason="held_by_moderator")
             await self._complete_event(
                 binding, seq, terminal_status="superseded", source_id=event_id,
@@ -4653,8 +4678,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _claim_discussion_attempt(
         self, binding: RoomBinding, cycle_id: str, request_seconds: float | None = None,
     ) -> dict[str, Any] | None:
+        refusals = getattr(self, "_claim_refusals", None)
+        if refusals is None:
+            refusals = {}
+            self._claim_refusals = refusals
+        refusals.pop(binding.room_id, None)
         try:
-            return await self._call(
+            claimed = await self._call(
                 binding,
                 lambda api: (
                     _bounded_protocol(api, request_seconds) if request_seconds else api
@@ -4662,8 +4692,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
         except ProtocolError as error:
             if error.code in {"cycle_no_attempt", "cycle_superseded"}:
+                refusals[binding.room_id] = error.code
                 return None
             raise
+        held = getattr(self, "_held_rooms", None) or set()
+        if binding.room_id in held:
+            # Contract P2c-4, P7c-5: a later claim of that Room succeeded; the
+            # hold reason is cleared.
+            held.discard(binding.room_id)
+            self._status_room(binding, gate_wait_seconds=0, gate_wait_reason="")
+        return claimed
 
     async def _complete_cycle_attempt(
         self,
@@ -5073,7 +5111,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding, cycle_attempt, [prompt_event, event, *context_events], seq, starts_at,
         )
         if cycle_attempt and attempt_ready and _turn_source_is_command(payload, [*current_page, cycle_source]):
-            cycle_attempt["sourceIsCommand"] = True
+            command_sources = getattr(self, "_cycle_command_sources", None)
+            if command_sources is None:
+                command_sources = set()
+                self._cycle_command_sources = command_sources
+            command_sources.add(event_id)
         try:
             artifact_context = await self._call(
                 binding,
@@ -5608,6 +5650,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if getattr(self, "_cycle_attempts", {}).get(event_id) is cycle_attempt:
                     getattr(self, "_cycle_attempts", {}).pop(event_id, None)
                     getattr(self, "_cycle_response_sources", {}).pop(event_id, None)
+                    getattr(self, "_cycle_command_sources", set()).discard(event_id)
                 await self._publish(
                     binding, event_id, "terminal", status="failed", suppress_errors=True,
                 )
@@ -6173,6 +6216,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         cycle_attempt = getattr(self, "_cycle_attempts", {}).pop(event_id, None)
         await self._stop_attempt_renewal(event_id)
         getattr(self, "_cycle_response_sources", {}).pop(event_id, None)
+        getattr(self, "_cycle_command_sources", set()).discard(event_id)
         if not cycle_attempt:
             return
         # Any late model result for this event is fenced as superseded: it must
@@ -6277,6 +6321,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     )
         getattr(self, "_cycle_attempts", {}).pop(source_id, None)
         getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+        getattr(self, "_cycle_command_sources", set()).discard(source_id)
         getattr(self, "_source_coordination_modes", {}).pop(source_id, None)
         getattr(self, "_open_reply_recipients", {}).pop(source_id, None)
 
@@ -6379,6 +6424,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         unobservable.discard(room_id)
         if started is not None:
             # Contract P2c-4 (ISSUE-023): the wait and its coded reason.
+            (getattr(self, "_held_rooms", None) or set()).discard(room_id)
             self._status_room(None, room_id, gate_wait_seconds=time.time() - started, gate_wait_reason=reason)
         (getattr(self, "_session_wait_warned", None) or set()).discard(room_id)
 
@@ -6482,6 +6528,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         cycle_attempt = getattr(self, "_cycle_attempts", {}).pop(source_id, None)
         await self._stop_attempt_renewal(source_id)
         getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
+        getattr(self, "_cycle_command_sources", set()).discard(source_id)
         if cycle_attempt:
             superseded = getattr(self, "_superseded_sources", None)
             if superseded is None:
