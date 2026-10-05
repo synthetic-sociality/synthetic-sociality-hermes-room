@@ -469,12 +469,166 @@
   },
   "parityP7aReconnectSchedule": {"firstSeconds": 1, "capSeconds": 15, "jitterFactor": [0.8, 1.0], "retryAfter5xxMaxSeconds": 15, "retryAfter429MaxSeconds": 120, "attemptRenewalCapSeconds": 5, "inactiveRecheckSeconds": 60},
   "parityP7aWebReadToolNames": ["browser", "browser_navigate", "web_extract", "web_fetch", "web_search"],
+  "parityP7cContract": "docs/delivery-lifecycle-contract-v1.md#p7c--moderated-debate-and-own-voice-2026-10-05",
+  "parityP7cCases": {
+    "P7c-01 a reply in work when a human posts is posted, and a post the Room accepts with writtenBeforeEventId is an ordinary success": "test_p7c_01_a_reply_in_work_is_posted_when_a_human_posts",
+    "P7c-02 a response turn shows the human message as the current item and the Room's instruction verbatim, whether the message addressed the agent or everyone": "test_p7c_02_a_response_turn_shows_the_human_message_and_the_rooms_instruction",
+    "P7c-03 after the response round a regular turn continues from the human message with the remaining budget": "test_p7c_03_a_regular_turn_after_the_round_continues_with_the_remaining_budget",
+    "P7c-04 a response turn announced while a model run is in progress is answered after that run": "test_p7c_04_a_response_turn_announced_during_a_run_is_answered_after_it",
+    "P7c-05 with moderator steering off the refused reply is kept and the human message seeds the next cycle": "test_p7c_05_with_steering_off_the_refused_reply_is_kept_and_the_message_seeds_a_cycle",
+    "P7c-06 a turn whose source is a human command posts without respondsTo, a turn whose source is a message names it": "test_p7c_06_a_turn_whose_source_is_a_command_posts_without_responds_to",
+    "P7c-07 the shared transcript vector renders byte-identically and marks the agent's own entries, also in the closing-summary turn and in the tools": "test_p7c_07_the_transcript_marks_the_agents_own_entries",
+    "P7c-08 the word bound reads At most N words per response with its source and there is no line without a bound": "test_p7c_08_the_word_bound_wording",
+    "P7c-09 the ISSUE-031 sentence is in the frame exactly once, also when the Room guidance carries it, and a reply about missing access is posted unchanged": "test_p7c_09_the_no_system_status_sentence_is_in_the_frame_once",
+    "P7c-10 a claim refused during a hold is dropped with held_by_moderator, a repeated announcement is answered once, and a claimed turn renews through the hold": "test_p7c_10_a_claim_refused_during_a_hold",
+    "P7c-11 a claim refused after the agent timed out is dropped without retry and without a hold reason, and no time line is rendered": "test_p7c_11_a_claim_refused_after_a_timeout",
+    "P7c-12 an unknown discussion start brings no earlier entry into the Room-context tool or a turn": "test_p7c_12_an_unknown_start_brings_no_earlier_entry_into_a_tool",
+    "P7c-13 a prior-epoch lifecycle terminal on a page whose start is unknown is ignored and acknowledged, and the channel keeps running": "test_p7c_13_an_unknown_page_start_never_stops_the_channel",
+    "P7c-14 with the Room state's start known and the page's start missing, 0 or lower, a message of an earlier discussion is never handed to the model": "test_p7c_14_the_state_start_fences_delivery",
+    "P7c-15 a lost session after six failed heartbeats is registered again within 1 s": "test_p7c_15_a_lost_session_after_an_outage_is_registered_within_one_second",
+    "P7c-16 a revocation seen by the heartbeat ends the open event stream at once and the status stays stopped with credential_revoked when the stream then fails": "test_p7c_16_a_revocation_on_the_heartbeat_ends_the_stream",
+    "P7c-17 a request the runtime refuses to form is the connector's own error, never a failed contact, and no request leaves the host": "test_p7c_17_a_request_the_runtime_refuses_to_form_is_not_a_failed_contact",
+    "P7c-18 with the stored Showroom guidance of Harness b70aff3e as the Room rules the frame does not add the ISSUE-031 sentence again, with one character of it changed it does": "test_p7c_18_the_stored_showroom_guidance_already_carries_the_sentence"
+  },
+  "parityP7cNoStatusSentence": "Say nothing in a Room message about your tools, access, credentials, model or system status. If you cannot read a source, answer from what you have; do not claim to have read it and invent nothing about its content. You may say what your answer is based on.",
+  "parityP7cWordBound": {
+    "cycle": "Room policy maxContributionWords, as frozen for this discussion cycle",
+    "policy": "Room policy maxContributionWords",
+    "format": "At most {N} words per response ({source}); there is no minimum."
+  },
+  "parityP7cTranscriptVector": {
+    "membershipId": "m-self",
+    "currentEventId": "e48",
+    "state": {
+      "roster": [
+        {
+          "membershipId": "m-self",
+          "displayName": "Paula",
+          "role": "participant_agent"
+        },
+        {
+          "membershipId": "m-wu",
+          "displayName": "Wu",
+          "role": "participant_agent"
+        },
+        {
+          "membershipId": "h-owner",
+          "displayName": "Thorsten",
+          "role": "human_owner"
+        }
+      ]
+    },
+    "events": [
+      {
+        "id": "e42",
+        "seq": 42,
+        "type": "message.posted",
+        "actorId": "h-owner",
+        "actorRole": "human_owner",
+        "payload": {
+          "body": "What should the city do about heat?"
+        }
+      },
+      {
+        "id": "e43",
+        "seq": 43,
+        "type": "message.posted",
+        "actorId": "m-wu",
+        "actorRole": "participant_agent",
+        "payload": {
+          "body": "Shade first."
+        }
+      },
+      {
+        "id": "e44",
+        "seq": 44,
+        "type": "message.posted",
+        "actorId": "m-self",
+        "actorRole": "participant_agent",
+        "payload": {
+          "body": "  Water first, then shade.  ",
+          "respondsTo": [
+            "e43"
+          ]
+        }
+      },
+      {
+        "id": "e45",
+        "seq": 45,
+        "type": "message.posted",
+        "actorId": "m-wu",
+        "actorRole": "participant_agent",
+        "payload": {
+          "body": "I disagree with Paula.",
+          "respondsTo": [
+            "e44",
+            "e44",
+            "e42"
+          ]
+        }
+      },
+      {
+        "id": "e46",
+        "seq": 46,
+        "type": "message.posted",
+        "actorId": "m-gone",
+        "actorRole": "participant_agent",
+        "payload": {
+          "body": "An agent that left.",
+          "respondsTo": [
+            "e-missing"
+          ]
+        }
+      },
+      {
+        "id": "e47",
+        "seq": 47,
+        "type": "message.posted",
+        "actorId": "m-self",
+        "actorRole": "participant_agent",
+        "payload": {
+          "body": "Both, in that order.",
+          "respondsTo": [
+            "e45",
+            "e46"
+          ]
+        }
+      },
+      {
+        "id": "e47b",
+        "seq": 47,
+        "type": "discussion.cycle_attempt_ready",
+        "actorId": "room_coordinator",
+        "actorRole": "system",
+        "payload": {
+          "membershipId": "m-self"
+        }
+      },
+      {
+        "id": "e48",
+        "seq": 48,
+        "type": "message.posted",
+        "actorId": "h-owner",
+        "actorRole": "human_owner",
+        "payload": {
+          "body": "The current item."
+        }
+      }
+    ],
+    "transcript": "#42 Thorsten: What should the city do about heat?\n#43 Wu: Shade first.\n#44 Paula (you) (reply to Wu): Water first, then shade.\n#45 Wu (reply to you, Thorsten): I disagree with Paula.\n#46 Room agent (reply to canonical event e-missing): An agent that left.\n#47 Paula (you) (reply to Wu, Room agent): Both, in that order."
+  },
+  "parityP7cShowroomGuidance": {
+    "source": "Harness b70aff3e0ff1fe04a4be12e1d90c22a13aba2e57 packages/client/ui-sociality-room/src/client/policy-mode-texts.ts: POLICY_MODE_TEXTS.showroom.principle, POLICY_MODE_COMMON_TEXT and POLICY_MODE_TEXTS.showroom.style joined by blank lines (policy-modes.ts modeGuidanceText)",
+    "text": "Debate for an audience: speak as yourself, answer the other side's strongest point, and agree to disagree where the reasons differ.\n\nSay nothing in a Room message about your tools, access, credentials, model or system status. If you cannot read a source, answer from what you have; do not claim to have read it and invent nothing about its content. You may say what your answer is based on.\n\nTalk like people in a conversation, not like essay writers. Vary the length a lot: often one or two sentences, sometimes only a short objection (\"I disagree, because ...\") or a question back (\"Can you elaborate?\"), and only now and then a longer reply. The Room's word limit is the upper limit, not the target. Plain words for a general audience; no untranslated quotations.",
+    "sha256": "c17283b4bcbd606fc93f25e6a1e6568ec6e3cdbb39d724f7b94288df31202633"
+  },
   "parityContractSectionSha256": {
     "P3": "a689096e24f9fee13e0603006274c303f3435ee823f082a84a63b765deb8906b",
     "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "98d93a4b18a72ab573c8bac0e0269b6163f87c64a1fb7fe0b0f429ee9728a7d1",
-    "Appendix": "a7133e1665a45833c71f376f975cc8ab591084beb9db81533f9a4b91f9dde338"
+    "P2c": "8c84798eddc4728912c33281a51e6617af6328734a62939f61cc5a81e7c73bcc",
+    "Appendix": "5aaf9fd2168412d9d1d1dffa8f7105f05bf459a1e3421d25d4302636e6991750",
+    "P7c": "4789ced396a8e6c804a702e5bce25ae2b14941e30b4fb5a2382dad8db02ca634"
   }
 }
