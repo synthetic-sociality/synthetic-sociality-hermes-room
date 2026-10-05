@@ -528,8 +528,9 @@ class P7cTests(unittest.TestCase):
         self.assertGreaterEqual(delays[7], 0.8, delays)
 
     def test_p7c_16_a_revocation_on_the_heartbeat_ends_the_stream(self):
-        for code in ("credential_revoked", "credential_expired"):
-            with self.subTest(code=code), tempfile.TemporaryDirectory() as scratch:
+        for code, when in (("credential_revoked", "released later"), ("credential_expired", "released later"),
+                           ("credential_revoked", "fails at once"), ("credential_expired", "fails at once")):
+            with self.subTest(code=code, stream=when), tempfile.TemporaryDirectory() as scratch:
                 path = Path(scratch) / "status.json"
                 room = FakeRoom()
                 room.heartbeat_errors = [edge_error(401, json.dumps({"code": code, "message": "refused"}).encode())]
@@ -541,7 +542,12 @@ class P7cTests(unittest.TestCase):
                     # with a network error once released.
                     stream.reads += 1
                     stream.opened.set()
-                    stream.release.wait(10)
+                    if when == "fails at once":
+                        # The stream breaks right after the revocation, before
+                        # the loop looks at the binding again.
+                        stream.revoked.wait(10)
+                    else:
+                        stream.release.wait(10)
                     raise adapter.ProtocolError("Room network failure", retryable=True)
 
                 room.stream_events = open_stream
@@ -553,6 +559,12 @@ class P7cTests(unittest.TestCase):
                     return original_heartbeat(room_id, session)
 
                 room.heartbeat = heartbeat_once_the_stream_is_open
+                stream.revoked = __import__("threading").Event()
+                for name in ("_revoke", "_expire"):
+                    def end(target, original=getattr(instance, name)):
+                        original(target)
+                        stream.revoked.set()
+                    setattr(instance, name, end)
                 instance._heartbeat_tasks = {}
                 ended = {}
 
@@ -672,14 +684,20 @@ class P7cLeftoverTests(unittest.TestCase):
         older = [{"id": f"m-{seq}", "seq": seq, "type": "message.posted", "actorRole": "human_owner",
                   "actorId": "owner-1", "payload": {"body": f"Message {seq}."}} for seq in range(42, 80)]
 
-        def prepare(instance, _binding):
-            instance._turn_source_events = {("room-1", "m-43"): (41, older[1])}
-
-        message = build_message(attempt_ready(80, 2, source="m-44"), attempt=claimed_attempt(),
-                                context=(START, *older), prepare=prepare)
-        self.assertIn("#44 Owner: Message 44.", message.text)
-        self.assertNotIn("Message 43.", message.text.split("Recent canonical transcript:", 1)[1].split(
-            "[/Canonical Room context]", 1)[1])
+        # Two turns of one connector: the first scans for m-43, the second for m-44.
+        kept = []
+        first = build_message(attempt_ready(80, 2, source="m-43"), attempt=claimed_attempt(),
+                              context=(START, *older), keep_instance=kept)
+        self.assertIn("#43 Owner: Message 43.", first.text)
+        instance, binding = kept[0]
+        captured = []
+        instance.handle_message = lambda message: asyncio.sleep(0, result=captured.append(message))
+        second_event = attempt_ready(81, 2, source="m-44")
+        instance._cycle_attempts[second_event["id"]] = claimed_attempt()
+        instance._event_epoch[second_event["id"]] = "epoch-2"
+        self.assertTrue(asyncio.run(instance._dispatch_room_event(binding, second_event, "generation")))
+        self.assertIn("#44 Owner: Message 44.", captured[0].text)
+        self.assertNotIn("Message 43.", captured[0].text.split("[/Canonical Room context]", 1)[1])
 
     def test_the_topic_is_trimmed_as_guidance_is(self):
         topic = {"title": "\ufeff Heat plan \u2028", "description": "\ufeffBrief \ud800 text\u3000"}
