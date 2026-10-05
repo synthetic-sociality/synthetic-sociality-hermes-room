@@ -9,7 +9,7 @@ Room identity.
 
 ## 1.0.83 — Moderated debate and own voice (parity P7c)
 
-Paired with OpenClaw 0.2.66. Contract section P7c (cases P7c-01 to P7c-20),
+Paired with OpenClaw 0.2.66. Contract section P7c (cases P7c-01 to P7c-22),
 one sentence each in P2c-3a and the P2c-4 status table. For the Room server
 hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
 
@@ -35,9 +35,10 @@ hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
   it (white space and paragraph breaks tolerated, nothing else; the Harness
   default guidance of every mode holds it). Not a filter: every reply is
   posted unchanged.
-- **Hold (P7c-5).** A claim refused with `cycle_no_attempt` during a hold
-  records the status reason `held_by_moderator` (`lastGateWaitReason`, wait 0;
-  cleared by the next successful claim); no name, no text. No hold wording in
+- **Hold (P7c-5).** A claim refused with `cycle_no_attempt` during a hold of
+  that same cycle records the status reason `held_by_moderator`
+  (`lastGateWaitReason`, wait 0; cleared by the next successful claim); no
+  name, no membership id, no text. No hold wording in
   the frame (the Room sends none).
 - **Turn time (P7c-6).** No time line: the Room does not send the turn's end
   in a field the plugin can state exactly.
@@ -45,9 +46,11 @@ hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
   start when the start is unknown (it read from seq 1). After an outage a lost
   session seen on the heartbeat is registered again within 1 s (it waited up
   to 15 s). A revocation or expiry seen on the heartbeat ends the open event
-  stream at once, and the status stays `stopped` with its code. A Room URL
-  `http.client` refuses (a port that is not a number, no host) is the
-  plugin's own error (`connector_error`), never a network failure, and no
+  stream at once, and the status stays `stopped` with its code. A header value
+  or Room URL `http.client` refuses (a line break in the credential, a port
+  that is not a number, no host) is the plugin's own error
+  (`request_not_formed`, a fixed message that never quotes the credential),
+  never a network failure: the loop stops with status `stopped`, and no
   request leaves the host.
 - `plugin.yaml` changes only its `version:` line.
 

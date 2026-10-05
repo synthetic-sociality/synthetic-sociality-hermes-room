@@ -27,6 +27,18 @@ RECONNECT_JITTER_LOW = 0.8
 RETRY_AFTER_RATE_LIMIT_MAX_SECONDS = 120.0
 
 
+class RequestNotFormed(ValueError):
+    """Contract P2c-3a, P7c: a request ``http.client`` refuses to form before
+    any I/O (a header value or Room URL it does not accept) is the connector's
+    own error. Fixed message and code, no chained exception: the runtime's
+    message can quote the header value, that is the credential."""
+
+    code = "request_not_formed"
+
+    def __init__(self) -> None:
+        super().__init__("Room request refused by the runtime before any I/O (a header value or the Room URL it does not accept)")
+
+
 class ProtocolError(RuntimeError):
     def __init__(self, message: str, *, status: int = 0, code: str = "", retryable: bool = False, retry_after: float = 0,
                  non_json: bool = False, contact: str = ""):
@@ -138,17 +150,24 @@ def _urlopen(request: urllib.request.Request, *, timeout: float):
 def _form_request(request: urllib.request.Request) -> None:
     """Contract P2c-3a: form the request line and headers as ``http.client``
     does, before any I/O (it connects only when the request is sent). A Room
-    URL or header value it does not accept raises here (``http.client.InvalidURL``
-    or ``ValueError``): the connector's own error, never a failed contact."""
-    if not request.host:
-        raise http.client.InvalidURL("Room URL has no host")
-    connection = http.client.HTTPConnection(request.host)
-    try:
-        connection.putrequest(request.get_method(), request.selector, skip_host=True, skip_accept_encoding=True)
-        for name, value in request.header_items():
-            connection.putheader(name, value)
-    finally:
-        connection.close()
+    URL or header value it does not accept raises ``RequestNotFormed`` here:
+    the connector's own error, never a failed contact."""
+    formed = bool(request.host)
+    if formed:
+        try:
+            connection = http.client.HTTPConnection(request.host)
+            try:
+                connection.putrequest(request.get_method(), request.selector, skip_host=True, skip_accept_encoding=True)
+                for name, value in request.header_items():
+                    connection.putheader(name, value)
+            finally:
+                connection.close()
+        except (ValueError, http.client.HTTPException):
+            formed = False
+    if not formed:
+        # Raised outside the handler, so no exception carrying the runtime's
+        # message is chained to it.
+        raise RequestNotFormed()
 
 
 def _redirect(error: urllib.error.HTTPError) -> bool:

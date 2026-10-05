@@ -41,6 +41,7 @@ from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
     InvalidEventPage,
     ProtocolError,
+    RequestNotFormed,
     RoomProtocol,
     contact_successes,
     reconnect_delay,
@@ -1346,6 +1347,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._state_file.parent / "status.json",
             plugin="hermes", version=CONNECTOR_VERSION, host_label=self._host_label,
         )
+
+    def _fail_closed_on_request(self, binding: RoomBinding, error: RequestNotFormed) -> None:
+        """Contract P2c-3a, P7c: the runtime refused to form a request; the loop
+        ends with the connector's own code. A fixed line, never the runtime's message."""
+        logger.error("Room %s request refused by the runtime before any I/O (code %s); the loop stops",
+                     binding.room_id, error.code)
+        self._status_room(binding, connection="stopped", error_code=error.code)
 
     def _status_room(self, binding: RoomBinding | None, room_id: str = "", **fields: Any) -> None:
         """Contract P2c-4 status update; never raises into Room work."""
@@ -3407,6 +3415,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     step, failed = 0, None
                 except asyncio.CancelledError:
                     raise
+                except RequestNotFormed as error:
+                    self._fail_closed_on_request(binding, error)
+                    return
                 except ProtocolError as error:
                     if error.revoked:
                         self._revoke(binding)
@@ -3708,6 +3719,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         retry_delay = reconnect_delay(0)
                     step += 1
                     self._expire_lease_if_due(binding)
+                except RequestNotFormed as error:
+                    self._fail_closed_on_request(binding, error)
+                    return
                 except Exception as error:  # noqa: BLE001 - contract P2c-3a
                     # An unexpected failure never ends the heartbeat; logged by
                     # type only (no body, no trace).
@@ -4483,12 +4497,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if ready_for_self:
                 # Unclaimed or expired: the model never saw its source (P2a-3).
                 self._note_missed_source(binding, str(payload.get("sourceEventId") or ""))
+                hold = receive_state.get("activeHold")
                 if (
-                    isinstance(receive_state.get("activeHold"), dict)
-                    and claim_refusal == "cycle_no_attempt"
+                    claim_refusal == "cycle_no_attempt"
+                    and isinstance(hold, dict)
+                    and str(hold.get("cycleId") or "") == str(payload.get("cycleId") or "") != ""
                 ):
                     # Contract P7c-5: refused with cycle_no_attempt while a human
-                    # holds the Room; a coded reason only, never the holder or any text.
+                    # holds this cycle; a coded reason only, never the holder or any text.
                     held = getattr(self, "_held_rooms", None)
                     if held is None:
                         held = set()

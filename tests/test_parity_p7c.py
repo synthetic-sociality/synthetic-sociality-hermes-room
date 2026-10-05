@@ -22,7 +22,7 @@ from unittest import mock
 
 from test_delivery_lifecycle import ROOT, adapter
 from test_parity_p1 import cycle_attempt, refusal, room_instance, source_ref
-from test_parity_p1a import HUMAN, PEER, START, attempt_ready, build_message, command, cycle
+from test_parity_p1a import HUMAN, PEER, START, attempt_ready, build_message, command, cycle, every_prompt
 from test_parity_p7a import REAL_SLEEP, FakeRoom, Waits, edge_error, http_error, lost_session, run_watch, watched
 
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
@@ -141,7 +141,7 @@ def claimed_attempt(attempt_id="attempt-1"):
 class P7cConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP7cCases"]
-        self.assertEqual(len(cases), 20)
+        self.assertEqual(len(cases), 22)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P7c-{index:02d} "), name)
@@ -307,8 +307,12 @@ class P7cTests(unittest.TestCase):
         tools._ROOM_SCAN_CACHE.clear()
         with mock.patch.object(tools, "RoomProtocol", Protocol), \
                 mock.patch.object(tools, "load", lambda: types.SimpleNamespace(bindings=[binding])):
-            context_result = json.loads(tools.room_context({}))
-            history = json.loads(tools.room_history({}))
+            # Through the handlers the plugin registers, over the saved binding.
+            registration = mock.MagicMock()
+            adapter.register(registration)
+            handlers = {call.kwargs["name"]: call.kwargs["handler"] for call in registration.register_tool.call_args_list}
+            context_result = json.loads(handlers["synthetic_sociality_room_context"]({}))
+            history = json.loads(handlers["synthetic_sociality_room_history"]({}))
         self.assertIn("#44 Agent (you) (reply to Peer): My own earlier point.", context_result["context"])
         self.assertEqual({entry["seq"]: entry["actor"] for entry in history["messages"]},
                          {42: "Owner", 43: "Peer", 44: "Agent (you)"})
@@ -344,6 +348,22 @@ class P7cTests(unittest.TestCase):
         for label, text in frames.items():
             with self.subTest(label):
                 self.assertEqual(text.count(SENTENCE), 1)
+        # Every frame a model can get: Hermes builds every Room turn in one
+        # frame (_dispatch_room_event); every shape it renders (P1a every_prompt:
+        # human reply, opening and follow-up cycle turns, the summarize command
+        # with and without an attempt, an unresolved-source cycle turn, the
+        # initial greeting, the open-Room message, the summary-coordinator turn)
+        # ends with the sentence once, byte-exact; none adds it when the
+        # guidance carries it.
+        carried = [{"enforcement": "guidance", "text": SENTENCE}]
+        plain, with_guidance = every_prompt(), every_prompt(rules=carried)
+        self.assertGreaterEqual(len(plain), 10)
+        for name, text in plain.items():
+            with self.subTest(frame=name):
+                self.assertEqual(text.count(SENTENCE), 1)
+                self.assertTrue(text.rstrip().endswith(f" {SENTENCE}"), "the last sentence of the frame")
+                self.assertEqual(with_guidance[name].count(SENTENCE), 1, "the guidance's copy only")
+                self.assertFalse(with_guidance[name].rstrip().endswith(SENTENCE))
         # Not a filter: a reply about missing access is posted unchanged, and
         # the status file holds no message body.
         body = "I have no internet access, so I answer from the brief."
@@ -617,17 +637,13 @@ class P7cTests(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             api.request("GET", "/rooms/room-1/state")
         self.assertNotIsInstance(raised.exception, adapter.ProtocolError)
-        # In the stream loop it is the connector's own error: no network code.
-        with tempfile.TemporaryDirectory() as scratch:
-            path = Path(scratch) / "status.json"
-            room = FakeRoom()
-            room.register_errors = [lambda: api.request("POST", "/connectors"), lambda: api.request("POST", "/connectors")]
-            instance, binding = watched(room, path)
-            with mock.patch.object(asyncio, "sleep", Waits()), mock.patch.object(adapter, "logger", mock.Mock()):
-                run_watch(instance, binding, lambda: room.log.count("register failed") == 2, timeout=10.0)
-            entry = local_status.read(path)["rooms"]["room-1"]
-            self.assertEqual(entry["lastErrorCode"], "connector_error")
-            self.assertNotEqual(entry["lastErrorCode"], "network")
+        self.assertIsInstance(raised.exception, protocol.RequestNotFormed)
+        # In the loop it is the connector's own error: it fails closed with its
+        # own code, never network, and is not retried.
+        outcome, room, entry, _logs, _status_text = refused_request_run(api)
+        self.assertTrue(outcome["exited"], "the loop ended")
+        self.assertEqual(room.log.count("register failed"), 1, "not retried")
+        self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", "request_not_formed"))
 
     def test_p7c_18_the_stored_showroom_guidance_already_carries_the_sentence(self):
         # Source: Harness b70aff3e0ff1fe04a4be12e1d90c22a13aba2e57,
@@ -709,8 +725,8 @@ class P7cTests(unittest.TestCase):
     def test_p7c_20_a_room_url_the_runtime_refuses_to_form_is_the_connectors_own_error(self):
         # A Room URL http.client refuses (a port that is not a number; no host):
         # raised before any connection, the connector's own error, never a
-        # failed contact; the pass starts again on the schedule (P2c-3), with
-        # connector_error and no request leaving the host.
+        # failed contact; the loop fails closed with request_not_formed and no
+        # request leaves the host.
         connects = []
         with mock.patch("socket.create_connection", lambda *args, **_kwargs: connects.append(args)):
             for url in ("http://127.0.0.1:port/api", "http:///api"):
@@ -720,20 +736,106 @@ class P7cTests(unittest.TestCase):
                                  lambda: api.stream_events("room-1", 40, lambda _event: True)):
                         with self.assertRaises(Exception) as raised:
                             call()
+                        self.assertIsInstance(raised.exception, protocol.RequestNotFormed)
                         self.assertNotIsInstance(raised.exception, adapter.ProtocolError)
                         self.assertNotIsInstance(raised.exception, OSError)
-            api = protocol.RoomProtocol("http://127.0.0.1:port/api", "credential")
-            with tempfile.TemporaryDirectory() as scratch:
-                path = Path(scratch) / "status.json"
-                room = FakeRoom()
-                room.register_errors = [lambda: api.request("POST", "/connectors"),
-                                        lambda: api.request("POST", "/connectors")]
-                instance, binding = watched(room, path)
-                with mock.patch.object(asyncio, "sleep", Waits()), mock.patch.object(adapter, "logger", mock.Mock()):
-                    run_watch(instance, binding, lambda: room.log.count("register failed") == 2, timeout=HANG_GUARD)
-                entry = local_status.read(path)["rooms"]["room-1"]
-                self.assertEqual(entry["lastErrorCode"], "connector_error")
+            outcome, room, entry, _logs, _status_text = refused_request_run(
+                protocol.RoomProtocol("http://127.0.0.1:port/api", "credential"))
+            self.assertTrue(outcome["exited"], "the loop ended")
+            self.assertEqual(room.log.count("register failed"), 1, "not retried")
+            self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", "request_not_formed"))
         self.assertEqual(connects, [])
+
+    def test_p7c_21_a_refused_credential_never_appears_in_an_error_a_log_line_or_the_status(self):
+        # A credential with a character the runtime rejects in a header: the
+        # plugin's own error (fixed message, code request_not_formed, nothing
+        # chained), the loop fails closed, and the credential string is in no
+        # log line, no status file and no error message.
+        secret = "fixture-secret-7Q2"
+        # A line break inside the value (a trailing one is trimmed by the runtimes).
+        for credential in (f"{secret}\nX-Injected: 1", f"{secret}\rX-Injected: 1"):
+            with self.subTest(credential=repr(credential)):
+                api = protocol.RoomProtocol("https://room.example/api", credential)
+                errors = []
+                for call in (lambda: api.request("GET", "/rooms/room-1/state"),
+                             lambda: api.stream_events("room-1", 40, lambda _event: True)):
+                    with self.assertRaises(protocol.RequestNotFormed) as raised:
+                        call()
+                    errors.append(raised.exception)
+                for error in errors:
+                    self.assertIsNone(error.__cause__)
+                    self.assertIsNone(error.__context__)
+                    self.assertEqual(error.code, "request_not_formed")
+                    rendered = "".join(__import__("traceback").format_exception(error)) + repr(error) + str(error.args)
+                    self.assertNotIn(secret, rendered)
+                outcome, room, entry, logs, status_text = refused_request_run(api)
+                self.assertTrue(outcome["exited"], "the loop ended")
+                self.assertEqual(room.log.count("register failed"), 1, "not retried")
+                self.assertEqual((entry["connection"], entry["lastErrorCode"]), ("stopped", "request_not_formed"))
+                self.assertTrue(logs, "the stop is logged")
+                self.assertNotIn(secret, logs)
+                self.assertNotIn(secret, status_text)
+
+
+    def test_p7c_22_held_by_moderator_only_for_a_hold_of_the_refused_cycle(self):
+        # cycle_no_attempt AND an activeHold object naming the same cycle as the
+        # refused claim; not {}, not a hold of another cycle, not cycle_superseded.
+        # The status never holds the holder's name or membership id.
+        hold = {"cycleId": "cycle-1", "holderMembershipId": "holder-7k", "holderDisplayName": "Thorsten",
+                "startedAt": "2026-10-05T10:00:00Z", "expiresAt": "2026-10-05T10:00:45Z"}
+
+        def superseded(_n):
+            raise adapter.ProtocolError("superseded", status=409, code="cycle_superseded")
+
+        cases = {
+            "hold of this cycle": ({"activeHold": hold}, None, "held_by_moderator"),
+            "empty object": ({"activeHold": {}}, None, ""),
+            "hold of another cycle": ({"activeHold": {**hold, "cycleId": "cycle-other"}}, None, ""),
+            "hold without a cycle": ({"activeHold": {key: value for key, value in hold.items() if key != "cycleId"}}, None, ""),
+            "cycle_superseded during the hold": ({"activeHold": hold}, superseded, ""),
+            "no hold": ({"activeHold": None}, None, ""),
+        }
+        for label, (state, claim, reason) in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as scratch:
+                path = Path(scratch) / "status.json"
+                instance, binding, record, _room_state = receive_instance(state=state, claim=claim, status_path=path)
+                asyncio.run(instance._consume(binding, response_ready(51)))
+                self.assertEqual(record.claims, ["cycle-1"])
+                self.assertEqual(record.completed[-1]["reason"], "discussion_attempt_unavailable")
+                text = path.read_text() if path.exists() else "{}"
+                rooms = json.loads(text).get("rooms") or {}
+                self.assertEqual((rooms.get("room-1") or {}).get("lastGateWaitReason", ""), reason)
+                for value in ("holder-7k", "Thorsten"):
+                    self.assertNotIn(value, text)
+
+def refused_request_run(api):
+    """Run the watch loop whose registration makes ``api``'s real request (which
+    the runtime refuses to form) until the loop ends. Returns the outcome, the
+    Room double, the status entry, every log line and the status file's text."""
+    import logging
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(logging.Formatter("%(name)s %(levelname)s %(message)s").format(record))
+
+    handler, root = Capture(level=logging.DEBUG), logging.getLogger()
+    previous = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "status.json"
+            room = FakeRoom()
+            room.register_errors = [lambda: api.request("POST", "/connectors"), lambda: api.request("POST", "/connectors")]
+            instance, binding = watched(room, path)
+            with mock.patch.object(asyncio, "sleep", Waits()):
+                outcome = run_watch(instance, binding, lambda: "register failed" in room.log
+                                    and binding.room_id not in instance._tasks, timeout=HANG_GUARD)
+            return outcome, room, local_status.read(path)["rooms"]["room-1"], "\n".join(records), path.read_text()
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous)
 
 
 CRASHED = []
