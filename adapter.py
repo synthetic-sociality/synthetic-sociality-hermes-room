@@ -455,14 +455,16 @@ def _status_error_code(error: "ProtocolError") -> str:
 
 
 def _uncoded_contact_failure(error: BaseException) -> bool:
-    """Contract P2c-3a: a failed contact the Room has not answered yet.
+    """Contract P2c-3a: a failed contact the Room has not answered, or
+    answered that it failed.
 
-    A network failure, a timeout, a 5xx or 429 without a code, or an answer
-    whose body is not the Room's JSON. A coded Room answer is an answer and is
-    never retried as a failed contact (same rule as OpenClaw
+    A network failure, a timeout, a 5xx or 429 with or without a code, or an
+    answer whose body is not the Room's JSON. Any other coded Room answer is
+    an answer and is never retried as a failed contact (same rule as OpenClaw
     uncodedContactFailure).
     """
-    return isinstance(error, ProtocolError) and error.retryable and not error.code
+    return isinstance(error, ProtocolError) and error.retryable and (
+        not error.code or error.status >= 500 or error.status == 429)
 
 
 def _secret_store_dirs() -> list[Any]:
@@ -2348,6 +2350,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             terminal_status = "skipped" if attempt_action == "pass" else "failed"
             terminal_reason = str(selected.get("terminal_reason") or "model_skip")
             if cycle_attempt:
+                # Contract P2c-3a: the renewal stops before the settle, so a
+                # settle that is retried does not keep the attempt alive.
+                await self._stop_attempt_renewal(source_id)
                 if attempt_action == "fail":
                     await self._complete_cycle_attempt(
                         binding, cycle_attempt, attempt_action,
@@ -2355,7 +2360,6 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     )
                 else:
                     await self._complete_cycle_attempt(binding, cycle_attempt, attempt_action)
-                await self._stop_attempt_renewal(source_id)
                 self._cycle_attempts.pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
             await self._publish(
@@ -2611,8 +2615,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if completion:
                 self._record_lifecycle_attempt(binding, source_id)
             if cycle_attempt:
-                await self._complete_cycle_attempt(binding, cycle_attempt, "contribute", str(event.get("id") or ""))
+                # Contract P2c-3a: the renewal stops before the settle.
                 await self._stop_attempt_renewal(source_id)
+                await self._complete_cycle_attempt(binding, cycle_attempt, "contribute", str(event.get("id") or ""))
                 self._cycle_attempts.pop(source_id, None)
                 getattr(self, "_cycle_response_sources", {}).pop(source_id, None)
             elif turn:
@@ -3587,8 +3592,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if self._stop.is_set():
                     return  # Contract P2c-3a: no contact after the stop.
                 retry_delay = None
-                if not await self._refresh_binding(binding):
-                    return
+                if not await self._refresh_binding(binding) or not binding.enabled or binding.revoked:
+                    return  # Contract P2c-3: none after a revocation or expiry either.
                 try:
                     if binding.room_id not in getattr(self, "_registered_rooms", {binding.room_id}):
                         # Contract P2c-3: the Room no longer knows this
@@ -3601,6 +3606,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             binding,
                             lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
                         )
+                        if not binding.enabled or binding.revoked:
+                            return  # ended meanwhile (P2c-3): its status stays stopped
                         self._note_connected(binding, heartbeat)
                     await self._accept_connector_enrollments(binding)
                     await self._publish(
@@ -4615,9 +4622,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         elif execution_failure:
             payload["executionFailure"] = dict(execution_failure)
         # Contract P2c-3a: the settle of a turn's attempt is retried on the
-        # schedule while the Room has not answered; renewal is not part of
-        # it, so the Room ends the attempt with its lease meanwhile (P1-1) and
-        # then answers with a code.
+        # schedule while the Room has not answered. Every caller stops the
+        # attempt's renewal before it, so the Room ends the attempt with its
+        # lease meanwhile (P1-1) and then answers with a code.
         step = 0
         while True:
             try:
@@ -5512,6 +5519,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         "layer": "runtime", "code": "response_too_large",
                         "remediationHint": "The response exceeded the Room's message size limit. Retry with a shorter response.",
                     }
+                await self._stop_attempt_renewal(event_id)  # Contract P2c-3a: before the settle.
                 try:
                     if failure is None:
                         await self._complete_cycle_attempt(binding, cycle_attempt, "fail")

@@ -139,6 +139,7 @@ class FakeRoom:
 
     def stream_events(self, _room, after, on_event):
         with self.lock:
+            self.log.append("stream")
             if self.stream_errors:
                 failure = self.stream_errors.pop(0)
                 raise failure() if callable(failure) else failure
@@ -210,7 +211,7 @@ def run_watch(instance, binding, until, *, timeout=20.0, after=None):
 class P7aConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP7aCases"]
-        self.assertEqual(len(cases), 18)
+        self.assertEqual(len(cases), 20)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P7a-{index:02d} "), name)
@@ -528,6 +529,9 @@ class P7aRound2Tests(unittest.TestCase):
         marked = edge_error(409, json.dumps({"code": "stale_context", "retryable": True}).encode())
         self.assertTrue(marked.retryable)
         self.assertFalse(adapter._uncoded_contact_failure(marked))  # an answer, never retried as a contact
+        # Hermes r2 N1 (round 3): a 5xx or 429 with a Room code is retried too.
+        internal = edge_error(500, json.dumps({"code": "internal", "retryable": True}).encode())
+        self.assertTrue(adapter._uncoded_contact_failure(internal))
         network = protocol.urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
         with mock.patch.object(protocol, "_urlopen", side_effect=network):
             with self.assertRaises(adapter.ProtocolError) as raised:
@@ -1150,3 +1154,160 @@ class P7aRound3Tests(unittest.TestCase):
         with mock.patch.object(asyncio, "sleep", sleep), mock.patch.object(adapter, "logger", mock.Mock()):
             asyncio.run(run())
         return count()
+
+
+class P7aRound3AddendumTests(unittest.TestCase):
+    def test_p7a_19_a_retried_settle_does_not_renew(self):
+        # Hermes r2 B1: the settle after a post ran with the renewal alive.
+        attempt = cycle_attempt()
+        instance, binding, api, _published, _dispatched = room_instance(attempt)
+        settles = []
+        complete = api.complete_discussion_attempt
+
+        def flaky_complete(*args):
+            settles.append(api.claims)  # the claims made before each settle try
+            if len(settles) <= 3:
+                raise edge_error(502)  # no Room answer
+            return complete(*args)
+
+        api.complete_discussion_attempt = flaky_complete
+        calls = []
+
+        def sleep(delay, result=None):
+            caller = sys._getframe(1).f_code.co_name
+            calls.append((caller, float(delay)))
+            # A settle wait is long enough for a live renewal to claim again.
+            return REAL_SLEEP(0.05 if caller == "_complete_cycle_attempt" else 0.002, result)
+
+        async def run():
+            instance._start_attempt_renewal(binding, "evt-5", attempt)
+            deadline = time.monotonic() + 10
+            while api.claims < 2 and time.monotonic() < deadline:  # the renewal is alive and the claim succeeds
+                await REAL_SLEEP(0.005)
+            return await instance._send_final("room-1", adapter._dispatch_source_ref("evt-5", "g5"), "An answer.")
+
+        with mock.patch.object(asyncio, "sleep", sleep), self.assertLogs(adapter.logger, level="INFO"):
+            result = asyncio.run(run())
+        self.assertTrue(result.success)
+        self.assertEqual(len(api.posts), 1)
+        self.assertEqual(len(settles), 4)
+        self.assertGreaterEqual(settles[0], 2)
+        self.assertEqual({*settles, api.claims}, {settles[0]})  # no renewal or re-claim once the settle started
+        on_schedule(self, [delay for caller, delay in calls if caller == "_complete_cycle_attempt"])
+
+    def test_p7a_20_a_revoked_or_expired_credential_ends_both_loops(self):
+        # Hermes r2 B2: both loops end on the Room's JSON credential answer.
+        self.maxDiff = None
+        outcomes, expected = {}, {}
+        for code in ("credential_revoked", "credential_expired"):
+            for where in ("event read", "heartbeat"):
+                with tempfile.TemporaryDirectory() as scratch:
+                    path = Path(scratch) / "status.json"
+                    room = FakeRoom()
+                    refusal = edge_error(401, json.dumps({"code": code, "message": "refused"}).encode())
+                    instance, binding = watched(room, path)
+                    if where == "event read":
+                        instance._registered_rooms.add(binding.room_id)
+                        room.stream_errors = [refusal]
+                    else:
+                        room.heartbeat_errors = [refusal]
+
+                        def blocking_stream(_room_id, after, _on_event):
+                            # The stream stays open until the binding ends.
+                            deadline = time.monotonic() + 10
+                            while binding.enabled and not binding.revoked and time.monotonic() < deadline:
+                                time.sleep(0.005)
+                            return {"cursor": after, "ready": {"ok": True}}
+
+                        room.stream_events = blocking_stream
+                    ended, started = {}, []  # contacts counted where a loop starts them
+                    for name in ("_call", "_stream_call"):
+                        def contact(target, operation, original=getattr(instance, name)):
+                            started.append(True)
+                            return original(target, operation)
+                        setattr(instance, name, contact)
+                    for name in ("_revoke", "_expire"):
+                        def end(target, original=getattr(instance, name)):
+                            ended.setdefault("contacts", len(started))
+                            original(target)
+                        setattr(instance, name, end)
+                    with mock.patch.object(adapter, "update", lambda change: change(types.SimpleNamespace(binding=lambda _room: None))), \
+                            mock.patch.object(asyncio, "sleep", Waits()), mock.patch.object(adapter, "logger", mock.Mock()):
+                        async def heartbeat_ended():
+                            # Both loops end by themselves (run_watch would cancel them).
+                            deadline = time.monotonic() + 2
+                            while (instance._heartbeat_tasks or instance._tasks) and time.monotonic() < deadline:
+                                await REAL_SLEEP(0.01)
+                            ended["loops"] = not instance._heartbeat_tasks and not instance._tasks
+                            await REAL_SLEEP(0.05)
+
+                        outcome = run_watch(instance, binding, lambda: bool(ended), timeout=5.0, after=heartbeat_ended)
+                    entry = local_status.read(path)["rooms"]["room-1"]
+                    key = f"{code} on the {where}"
+                    outcomes[key] = (ended.get("loops", False), outcome["exited"], len(started) - ended.get("contacts", -1),
+                                     entry["connection"], entry["lastErrorCode"])
+                    expected[key] = (True, True, 0, "stopped", code)
+        self.assertEqual(outcomes, expected)
+
+    def test_the_sse_half_of_the_edge_page_rule(self):
+        # Hermes r2 j2: an edge page on the stream route is a failed contact.
+        for status in (401, 404):
+            page = protocol.urllib.error.HTTPError("https://room.example/api/x", status, "edge", {},
+                                                   io.BytesIO(b"<html><body>edge</body></html>"))
+            with self.subTest(status=status), mock.patch.object(protocol, "_urlopen", side_effect=page):
+                with self.assertRaises(adapter.ProtocolError) as raised:
+                    protocol.RoomProtocol("https://room.example/api", "credential").stream_events("room-1", 0, lambda _e: True)
+                error = raised.exception
+                self.assertTrue(error.non_json and error.retryable and not error.code)
+                self.assertFalse(error.hard_sse_unavailable or error.revoked or error.session_lost)
+
+    def test_the_long_poll_page_is_validated_before_any_event(self):
+        # Hermes r2 k3: an invalid page is never processed, not even its first event.
+        room = FakeRoom()
+        room.events = lambda *_args, **_kwargs: {"events": [{"id": "evt-valid", "seq": 6}, "garbage"]}
+        instance, binding = watched(room)
+        with self.assertRaises(protocol.InvalidEventPage):
+            asyncio.run(instance._long_poll_once(binding))
+        self.assertEqual(instance.consumed, [])
+
+    def test_a_lease_run_out_registers_again(self):
+        # Hermes r2 n5: no answer said "lost", but the lease ran out locally.
+        room = FakeRoom()
+        room.heartbeat_errors = [http_error(502)]
+        instance, binding = watched(room)
+        instance._registered_rooms.add(binding.room_id)
+        instance._lease_deadline[binding.room_id] = 1.0  # long past on the loop's clock
+
+        async def heartbeat():
+            task = asyncio.create_task(instance._heartbeat_loop(binding, 15))
+            deadline = time.monotonic() + 10
+            while room.registrations < 1 and time.monotonic() < deadline:
+                await REAL_SLEEP(0.01)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        with mock.patch.object(asyncio, "sleep", Waits()), self.assertLogs(adapter.logger, level="INFO"):
+            asyncio.run(heartbeat())
+        self.assertEqual(room.log[:2], ["heartbeat failed", "register"])
+
+    def test_the_stream_loop_resets_when_the_failed_contact_succeeds(self):
+        # Hermes r2 s: the contact that last failed succeeds, then another
+        # fails in the same pass: the schedule is at its first step again.
+        class Room(FakeRoom):
+            def register_connector(self, *args):
+                result = super().register_connector(*args)
+                protocol._contact_succeeded("contact-register")
+                return result
+
+        room = Room()
+        room.register_errors = [adapter.ProtocolError("down", retryable=True, contact="contact-register") for _ in range(3)]
+        room.stream_errors = [adapter.ProtocolError("down", retryable=True, contact="contact-stream")]
+        room.pending_events = [{"id": "evt-after", "type": "message.posted"}]
+        instance, binding = watched(room)
+        waits = Waits()
+        with mock.patch.object(asyncio, "sleep", waits), self.assertLogs(adapter.logger, level="INFO"):
+            outcome = run_watch(instance, binding, lambda: instance.consumed == ["evt-after"])
+        self.assertTrue(outcome["reached"])
+        failures = waits.of("_watch")[:4]
+        on_schedule(self, failures[:3])
+        self.assertLessEqual(failures[3], 1.0, failures)

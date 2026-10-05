@@ -345,7 +345,7 @@ class ParityP1Tests(unittest.TestCase):
                 error = urllib.error.HTTPError(
                     "https://room.example/api/x", 409, "Conflict", {}, io.BytesIO(envelope),
                 )
-                with mock.patch.object(sys.modules[adapter.RoomProtocol.__module__], "_urlopen", side_effect=error):
+                with mock.patch.dict(adapter.RoomProtocol._request_once.__globals__, {"_urlopen": mock.Mock(side_effect=error)}):
                     with self.assertRaises(adapter.ProtocolError) as raised:
                         protocol.request("POST", "/rooms/room-1/messages", {})
                 self.assertEqual(raised.exception.code, code)  # verbatim, never ""
