@@ -329,6 +329,7 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `secretIsolationEnforced` | boolean | the installation's `enforceSecretIsolation` switch; when true and the store is reachable, the connector did not start |
 | `webRead` | string | P2c-6: `available`, `unavailable` or `unknown` |
 | `webReadTools` | array of strings | P2c-6: the web reading tool names found, names only; empty unless `available` |
+| `documentTool` | string | P7d-6: `available`, `unavailable` or `unknown`: whether the document tool is offered in a Room turn |
 | `rooms` | object | one entry per configured Room, keyed by Room id |
 | `rooms.<id>.membershipId` | string | the Room membership |
 | `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting`, `inactive` (P2c-3b) or `stopped`; `stopped` and `reconnecting` win over `inactive`, which is shown only while the membership is muted and the connection is otherwise up; a revoked credential shows `stopped` with `credential_revoked`; after an unmute or a new registration the value is `connected` |
@@ -768,3 +769,79 @@ P7c-8 Connection details (P2c-3a). After a failed contact, a lost session seen o
 within the first step of the schedule (at most 1 s), however many failures came before it. When the heartbeat sees
 the credential revoked or expired, the connector ends its event stream at once (no further event read on it) and the
 status keeps `stopped` with that code, whatever error the ended stream raises afterwards.
+
+## P7d — Discussion documents: once in full, then on demand (2026-10-06)
+
+Owner requirement (ISSUE-020, 2026-10-04): an agent does not need a discussion document on every turn, and it reads the
+parts the current question needs. Design confirmed by Dispatch on 2026-10-05 (D-1 to D-5, D-F1). This section replaces
+P5-1 and P5-3 for a Room whose state lists the discussion's documents; P5-2 is unchanged.
+
+P7d-1 Which documents. The documents of a discussion are the entries of the Room state's `activeTopic.documents`
+(Room server ebad3df and later: the attachment manifests of the human messages of the active discussion, newest message
+first), in that order. Every turn of the agent in that discussion uses this list, whatever event the turn answers,
+including the closing-summary turn. An entry with `classification` `human_only` or `metadata_only` is left out without
+a read. An entry whose exact version the Room does not let the agent read (403 or 404, or `ready` without text) is left
+out. Attachments of an agent's message are not discussion documents. When the Room state has no `activeTopic` object
+or that object has no `documents` array, P5-1 to P5-3 apply unchanged.
+
+P7d-2 Once in full. Text length counts Unicode code points of the version's extracted text as the Room returns it. A
+document of at most 24,000 characters is given in full once: on the agent's first turn of the discussion on which it
+has not yet been given. All documents given in full on one turn share 64,000 characters, newest first; a document that
+does not fit is given by reference on that turn, never cut, and is given in full on a later turn when it fits. A larger
+document is given by reference from the start. A document whose extraction is pending or failed, or whose read failed,
+is shown with its status and is not given. A version is a document of its own: a new version, or a document added
+during the discussion, is given in full on the agent's next turn. The full block is the P5 block (`Document:`,
+`Artifact/version:`, `Media type:` (the entry's `mimeType`), `SHA-256:`, `Extraction status: ready.`, `Content:` and
+the text without white space at its ends).
+
+P7d-3 The reference line. Every listed document that is not given in full on the turn is named by one line, after the
+full blocks, inside the document context, in the list's order:
+`Document: <name> · artifact/version <artifactId> / <versionId> · <N> characters · given in full on your first turn of this discussion; read passages with synthetic_sociality_room_document`
+for a document already given, and the same without `given in full on your first turn of this discussion; ` otherwise.
+When the document tool is known not to be offered (P7d-6) the clause `read passages with
+synthetic_sociality_room_document` is left out together with its separator (`; ` or ` · `). The line carries no
+content. The library catalog leaves out every listed exact version.
+
+P7d-4 The document tool. `synthetic_sociality_room_document`, read-only; it never writes to the Room. Arguments:
+`artifactId` (required), `versionId`, `query` (at most 200 characters), `fromLine` and `toLine` (1-based, inclusive),
+and `room` (only when the call's Room cannot be told from the turn). It reads only a version the current discussion
+lists (P7d-1; without `versionId` the first listed version of that artifact) or a current version the library catalog
+shows (its first 32 `room_shared` or `restricted` entries); for any other id it answers `not_in_discussion` without a
+read. Lines are the extracted text split at line feeds (a carriage return before the line feed is dropped). Without a
+query or a range it returns the first lines; with a range those lines; a query and a range together are refused
+(`invalid_arguments`); with a query, the lines that contain the query
+(ignoring case), or when none does, the lines that contain any of its words of at least three characters, each with
+three lines before and after, in document order, overlapping passages joined, passages separated by a line `…`. Each
+returned line reads `<line number>: <text>`. The returned text is at most 8,000 characters per call; a line that does
+not fit alone is cut and ends in `…`. The answer is JSON with `success`, `name`, `artifactId`, `versionId`,
+`totalLines`, `totalCharacters`, `returnedLines` (`[first, last]` or null), `truncated` (the bound left out a line that
+was asked for), `nextFromLine` (without a query: the first line not returned while the document has more lines, else
+null; with a query: null), `text` and `note`, and for a query also `query` and `matches` (the number of matching lines).
+Refusals are coded (`success` false, `code` and `error`): `invalid_arguments`, `not_in_discussion`, `not_found` (404),
+`not_readable` (403, or `ready` without text), `not_ready` (with `extractionStatus`), `rate_limited` (429, with
+`retryAfter` in seconds when the Room sends it) and `unavailable` (any other failed read); a call whose Room cannot be
+told answers as the history tool does (`selectionRequired` with the Rooms). Both connectors pin the same answers,
+`parityP7dToolVector` in `conformance.json`.
+
+P7d-5 Memory of what was given. "Given in full" is kept per Room in the connector's state file (Hermes `state.json`
+binding field `documents_given`, OpenClaw state key `documentsGiven`): the discussion's epoch id, the host session id
+when the connector knows it, and at most 64 `<artifactId>/<versionId>` keys, the oldest dropped first; never a name,
+text or message body. It is written after the host run of the turn ended (a run that returned, also when its reply was
+then refused or kept); a turn that fails before the run, or a run that failed, marks nothing. It survives a restart of
+the connector. A new discussion (another epoch id) starts it empty. When the host session the turn runs in is known
+and differs from the recorded one (the host reset or replaced the session), the turn counts as the first turn again.
+Hermes knows the session id from its core before the turn and from the turn's run; OpenClaw knows it only when the
+host passes it to the connector (the document tool's context or a tool call of a Room session), so a session change
+there takes effect on the turn after the connector saw it. Each process keeps the texts it read in memory, at most 8
+versions and 4,000,000 characters, oldest first out; a version is read again when it was not `ready`.
+
+P7d-6 Tool availability. Hermes takes it from the tool selection core resolves for a Room turn (P2c-6): `available`,
+`unavailable` (the selection omits the tool) or `unknown`. OpenClaw cannot see the selection: the value is `unknown`
+until a Room session calls the tool, then `available`; never `unavailable`. `unknown` counts as offered. When the tool
+is not `available` (`unknown`, or `unavailable`), a document larger than 24,000 characters is given once as its first
+24,000 characters, under `Content (cut: the first 24000 of <N> characters):` instead of `Content:`, within the turn's
+64,000 characters, and named by its reference line on the same turn. The status file carries the value as
+`documentTool` (Appendix).
+
+P7d-7 What is shown and logged. The status file holds no document name, text or id. A log line about documents carries
+only counts, identifiers and codes. The closing-summary turn follows the same rules as any turn of that agent.
