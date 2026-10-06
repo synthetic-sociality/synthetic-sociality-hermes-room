@@ -779,8 +779,8 @@ P5-1 and P5-3 for a Room whose state lists the discussion's documents; P5-2 is u
 P7d-1 Which documents. The documents of a discussion are the entries of the Room state's `activeTopic.documents`
 (Room server ebad3df and later: the attachment manifests of the human messages of the active discussion, newest message
 first), in that order. Every turn of the agent in that discussion uses this list, whatever event the turn answers,
-including the closing-summary turn. An entry with `classification` `human_only` or `metadata_only` is left out without
-a read. An entry whose exact version the Room does not let the agent read (403 or 404, or `ready` without text) is left
+including the closing-summary turn. An entry with `classification` `human_only` or `metadata_only`, or with an `artifactId` or
+`versionId` longer than 128 characters, is left out without a read. An entry whose exact version the Room does not let the agent read (403 or 404, or `ready` without text) is left
 out. Attachments of an agent's message are not discussion documents. When the Room state has no `activeTopic` object
 or that object has no `documents` array, P5-1 to P5-3 apply unchanged.
 
@@ -796,15 +796,15 @@ the text without white space at its ends).
 
 P7d-3 The reference line. Every listed document that is not given in full on the turn is named by one line, after the
 full blocks, inside the document context, in the list's order:
-`Document: <name> · artifact/version <artifactId> / <versionId> · <N> characters · given in full on your first turn of this discussion; read passages with synthetic_sociality_room_document`
-for a document already given, and the same without `given in full on your first turn of this discussion; ` otherwise.
+`Document: <name> · artifact/version <artifactId> / <versionId> · <N> characters · given in full earlier in this discussion; read passages with synthetic_sociality_room_document`
+for a document already given, and the same without `given in full earlier in this discussion; ` otherwise.
 When the document tool is known not to be offered (P7d-6) the clause `read passages with
 synthetic_sociality_room_document` is left out together with its separator (`; ` or ` · `). The line carries no
 content. The library catalog leaves out every listed exact version.
 
 P7d-4 The document tool. `synthetic_sociality_room_document`, read-only; it never writes to the Room. Arguments:
 `artifactId` (required), `versionId`, `query` (at most 200 characters), `fromLine` and `toLine` (1-based, inclusive),
-and `room` (only when the call's Room cannot be told from the turn). It reads only a version the current discussion
+and `room` (only when the call's Room cannot be told from the turn, see below). It reads only a version the current discussion
 lists (P7d-1; without `versionId` the first listed version of that artifact) or a current version the library catalog
 shows (its first 32 `room_shared` or `restricted` entries); for any other id it answers `not_in_discussion` without a
 read. Lines are the extracted text split at line feeds (a carriage return before the line feed is dropped). Without a
@@ -822,6 +822,18 @@ Refusals are coded (`success` false, `code` and `error`): `invalid_arguments`, `
 `retryAfter` in seconds when the Room sends it) and `unavailable` (any other failed read); a call whose Room cannot be
 told answers as the history tool does (`selectionRequired` with the Rooms). Both connectors pin the same answers,
 `parityP7dToolVector` in `conformance.json`.
+Inside a Room turn the turn's own Room is the only Room of a call of this tool, of the history tool
+(`synthetic_sociality_room_history`) and of the Room-context tool (`synthetic_sociality_room_context`, Hermes only):
+a `room` argument that names another Room is refused with `room_mismatch` (`success` false, `code`, and `error`
+`Inside a Room turn this tool acts only for the turn's own Room.`) before anything of that Room is read, and is never
+replaced silently; an argument that names the turn's own Room (Hermes: its id or exact title; OpenClaw: its id or
+the turn's account id) is accepted. The turn's Room is the one Hermes recorded for the core session of the call
+(P7d-5) and the one OpenClaw reads from the session key of the tool's context. A tool acts only for the calling agent:
+Hermes holds one agent per profile and one binding per Room; OpenClaw takes the calling agent from the tool's context
+(`agentId`, else the session key) and an account's agent from the host's own route resolution, and offers only that
+agent's accounts. In a Room turn OpenClaw uses the turn's account (the context's `agentAccountId`, else the agent's
+only account in that Room) and never answers `selectionRequired`. Outside a Room turn the argument selects among the
+calling agent's own Rooms, and a `selectionRequired` answer lists only those.
 
 P7d-5 Memory of what was given. "Given in full" is kept per Room in the connector's state file (Hermes `state.json`
 binding field `documents_given`, OpenClaw state key `documentsGiven`): the discussion's epoch id, the host session id
@@ -829,11 +841,18 @@ when the connector knows it, and at most 64 `<artifactId>/<versionId>` keys, the
 text or message body. It is written after the host run of the turn ended (a run that returned, also when its reply was
 then refused or kept); a turn that fails before the run, or a run that failed, marks nothing. It survives a restart of
 the connector. A new discussion (another epoch id) starts it empty. When the host session the turn runs in is known
-and differs from the recorded one (the host reset or replaced the session), the turn counts as the first turn again.
+and differs from the recorded one (the host reset or replaced the session), the turn counts as the first turn again;
+a run whose session differs from the one the memory records, or from the one known when the turn was built, writes
+only what that run was given. A run that ended in the host's operational fallback (OpenClaw: the generic or the
+compaction fallback, settled as `fail`) is a run that failed. OpenClaw remembers the host session per agent and
+conversation.
 Hermes knows the session id from its core before the turn and from the turn's run; OpenClaw knows it only when the
 host passes it to the connector (the document tool's context or a tool call of a Room session), so a session change
 there takes effect on the turn after the connector saw it. Each process keeps the texts it read in memory, at most 8
-versions and 4,000,000 characters, oldest first out; a version is read again when it was not `ready`.
+versions and 4,000,000 characters, oldest first out; a version is read again when it was not `ready`. It also keeps the
+character count of every `ready` version it read, at most 1,024 versions, numbers only, oldest first out; a version
+already given, or larger than 24,000 characters while the tool is `available`, whose count it holds is named by its
+reference line without a read.
 
 P7d-6 Tool availability. Hermes takes it from the tool selection core resolves for a Room turn (P2c-6): `available`,
 `unavailable` (the selection omits the tool) or `unknown`. OpenClaw cannot see the selection: the value is `unknown`
@@ -844,4 +863,6 @@ is not `available` (`unknown`, or `unavailable`), a document larger than 24,000 
 `documentTool` (Appendix).
 
 P7d-7 What is shown and logged. The status file holds no document name, text or id. A log line about documents carries
-only counts, identifiers and codes. The closing-summary turn follows the same rules as any turn of that agent.
+only counts, identifiers and codes. An identifier the caller of a tool supplied is logged only when it has the
+form the Room server issues (15 characters `a-z` and `0-9`, PocketBase record ids), otherwise as `invalid`; no other
+value the caller supplied (a query, a title, a `room` argument) is logged. The closing-summary turn follows the same rules as any turn of that agent.
