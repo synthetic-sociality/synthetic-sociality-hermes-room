@@ -423,6 +423,18 @@ class ParityP7dTests(unittest.TestCase):
                     broken.write_text(json.dumps(raw))
                     with self.assertRaises(ValueError):
                         state_module.load(broken)
+            # Written after the run through the connector's own persist merge.
+            path = Path(directory) / "merged" / "state.json"
+            fresh = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential")
+            state_module.save(state_module.PluginState(bindings=[copy.deepcopy(fresh)]), path)
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            instance._persist_binding = types.MethodType(adapter.SyntheticSocialityAdapter._persist_binding, instance)
+            instance._documents_offered = {"ready-9": {"epoch_id": "epoch-2", "host_session": "", "given": [],
+                                                      "offered": ["brief/v1"]}}
+            with mock.patch.object(adapter, "update", lambda mutator: state_module.update(mutator, path)):
+                instance._mark_documents_given(fresh, "ready-9")
+            self.assertEqual(state_module.load(path).binding("room-1").documents_given,
+                             {"epoch_id": "epoch-2", "host_session": "", "given": ["brief/v1"]})
         documents.TEXT_CACHE.clear()  # a new process has no texts
         discussion.memory = copy.deepcopy(loaded.documents_given)
         after = discussion.turn()
@@ -640,11 +652,11 @@ class ParityP7dTests(unittest.TestCase):
             "denied": adapter.ProtocolError("forbidden", status=403, code="forbidden"),
             "empty": record("empty", {"v1": ("ready", None)}),
             "other": record("other", {"v1": ("ready", "Another discussion's text.")}),
-        }, library=[{"artifactId": f"lib-{index}", "visibility": "room_shared",
-                     "currentVersion": {"versionId": "v1", "name": f"lib-{index}.pdf"}} for index in range(33)]
-          + [{"artifactId": "shared", "visibility": "room_shared",
-              "currentVersion": {"versionId": "v1", "name": "shared.md", "mediaType": "text/markdown",
-                                 "sha256": "e" * 64, "extractionStatus": "ready"}}],
+        }, library=[{"artifactId": "shared", "visibility": "room_shared",
+                     "currentVersion": {"versionId": "v1", "name": "shared.md", "mediaType": "text/markdown",
+                                        "sha256": "e" * 64, "extractionStatus": "ready"}}]
+          + [{"artifactId": f"lib-{index}", "visibility": "room_shared",
+              "currentVersion": {"versionId": "v1", "name": f"lib-{index}.pdf"}} for index in range(32)],
            documents_list=[entry("shared"), entry("hidden", classification="human_only"),
                            entry("meta", classification="metadata_only"), entry("denied"), entry("empty")])
         text = Discussion(self, room, selection={TOOL}).turn()
@@ -657,11 +669,11 @@ class ParityP7dTests(unittest.TestCase):
         self.assertIn("lib-0.pdf · artifact/version lib-0 / v1", text)
         room.reads.clear()
         call = self.tool_caller(room)
-        for artifact_id in ("other", "hidden", "meta", "lib-32"):
+        for artifact_id in ("other", "hidden", "meta", "lib-31"):
             with self.subTest(outside=artifact_id):
                 self.assertEqual(call({"artifactId": artifact_id})["code"], "not_in_discussion")
         self.assertEqual(room.reads, [])
-        self.assertEqual(call({"artifactId": "lib-31"})["code"], "not_found")
+        self.assertEqual(call({"artifactId": "lib-30"})["code"], "not_found")
         # The bound: a line that does not fit alone is cut and ends in "…".
         cut = call({"artifactId": "shared", "fromLine": 2})
         self.assertEqual(len(cut["text"]), documents.DOCUMENT_TOOL_RESULT_LIMIT)
