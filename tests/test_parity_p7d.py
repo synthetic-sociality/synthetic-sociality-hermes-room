@@ -14,15 +14,20 @@ import copy
 import dataclasses
 import hashlib
 import json
+import ast
 import logging
+import os
+import shutil
+import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from test_delivery_lifecycle import ROOT, adapter
+from test_delivery_lifecycle import ROOT, adapter, configured_instance, lifecycle_binding
 from test_parity_p1 import cycle_attempt, room_instance, completion_event
 from test_parity_p1a import HUMAN, PEER, START, attempt_ready
 
@@ -160,7 +165,7 @@ def document_block(text):
 
 def reference(name, artifact_id, version_id, size, *, given, tool=True):
     line = f"Document: {name} · artifact/version {artifact_id} / {version_id} · {size} characters"
-    clauses = (["given in full on your first turn of this discussion"] if given else []) + (
+    clauses = (["given in full earlier in this discussion"] if given else []) + (
         [f"read passages with {TOOL}"] if tool else [])
     return line + (" · " + "; ".join(clauses) if clauses else "")
 
@@ -192,12 +197,13 @@ class Discussion:
 class ParityP7dTests(unittest.TestCase):
     def setUp(self):
         getattr(documents, "TEXT_CACHE", set()).clear()
+        getattr(documents, "TEXT_SIZES", set()).clear()
         getattr(origin, "_SESSION_BY_ROOM", {}).clear()
         getattr(origin, "_ROOM_BY_SESSION", {}).clear()
 
     def test_p7d_00_cases_and_constants_are_pinned(self):
         cases = CONFORMANCE["parityP7dCases"]
-        self.assertEqual(len(cases), 17)
+        self.assertEqual(len(cases), 26)
         for name, method in cases.items():
             self.assertTrue(name.startswith("P7d-"), name)
             self.assertTrue(hasattr(self, method), method)
@@ -210,6 +216,12 @@ class ParityP7dTests(unittest.TestCase):
             "contextLines": documents.DOCUMENT_CONTEXT_LINES, "givenLimit": documents.DOCUMENTS_GIVEN_LIMIT,
             "cacheVersions": documents.DOCUMENT_CACHE_VERSIONS, "cacheCharacters": documents.DOCUMENT_CACHE_CHARACTERS,
             "libraryLimit": documents.DOCUMENT_LIBRARY_LIMIT,
+            "sizeVersions": getattr(documents, "DOCUMENT_SIZE_VERSIONS", None),
+            "idForm": getattr(getattr(documents, "ROOM_ID_FORM", None), "pattern", None) and
+            f"^{documents.ROOM_ID_FORM.pattern}$",
+            "givenClause": documents.GIVEN_CLAUSE,
+            "roomMismatchError": getattr(documents, "ROOM_MISMATCH_ERROR", None),
+            "toolDescription": room_tools.ROOM_DOCUMENT_SCHEMA["description"],
         })
 
     def test_p7d_01_first_turn_full_later_turns_reference_only(self):
@@ -590,8 +602,9 @@ class ParityP7dTests(unittest.TestCase):
         for fragment in (secret_name, "Confidential", "stage II", LARGE_TEXT[:40]):
             self.assertNotIn(fragment, logged)
         self.assertIn("documents for ready-50: full=1 head=0 reference=1 status=0 left_out=0 tool=available", logged)
-        self.assertIn("document read: artifact=doc version=- code=ok", logged)
-        self.assertIn("document read: artifact=nowhere version=- code=not_in_discussion", logged)
+        # Ids not in the Room's id form are logged as "invalid" (P7d-7, P7d-19).
+        self.assertIn("document read: artifact=invalid version=- code=ok", logged)
+        self.assertIn("document read: artifact=invalid version=- code=not_in_discussion", logged)
         self.assertEqual(set(discussion.memory), {"epoch_id", "host_session", "given"})
         self.assertNotIn(secret_name, json.dumps(discussion.memory))
         with tempfile.TemporaryDirectory() as directory:
@@ -718,6 +731,347 @@ class ParityP7dTests(unittest.TestCase):
         self.assertEqual((origin.room_for_session("session-4"), origin.host_session_for_room("room-4")),
                          ("room-4", "session-4"))
         self.assertEqual(origin.room_for_session("session-5"), "")
+
+    def two_rooms(self):
+        """Rooms A and B of one agent, each recording every Room call."""
+        rooms = {}
+        for key, room_id, title in (("a", "rooma0000000001", "Alpha"), ("b", "roomb0000000002", "Beta")):
+            calls = []
+            room = Room({"doc" + key: record("doc" + key, {"v1": ("ready", f"Room {title} text.")})},
+                        documents_list=[entry("doc" + key)])
+            state = dict(room.state(), title=title)
+
+            def recorded(name, value, calls=calls):
+                def method(*args, **_kwargs):
+                    calls.append(name)
+                    return value(*args) if callable(value) else copy.deepcopy(value)
+                return method
+
+            protocol = types.SimpleNamespace(
+                room_state=recorded("room_state", state), artifacts=recorded("artifacts", room.artifacts),
+                artifact=recorded("artifact", room.artifact), events=recorded("events", {"events": [], "hasMore": False}),
+                epochs=recorded("epochs", {"epochs": []}),
+            )
+            binding = adapter.RoomBinding("https://room.example/api", room_id, "member-" + key, "credential-" + key)
+            rooms[key] = types.SimpleNamespace(id=room_id, title=title, calls=calls, protocol=protocol, binding=binding)
+        bindings = [rooms["a"].binding, rooms["b"].binding]
+        by_credential = {room.binding.credential: room.protocol for room in rooms.values()}
+        patches = (mock.patch.object(room_tools, "_enabled_bindings", return_value=bindings),
+                   mock.patch.object(room_tools, "RoomProtocol", side_effect=lambda _url, credential: by_credential[credential]))
+        return rooms, patches
+
+    def test_p7d_18_a_room_turn_acts_only_for_its_own_room(self):
+        rooms, patches = self.two_rooms()
+        origin.remember_room_session("session-a", rooms["a"].id)
+        tools = {"document": room_tools.room_document, "history": room_tools.room_history,
+                 "context": room_tools.room_context}
+        with patches[0], patches[1]:
+            for name, tool in tools.items():
+                for other in (rooms["b"].id, rooms["b"].title, "beta"):
+                    with self.subTest(tool=name, room=other):
+                        answer = json.loads(tool({"artifactId": "docb", "room": other}, session_id="session-a"))
+                        self.assertEqual(answer, {"success": False, "code": "room_mismatch",
+                                                  "error": documents.ROOM_MISMATCH_ERROR})
+                        self.assertEqual(rooms["b"].calls, [], "nothing of Room B is read")
+            # The turn's own Room, by id, by title or without the argument.
+            for own in (rooms["a"].id, "alpha", None):
+                with self.subTest(own=own):
+                    args = {"artifactId": "doca"} if own is None else {"artifactId": "doca", "room": own}
+                    answer = json.loads(room_tools.room_document(args, session_id="session-a"))
+                    self.assertEqual((answer["success"], answer["artifactId"]), (True, "doca"), answer)
+                    self.assertFalse(json.loads(room_tools.room_history(
+                        {key: value for key, value in args.items() if key == "room"}, session_id="session-a")).get("code"))
+            self.assertEqual(rooms["b"].calls, [])
+            # Room B's document named without the argument: not of this discussion.
+            self.assertEqual(json.loads(room_tools.room_document({"artifactId": "docb"}, session_id="session-a"))["code"],
+                             "not_in_discussion")
+            self.assertEqual(rooms["b"].calls, [])
+            # Outside a Room turn the argument selects among the agent's own Rooms.
+            outside = json.loads(room_tools.room_document({"artifactId": "docb", "room": rooms["b"].id}, session_id="cli-1"))
+            self.assertEqual((outside["success"], outside["text"]), (True, "1: Room Beta text."))
+            self.assertIn("artifact", rooms["b"].calls)
+            several = json.loads(room_tools.room_document({"artifactId": "doca"}, session_id="cli-1"))
+            self.assertTrue(several["selectionRequired"])
+
+    def test_p7d_19_a_log_line_carries_a_caller_supplied_id_only_in_the_room_id_form(self):
+        rooms, patches = self.two_rooms()
+        origin.remember_room_session("session-a", rooms["a"].id)
+        # A document name, a sentence, a string with a line break, a carriage return.
+        typed = ["Befund-Zeisig-Kardiologie.md", "Unique finding: violet heron syndrome stage IX.", "x\nINFO forged line",
+                 "doca\r"]
+        with patches[0], patches[1], self.assertLogs(room_tools.logger, level=logging.DEBUG) as captured:
+            for value in typed:
+                room_tools.room_document({"artifactId": value}, session_id="session-a")
+                room_tools.room_document({"artifactId": "doca", "versionId": value}, session_id="session-a")
+                room_tools.room_document({"artifactId": "doca", "room": value}, session_id="session-a")
+                room_tools.room_history({"room": value, "query": value}, session_id="session-a")
+            room_tools.room_document({"artifactId": "abcde12345fghij", "versionId": "v0000000000000a"}, session_id="session-a")
+        messages = [record.getMessage() for record in captured.records]
+        for message in messages:
+            self.assertNotIn("\n", message)
+            self.assertNotIn("\r", message)
+            for value in typed:
+                self.assertNotIn(value.strip(), message)
+            for fragment in ("Befund", "violet", "forged", "Beta"):
+                self.assertNotIn(fragment, message)
+        self.assertIn(f"Room {rooms['a'].id} document read: artifact=invalid version=- code=not_in_discussion", messages)
+        self.assertIn(f"Room {rooms['a'].id} document read: artifact=invalid version=invalid code=not_in_discussion", messages)
+        self.assertIn(f"Room {rooms['a'].id} document refused: code=room_mismatch", messages)
+        self.assertIn(f"Room {rooms['a'].id} history refused: code=room_mismatch", messages)
+        self.assertIn(f"Room {rooms['a'].id} document read: artifact=abcde12345fghij version=v0000000000000a "
+                      "code=not_in_discussion", messages)
+        self.assertEqual(documents.loggable_id("abcde12345fghij"), "abcde12345fghij")
+        for value in ("abcde12345fghij\n", "ABCDE12345FGHIJ", "abcde12345fghi", "abcde12345fghijk", "abcde-2345fghij", 15, None):
+            self.assertEqual(documents.loggable_id(value), "invalid", value)
+
+    def test_p7d_20_the_release_archive_installs_every_runtime_file_it_ships(self):
+        # Review B1 (1.0.84 at be23f2f): install.sh did not copy documents.py.
+        # The archive is built by the packager from a commit of this tree, its
+        # own install.sh installs it into a scratch HERMES_HOME (no network,
+        # hermes not on PATH), and what the signed manifest lists is compared.
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            source = scratch / "source"
+            shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            git_env = {"PATH": "/usr/bin:/bin", "HOME": str(scratch), "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+                       "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
+            for command in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "release"]):
+                subprocess.run(["git", "-C", str(source), *command], env=git_env, check=True, capture_output=True)
+            built = subprocess.run([sys.executable, str(source / "tools" / "package-release.py"), "--output-dir",
+                                    str(scratch / "out")], env=git_env, check=True, capture_output=True, text=True)
+            release = json.loads(built.stdout)
+            manifest = json.loads(Path(release["manifest"]).read_text())
+            with tarfile.open(release["archive"]) as archive:
+                archive.extractall(scratch / "extracted", filter="data")
+            unpacked = scratch / "extracted" / Path(release["archive"]).name.removesuffix(".tar.gz")
+            hermes_home = scratch / "hermes-home"
+            installed = subprocess.run(["sh", str(unpacked / "install.sh")], capture_output=True, text=True,
+                                       env={"PATH": "/usr/bin:/bin", "HOME": str(scratch), "HERMES_HOME": str(hermes_home)})
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            plugin = hermes_home / "plugins" / "synthetic-sociality-room"
+            # (a) Every runtime file the manifest lists (all but tests/, docs/
+            # and tools/, which no installer copies) is installed and byte-equal,
+            # and nothing else is.
+            runtime = {name: digest for name, digest in manifest["files"].items()
+                       if not name.startswith(("tests/", "docs/", "tools/"))}
+            self.assertIn("documents.py", runtime)
+            on_disk = {path.relative_to(plugin).as_posix() for path in plugin.rglob("*") if path.is_file()}
+            self.assertEqual(on_disk, set(runtime))
+            for name, digest in runtime.items():
+                self.assertEqual(hashlib.sha256((plugin / name).read_bytes()).hexdigest(), digest, name)
+            # (b) Every module the installed package imports resolves, and the
+            # installed plugin imports.
+            for path in plugin.glob("*.py"):
+                for node in ast.walk(ast.parse(path.read_text(), str(path))):
+                    if isinstance(node, ast.ImportFrom) and node.level:
+                        targets = [node.module] if node.module else [alias.name for alias in node.names]
+                        for target in targets:
+                            self.assertTrue((plugin / f"{target.split('.')[0]}.py").is_file(), f"{path.name}: .{target}")
+            probe = ("import importlib.util, sys\n"
+                     "spec = importlib.util.spec_from_file_location('ssr_installed', sys.argv[1] + '/__init__.py', "
+                     "submodule_search_locations=[sys.argv[1]])\n"
+                     "module = importlib.util.module_from_spec(spec); sys.modules['ssr_installed'] = module\n"
+                     "spec.loader.exec_module(module)\n"
+                     "print(callable(getattr(module, 'register', None)), sorted(name for name in sys.modules "
+                     "if name.startswith('ssr_installed.')))\n")
+            loaded = subprocess.run([sys.executable, "-c", probe, str(plugin)], capture_output=True, text=True,
+                                    env={**os.environ, "HOME": str(scratch), "HERMES_HOME": str(hermes_home)})
+            self.assertEqual(loaded.returncode, 0, loaded.stderr[-2000:])
+            self.assertTrue(loaded.stdout.startswith("True "), loaded.stdout)
+            self.assertIn("ssr_installed.documents", loaded.stdout)
+
+    def test_p7d_21_a_version_already_given_is_not_read_again(self):
+        # Review N3: more listed documents than the text cache holds.
+        names = [f"doc{index:02d}" for index in range(12)]
+        room = Room({name: record(name, {"v1": ("ready", f"{name} text. " * 300)}) for name in names},
+                    documents_list=[entry(name) for name in names])
+        discussion = Discussion(self, room, selection={TOOL})
+        first = discussion.turn()
+        self.assertEqual(first.count("\nContent:\n"), 12)
+        self.assertEqual(sorted(room.reads), names)
+        for _turn in range(3):
+            later = document_block(discussion.turn())
+            self.assertEqual(later.count(" · given in full earlier in this discussion"), 12)
+        self.assertEqual(len(room.reads), 12, "a given version is named without a Room read")
+        # A process that holds no count (a restart) reads each version once.
+        documents.TEXT_SIZES.clear()
+        documents.TEXT_CACHE.clear()
+        discussion.turn()
+        discussion.turn()
+        self.assertEqual(len(room.reads), 24)
+        # A large document while the tool is available: read once, then by count.
+        room = Room({"long": record("long", {"v1": ("ready", LARGE_TEXT)})}, documents_list=[entry("long")])
+        documents.TEXT_CACHE.clear()
+        large = Discussion(self, room, selection={TOOL})
+        for _turn in range(3):
+            self.assertIn(reference("long.md", "long", "v1", len(LARGE_TEXT), given=False), large.turn())
+        self.assertEqual(room.reads, ["long"])
+        # The count memory is bounded.
+        sizes = documents.DocumentSizes(versions=3)
+        for index in range(5):
+            sizes.put(("scope", f"a{index}", "v1"), index)
+        self.assertEqual([sizes.get(("scope", f"a{index}", "v1")) for index in range(5)], [None, None, 2, 3, 4])
+
+    def test_p7d_22_bounds_of_memory_library_cache_result_and_head(self):
+        # Review deferred 1: more than 64 given keys drop the oldest.
+        keys = [f"a{index}/v1" for index in range(70)]
+        memory = documents.given_memory("epoch-2", keys[:60], keys[60:], "s")
+        self.assertEqual(memory["given"], keys[6:])
+        # Deferred 2: a library entry of class human_only is refused, no read.
+        room = Room({"private": record("private", {"v1": ("ready", "Owner only.")}),
+                     "open": record("open", {"v1": ("ready", "Open text.")})},
+                    library=[{"artifactId": "private", "visibility": "human_only",
+                              "currentVersion": {"versionId": "v1", "name": "private.md"}},
+                             {"artifactId": "open", "visibility": "restricted",
+                              "currentVersion": {"versionId": "v1", "name": "open.md"}}],
+                    documents_list=[])
+        call = self.tool_caller(room)
+        self.assertEqual(call({"artifactId": "private"})["code"], "not_in_discussion")
+        self.assertEqual(room.reads, [])
+        self.assertTrue(call({"artifactId": "open"})["success"])
+        # Deferred 3: the same artifact id in two Rooms never shares a cache entry.
+        fetched = []
+        for room_id in ("rooma0000000001", "roomb0000000002"):
+            def fetch(wanted, room_id=room_id):
+                fetched.append(room_id)
+                return record(wanted, {"v1": ("ready", f"Text of {room_id}.")})
+            self.assertEqual(documents.read_version(("https://room.example/api", room_id), fetch, "same", "v1"),
+                             ("ready", f"Text of {room_id}."))
+        self.assertEqual(fetched, ["rooma0000000001", "roomb0000000002"])
+        # Deferred 4: a result that fills the bound exactly is not cut.
+        line = "x" * (documents.DOCUMENT_TOOL_RESULT_LIMIT - len("1: "))
+        exact = documents.document_passages("exact.md", "exact", "v1", line + "\nsecond", {"fromLine": 1, "toLine": 1})
+        self.assertEqual((len(exact["text"]), exact["truncated"], exact["text"][-1]),
+                         (documents.DOCUMENT_TOOL_RESULT_LIMIT, False, "x"))
+        over = documents.document_passages("over.md", "over", "v1", line + "x", {})
+        self.assertEqual((len(over["text"]), over["truncated"], over["text"][-1]),
+                         (documents.DOCUMENT_TOOL_RESULT_LIMIT, True, "…"))
+        # Deferred 5: no head of a large document when less than 24,000
+        # characters of the turn's budget remain.
+        texts = {"one": "a" * 20_001, "two": "b" * 20_001, "big": "c" * 30_000}
+        listed = documents.discussion_documents({"activeTopic": {"documents": [entry(key) for key in texts]}})
+        rendered, offered, counts = documents.discussion_document_context(
+            listed, lambda artifact_id, _version: ("ready", texts[artifact_id]), given=[], tool="unknown")
+        self.assertEqual((offered, counts["full"], counts["head"]), (["one/v1", "two/v1"], 2, 0))
+        self.assertNotIn("c" * 100, rendered)
+        self.assertIn(reference("big.md", "big", "v1", 30_000, given=False), rendered)
+        texts["two"] = "b" * 16_000
+        rendered, offered, counts = documents.discussion_document_context(
+            listed, lambda artifact_id, _version: ("ready", texts[artifact_id]), given=[], tool="unknown")
+        self.assertEqual((offered, counts["head"]), (["one/v1", "two/v1", "big/v1"], 1))
+        # OpenClaw review deferred 1: heads are charged to the budget.
+        heads = {key: key * 30_000 for key in ("a", "b", "c")}
+        many = documents.discussion_documents({"activeTopic": {"documents": [entry(key) for key in heads]}})
+        _rendered, offered, counts = documents.discussion_document_context(
+            many, lambda artifact_id, _version: ("ready", heads[artifact_id]), given=[], tool="unknown")
+        self.assertEqual((offered, counts["head"]), (["a/v1", "b/v1"], 2))
+
+    def test_p7d_23_two_agents_in_one_room_each_get_a_document_once(self):
+        # OpenClaw review B2. A Hermes profile is one agent with its own
+        # process, state file and session record, so two agents never share
+        # the memory; here two connectors' turns interleave in one process.
+        room = Room({"brief": record("brief", {"v1": ("ready", PROOF_TEXT)})}, documents_list=[entry("brief")])
+        first, second = Discussion(self, room), Discussion(self, room)
+        texts = {id(first): [], id(second): []}
+        for _turn in range(8):
+            for discussion in (first, second):
+                texts[id(discussion)].append(discussion.turn())
+        for turns in texts.values():
+            self.assertEqual(sum(text.count(PROOF_TEXT.strip()) for text in turns), 1)
+            self.assertIn(PROOF_TEXT.strip(), turns[0])
+
+    def test_p7d_24_a_session_changed_unseen_after_a_restart_gives_the_documents_again(self):
+        # OpenClaw review B3, Hermes review N1: the memory records session S1;
+        # after a restart the turn is built without a known session and the
+        # run reveals S2.
+        room = Room({"brief": record("brief", {"v1": ("ready", PROOF_TEXT)})}, documents_list=[entry("brief")])
+        discussion = Discussion(self, room)
+        self.assertIn(PROOF_TEXT.strip(), discussion.turn(run_session="S1"))
+        self.assertEqual(discussion.memory["host_session"], "S1")
+        origin._SESSION_BY_ROOM.clear()
+        origin._ROOM_BY_SESSION.clear()
+        # The turn built before the change was seen: references (P7d-5).
+        self.assertNotIn(PROOF_TEXT[:200], discussion.turn(run_session="S2"))
+        self.assertEqual(discussion.memory, {"epoch_id": "epoch-2", "host_session": "S2", "given": []})
+        # The next turn is a first turn again, then references.
+        self.assertIn(PROOF_TEXT.strip(), discussion.turn())
+        self.assertNotIn(PROOF_TEXT[:200], discussion.turn())
+        self.assertEqual(discussion.memory["given"], ["brief/v1"])
+
+    def test_p7d_25_a_run_that_ended_in_the_operational_fallback_marks_nothing(self):
+        # OpenClaw review B4: the fallback is settled as fail although core
+        # reports the delivery itself as done.
+        cases = {
+            "typed outcome": ("Provider unavailable.", {"operational_outcome": {
+                "layer": "provider", "code": "server_error", "retryable": True}}),
+            "generic fallback": (sorted(adapter._GATEWAY_OPERATIONAL_ERRORS)[0], {}),
+            "model reply": ("A contribution of the model.", None),
+        }
+        for label, (content, metadata) in cases.items():
+            with self.subTest(label):
+                binding = lifecycle_binding()
+                binding.delivery_intents.clear()
+                binding.delivery_lifecycle.clear()
+                binding.documents_given = {}
+                cycle_attempt = {"cycle": {"id": "cycle-1", "generation": 3},
+                                 "attempt": {"id": "attempt-1", "membershipId": "member-1"}}
+                instance = configured_instance(binding, cycle_attempt, [])
+                instance._documents_offered = {"evt-5": {"epoch_id": "epoch-1", "host_session": "", "recorded_session": "",
+                                                         "given": [], "offered": ["brief/v1"]}}
+
+                class API:
+                    def room_state(self, _room_id):
+                        return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
+
+                    def post_message(self, *_args, **_kwargs):
+                        return {"event": {"id": "posted-6", "seq": 6, "ts": "2026-08-17T00:00:00Z"}}
+
+                    def complete_discussion_attempt(self, *_args):
+                        return {"state": "completed"}
+
+                api = API()
+                instance._call = lambda _binding, operation, api=api: asyncio.sleep(0, result=operation(api))
+                instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
+                if metadata is not None:
+                    result = asyncio.run(instance.send(binding.room_id, content,
+                                                       reply_to=adapter._dispatch_source_ref("evt-5", "generation-1"),
+                                                       metadata={"notify": True, **metadata}))
+                    self.assertTrue(result.success, getattr(result, "error", None))
+                # Core then reports the turn; the mark runs on success.
+                instance._mark_documents_given(binding, "evt-5")
+                expected = {} if metadata is not None else {"epoch_id": "epoch-1", "host_session": "", "given": ["brief/v1"]}
+                self.assertEqual(binding.documents_given, expected)
+
+    def test_p7d_26_an_overlong_id_never_reaches_the_state_and_a_failed_library_listing_does_not_fail_the_turn(self):
+        long_id = "a" * 129
+        room = Room({"brief": record("brief", {"v1": ("ready", "Brief text.")}),
+                     long_id: record(long_id, {"v1": ("ready", "Long id text.")})},
+                    documents_list=[entry(long_id), entry("brief", "v" * 129), entry("brief")])
+        self.assertEqual([item["artifactId"] + "/" + item["versionId"]
+                          for item in documents.discussion_documents(room.state())], ["brief/v1"])
+        discussion = Discussion(self, room)
+        text = discussion.turn()
+        self.assertNotIn("Long id text.", text)
+        self.assertEqual(room.reads, ["brief"])
+        self.assertEqual(discussion.memory["given"], ["brief/v1"])
+        self.assertTrue(documents.valid_given_memory(discussion.memory))
+        # A memory that could not be loaded again is never written.
+        kept = []
+        dispatch_turn(room, attempt_ready(70, 1, source="m-42"), keep=kept)
+        instance, binding, persisted = kept[0]
+        # A key the state loader would refuse (over 2 x 128 + 1 characters).
+        instance._documents_offered["ready-70"]["offered"] = [f"{'a' * 300}/v1"]
+        with self.assertLogs(level=logging.WARNING):
+            instance._mark_documents_given(binding, "ready-70")
+        self.assertEqual(persisted, [])
+        # Review N5: the library listing failing leaves the documents in place.
+        failing = Room({"brief": record("brief", {"v1": ("ready", "Brief text.")})}, documents_list=[entry("brief")])
+        failing.artifacts = lambda _room: (_ for _ in ()).throw(adapter.ProtocolError("library down", retryable=True))
+        with self.assertLogs(level=logging.WARNING) as captured:
+            block = document_block(Discussion(self, failing).turn())
+        self.assertIn("Content:\nBrief text.", block)
+        self.assertIn("document library unavailable: ProtocolError", "\n".join(captured.output))
 
 
 if __name__ == "__main__":

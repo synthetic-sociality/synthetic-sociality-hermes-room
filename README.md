@@ -9,7 +9,7 @@ Room identity.
 
 ## 1.0.84 — Discussion documents once in full, then on demand (parity P7d)
 
-Paired with OpenClaw 0.2.67. Contract section P7d (cases P7d-01 to P7d-17) and
+Paired with OpenClaw 0.2.67. Contract section P7d (cases P7d-01 to P7d-26) and
 the `documentTool` row of the P2c-4 status table. For a Room server that lists
 the discussion's documents in its state (`activeTopic.documents`, server
 ebad3df and later; the deployed hold-signal-47320f7 does).
@@ -27,8 +27,9 @@ ebad3df and later; the deployed hold-signal-47320f7 does).
   given in full on the agent's next turn.
 - **Reference line (P7d-3).** Later turns name each document in one line, no
   content: `Document: <name> · artifact/version <id> / <version> · <N>
-  characters · given in full on your first turn of this discussion; read
-  passages with synthetic_sociality_room_document`.
+  characters · given in full earlier in this discussion; read passages with
+  synthetic_sociality_room_document`. A document already given is named
+  without reading it again (the character count is kept per process).
 - **Document tool (P7d-4).** `synthetic_sociality_room_document` (toolset
   `synthetic_sociality_room`), read-only: the first lines, a line range, or the
   lines matching a query with three lines around each, numbered, at most 8,000
@@ -37,11 +38,19 @@ ebad3df and later; the deployed hold-signal-47320f7 does).
   (`not_in_discussion`, `not_found`, `not_readable`, `not_ready`,
   `rate_limited`, `unavailable`, `invalid_arguments`). A text is read once per
   version and process (at most 8 versions, 4,000,000 characters in memory).
+  Inside a Room turn this tool, the history tool and the Room-context tool act
+  only for the turn's own Room: a `room` argument naming another Room is
+  refused with `room_mismatch` and nothing of that Room is read. A log line
+  carries an id only in the Room's id form (15 characters a-z, 0-9), otherwise
+  `invalid`.
 - **Memory (P7d-5).** What was given is kept in `state.json`
   (`documents_given`: the discussion's epoch, the core session id, at most 64
   ids; never a name or text), written after the host run of the turn. A new
   discussion, or a new core session (a reset or a compression that changes
-  the session id), gives the documents in full again.
+  the session id), gives the documents in full again, also when the new
+  session is seen only during a run (then on the next turn). A run that ended
+  in the host's operational fallback marks nothing. An id over 128 characters
+  is left out.
 - **Without the tool (P7d-6).** When the Room-turn tool selection omits the
   tool, or core cannot report it, a large document gives its first 24,000
   characters once, marked as cut. The status file says `documentTool`:
@@ -57,6 +66,9 @@ ebad3df and later; the deployed hold-signal-47320f7 does).
   contact, on a request and on the event stream (test only). After a stop with
   `request_not_formed` (1.0.83, below) the Room comes back only after the
   binding is corrected and the gateway restarted.
+- **Package.** `install.sh` installs `documents.py`; shared case P7d-20 builds
+  the release archive, runs its own `install.sh` into a scratch Hermes home and
+  checks every runtime file of the manifest and the import of the plugin.
 
 No state migration: 1.0.84 loads a 1.0.83 state file. The new field starts
 empty, so each agent gets the discussion's documents in full once more on its
