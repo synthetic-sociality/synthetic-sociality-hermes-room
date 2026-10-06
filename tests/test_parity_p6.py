@@ -343,21 +343,27 @@ class PluginManifestTests(unittest.TestCase):
         # a release whose plugin.yaml differs from the installed one in anything
         # but the version: line ("STOP: plugin.yaml differs beyond version");
         # 1.0.80 was uninstallable for that reason. A manifest change needs an
-        # installer decision by the owner first.
+        # installer decision by the owner first: P7d (owner, 2026-10-05T00:30:41Z,
+        # "installers accept reviewed manifest changes") adds exactly the
+        # document tool and the transform_tool_result hook; the installers admit
+        # the hash pinned as parityP7dHermesManifestSha256.
         def without_version(path):
             return [line for line in path.read_text().splitlines() if not line.startswith("version:")]
 
-        fixture = ROOT / "tests" / "fixtures" / "plugin-1.0.79.yaml"
-        self.assertEqual(without_version(ROOT / "plugin.yaml"), without_version(fixture))
+        fixture = without_version(ROOT / "tests" / "fixtures" / "plugin-1.0.79.yaml")
+        fixture.insert(fixture.index("  - synthetic_sociality_room_post") + 1, "  - synthetic_sociality_room_document")
+        fixture.insert(fixture.index("  - pre_tool_call") + 1, "  - transform_tool_result")
+        self.assertEqual(without_version(ROOT / "plugin.yaml"), fixture)
         self.assertIn(f"version: {adapter.CONNECTOR_VERSION}", (ROOT / "plugin.yaml").read_text().splitlines())
 
     def test_transform_tool_result_is_registered_at_runtime(self):
-        # Registered but not declared: Plugin Doctor warns (known, harmless).
+        # Registered and, since P7d, declared (the Plugin Doctor warning of
+        # 1.0.79 to 1.0.83 is gone).
         context = mock.MagicMock()
         adapter.register(context)
         registered = [call.args[0] for call in context.register_hook.call_args_list]
         self.assertIn("transform_tool_result", registered)
-        self.assertNotIn("transform_tool_result", (ROOT / "plugin.yaml").read_text())
+        self.assertIn("  - transform_tool_result\n", (ROOT / "plugin.yaml").read_text())
 
 
 class P6LinkTests(LinkTestCase):

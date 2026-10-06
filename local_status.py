@@ -63,6 +63,7 @@ class LocalStatus:
             "secretIsolationEnforced": False,
             "webRead": "unknown",
             "webReadTools": [],
+            "documentTool": "unknown",
             "rooms": {},
         }
         # Contract P2c-3a: when the current outage of a Room began (monotonic
@@ -95,6 +96,15 @@ class LocalStatus:
         with self._lock:
             changed = (self._data.get("webRead"), self._data.get("webReadTools")) != (value, found)
             self._data["webRead"], self._data["webReadTools"] = value, found
+        if changed:
+            self.write()
+
+    def set_document_tool(self, value: str) -> None:
+        """Contract P7d-6: whether the document tool is offered in a Room turn."""
+        value = value if value in ("available", "unavailable") else "unknown"
+        with self._lock:
+            changed = self._data.get("documentTool") != value
+            self._data["documentTool"] = value
         if changed:
             self.write()
 

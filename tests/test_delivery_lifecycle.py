@@ -2012,11 +2012,11 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.83")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.84")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Moderated debate and own voice (parity P7c)",
+            f"## {adapter.CONNECTOR_VERSION} — Discussion documents once in full, then on demand (parity P7d)",
             (ROOT / "README.md").read_text(),
         )
 
@@ -2072,7 +2072,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.83"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.84"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())

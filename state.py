@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator, TypeVar
 
 import fcntl
 
+from .documents import valid_given_memory
 from .secret_isolation import remember_secrets
 
 
@@ -170,6 +171,10 @@ class RoomBinding:
     # Offered once on the next model turn in the same discussion, then cleared.
     # {"source_event_id", "source_seq", "epoch_id", "produced_at", "reason", "text"}.
     kept_reply: dict[str, Any] = field(default_factory=dict)
+    # Contract P7d-5: the discussion documents given in full to this agent:
+    # {"epoch_id", "host_session", "given": ["<artifactId>/<versionId>", ...]}
+    # (at most 64 keys); never a name, text or message body.
+    documents_given: dict[str, Any] = field(default_factory=dict)
     # Contract P3-4: audited closures this connector applied, by seq:
     # {"recordDigest": str, "appliedAt": str}. The audit records themselves
     # live in the append-only <state>.recovery-audit.jsonl.
@@ -224,6 +229,8 @@ class RoomBinding:
             or not kept["source_event_id"] or not kept["epoch_id"]
         )):
             raise ValueError("Room kept reply is invalid")
+        if not valid_given_memory(binding.documents_given):
+            raise ValueError("Room document memory is invalid")
         if not isinstance(binding.recovery_closures, dict) or any(
             not str(key).isdigit() or not isinstance(value, dict)
             or not isinstance(value.get("recordDigest"), str) or not isinstance(value.get("appliedAt"), str)

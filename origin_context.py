@@ -54,3 +54,35 @@ def is_room_context(**metadata: Any) -> bool:
             (safe_turn_id and safe_turn_id in _TURN_IDS)
             or (safe_session_id and safe_session_id in _SESSION_IDS)
         )
+
+
+# Contract P7d-5: the host session a Room turn runs in, as core reports it to
+# the pre_llm_call hook (``sender_id`` is the Room id the adapter sets as the
+# turn's user). Process memory only, at most ROOM_SESSION_LIMIT sessions.
+ROOM_SESSION_LIMIT = 256
+_ROOM_BY_SESSION: dict[str, str] = {}
+_SESSION_BY_ROOM: dict[str, str] = {}
+
+
+def remember_room_session(session_id: Any, room_id: Any) -> None:
+    safe_session_id, safe_room_id = _safe_id(session_id), _safe_id(room_id)
+    if not safe_session_id or not safe_room_id:
+        return
+    with _LOCK:
+        _ROOM_BY_SESSION.pop(safe_session_id, None)
+        _ROOM_BY_SESSION[safe_session_id] = safe_room_id
+        _SESSION_BY_ROOM[safe_room_id] = safe_session_id
+        while len(_ROOM_BY_SESSION) > ROOM_SESSION_LIMIT:
+            _ROOM_BY_SESSION.pop(next(iter(_ROOM_BY_SESSION)))
+        while len(_SESSION_BY_ROOM) > ROOM_SESSION_LIMIT:
+            _SESSION_BY_ROOM.pop(next(iter(_SESSION_BY_ROOM)))
+
+
+def room_for_session(session_id: Any) -> str:
+    with _LOCK:
+        return _ROOM_BY_SESSION.get(_safe_id(session_id), "")
+
+
+def host_session_for_room(room_id: Any) -> str:
+    with _LOCK:
+        return _SESSION_BY_ROOM.get(_safe_id(room_id), "")

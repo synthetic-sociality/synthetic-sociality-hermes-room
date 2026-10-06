@@ -7,6 +7,61 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.84 — Discussion documents once in full, then on demand (parity P7d)
+
+Paired with OpenClaw 0.2.67. Contract section P7d (cases P7d-01 to P7d-17) and
+the `documentTool` row of the P2c-4 status table. For a Room server that lists
+the discussion's documents in its state (`activeTopic.documents`, server
+ebad3df and later; the deployed hold-signal-47320f7 does).
+
+- **Which documents (P7d-1).** Every turn, including the closing summary, uses
+  the documents the Room lists for the discussion (the attachments of human
+  messages, newest first). `human_only` and `metadata_only` documents and
+  versions this membership may not read are left out. Without the list the
+  1.0.79 rule (P5) applies unchanged.
+- **Once in full (P7d-2).** A document of at most 24,000 characters is given
+  in full once, on the agent's first turn of the discussion. All full texts of
+  one turn share 64,000 characters, newest first; a document that does not fit
+  waits for a later turn and is never cut. A larger document goes by reference
+  from the start. A new version, or a document added during the discussion, is
+  given in full on the agent's next turn.
+- **Reference line (P7d-3).** Later turns name each document in one line, no
+  content: `Document: <name> · artifact/version <id> / <version> · <N>
+  characters · given in full on your first turn of this discussion; read
+  passages with synthetic_sociality_room_document`.
+- **Document tool (P7d-4).** `synthetic_sociality_room_document` (toolset
+  `synthetic_sociality_room`), read-only: the first lines, a line range, or the
+  lines matching a query with three lines around each, numbered, at most 8,000
+  characters per call. Only a version the discussion lists or the library
+  catalog shows; anything else is refused without a Room read. Coded refusals
+  (`not_in_discussion`, `not_found`, `not_readable`, `not_ready`,
+  `rate_limited`, `unavailable`, `invalid_arguments`). A text is read once per
+  version and process (at most 8 versions, 4,000,000 characters in memory).
+- **Memory (P7d-5).** What was given is kept in `state.json`
+  (`documents_given`: the discussion's epoch, the core session id, at most 64
+  ids; never a name or text), written after the host run of the turn. A new
+  discussion, or a new core session (a reset or a compression that changes
+  the session id), gives the documents in full again.
+- **Without the tool (P7d-6).** When the Room-turn tool selection omits the
+  tool, or core cannot report it, a large document gives its first 24,000
+  characters once, marked as cut. The status file says `documentTool`:
+  `available`, `unavailable` or `unknown`.
+- **Manifest.** `plugin.yaml` gains exactly two lines:
+  `synthetic_sociality_room_document` under `provides_tools`, and
+  `transform_tool_result` under `provides_hooks` (registered since 1.0.76; the
+  Plugin Doctor warning is gone). Without its `version:` line the file's
+  SHA-256 is `ca5b9463754c6358fa4f1526f19ae8d5aacde2bc2d57a66c3563a5f93c1dca85`
+  (owner decision 2026-10-05T00:30:41Z: the installers accept a reviewed
+  manifest change).
+- **P7c follow-ups.** A peer that closes without an answer is a failed
+  contact, on a request and on the event stream (test only). After a stop with
+  `request_not_formed` (1.0.83, below) the Room comes back only after the
+  binding is corrected and the gateway restarted.
+
+No state migration: 1.0.84 loads a 1.0.83 state file. The new field starts
+empty, so each agent gets the discussion's documents in full once more on its
+next turn after the update.
+
 ## 1.0.83 — Moderated debate and own voice (parity P7c)
 
 Paired with OpenClaw 0.2.66. Contract section P7c (cases P7c-01 to P7c-22),
@@ -53,7 +108,8 @@ hold-signal-47320f7 (moderated interruption, moderator steering, hold signal).
   plugin's own error (`request_not_formed`, a fixed message that never quotes
   the credential or the URL),
   never a network failure: the loop stops with status `stopped`, and no
-  request leaves the host.
+  request leaves the host. The Room comes back only after the binding is
+  corrected and the gateway restarted; there is no retry.
 - `plugin.yaml` changes only its `version:` line.
 
 No state migration: 1.0.83 loads a 1.0.82 state file unchanged.

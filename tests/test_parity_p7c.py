@@ -146,7 +146,7 @@ def claimed_attempt(attempt_id="attempt-1"):
 class P7cConformanceTests(unittest.TestCase):
     def test_case_names_resolve_to_tests(self):
         cases = CONFORMANCE["parityP7cCases"]
-        self.assertEqual(len(cases), 23)
+        self.assertEqual(len(cases), 24)
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for index, (name, method) in enumerate(cases.items(), start=1):
             self.assertTrue(name.startswith(f"P7c-{index:02d} "), name)
@@ -1011,16 +1011,22 @@ class P7cTests(unittest.TestCase):
 class TransientFaults:
     """P7c-23: the transient failures of a Room contact, real: a response
     timeout (a loopback peer that accepts and never answers), a connection reset
-    (a loopback peer that reads the request and resets), a refused connection (a
-    closed loopback port); a connect timeout and a DNS failure as this process's
-    connect and resolver raise them. Each kind with a word of its message."""
+    (a loopback peer that reads the request and resets), a peer that reads the
+    request and closes without an answer (http.client.RemoteDisconnected), a
+    refused connection (a closed loopback port); a connect timeout and a DNS
+    failure as this process's connect and resolver raise them. Each kind with a
+    word of its message."""
 
     KINDS = {"response timeout": "timed out", "connect timeout": "timed out", "DNS failure": "Name or service not known",
-             "connection reset": "reset", "connection refused": "refused"}
+             "connection reset": "reset", "connection refused": "refused",
+             # P7d (r4 deferred): a peer that reads the request and closes
+             # without an answer (http.client.RemoteDisconnected), protocol.py
+             # request and stream paths.
+             "peer closed without an answer": "without response"}
 
     def __enter__(self):
         self.listeners, self.held = {}, []
-        for kind in ("response timeout", "connection reset"):
+        for kind in ("response timeout", "connection reset", "peer closed without an answer"):
             listener = socket.create_server(("127.0.0.1", 0))
             self.listeners[kind] = listener
             threading.Thread(target=self._serve, args=(kind, listener), daemon=True).start()
@@ -1060,6 +1066,9 @@ class TransientFaults:
             if kind == "connection reset":
                 # The whole request was read; a close without lingering sends RST.
                 peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                peer.close()
+            elif kind == "peer closed without an answer":
+                # The whole request was read; an orderly close (FIN), no status line.
                 peer.close()
             else:
                 self.held.append(peer)
@@ -1287,7 +1296,7 @@ class P7cLeftoverTests(unittest.TestCase):
     P7a round-3 reviews (REVIEW-20261004-parity-P6-r2.md finding 4;
     REVIEW-20261005-parity-P7a-r3-hermes.md N1: j, q2, q3, q8)."""
 
-    def test_the_header_check_refuses_a_credential_exactly_when_http_client_does(self):
+    def test_p7c_24_the_header_check_refuses_a_credential_exactly_when_the_runtime_does(self):
         # OP-12 P7c r3 (OpenClaw N4, the equal here): the connector refuses a
         # credential exactly when the running http.client refuses the header it
         # would send (the stored credential is trimmed first). Every code point
