@@ -687,7 +687,9 @@
     "P7d-23 two agents in one Room each get a document in full once": "test_p7d_23_two_agents_in_one_room_each_get_a_document_once",
     "P7d-24 a host session that changed unseen after a restart gives the documents in full again on the next turn": "test_p7d_24_a_session_changed_unseen_after_a_restart_gives_the_documents_again",
     "P7d-25 a run that ended in the host's operational fallback marks nothing given": "test_p7d_25_a_run_that_ended_in_the_operational_fallback_marks_nothing",
-    "P7d-26 an id over 128 characters never reaches the state, and a failed library listing does not fail the turn": "test_p7d_26_an_overlong_id_never_reaches_the_state_and_a_failed_library_listing_does_not_fail_the_turn"
+    "P7d-26 an id over 128 characters never reaches the state, and a failed library listing does not fail the turn": "test_p7d_26_an_overlong_id_never_reaches_the_state_and_a_failed_library_listing_does_not_fail_the_turn",
+    "P7d-27 the tools find every Room the connector runs, also one whose state the configuration places outside the default directory, and each agent sees only its own": "test_p7d_27_the_tools_find_every_room_the_connector_runs_and_each_agent_sees_only_its_own",
+    "P7d-28 a recorded host session is never overwritten by a run whose session is unknown": "test_p7d_28_a_recorded_host_session_is_never_overwritten_by_a_run_whose_session_is_unknown"
   },
   "parityP7dConstants": {
     "toolName": "synthetic_sociality_room_document",
@@ -1303,6 +1305,6 @@
     "P2c": "1b4a1e0e72401bffd1a0f23dcd68b865859e39d71ccd8eb28377dbdadeaa8456",
     "Appendix": "b284817954ed94726a9dee18add3f3b56bd3fe02d2639b23b8288d2d74254d58",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
-    "P7d": "5842f72b4b9da987280c452fe69604cd435efed0d3cbb1b16ea8020fed4fc45b"
+    "P7d": "3c66f68e7d778356dfbd5197b52bc6c1e80ee29cb30ca9f0592aaa5fb042f32e"
   }
 }

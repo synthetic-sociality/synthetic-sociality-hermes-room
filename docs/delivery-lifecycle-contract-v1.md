@@ -834,6 +834,15 @@ Hermes holds one agent per profile and one binding per Room; OpenClaw takes the 
 agent's accounts. In a Room turn OpenClaw uses the turn's account (the context's `agentAccountId`, else the agent's
 only account in that Room) and never answers `selectionRequired`. Outside a Room turn the argument selects among the
 calling agent's own Rooms, and a `selectionRequired` answer lists only those.
+The Rooms of a call are the ones the connector runs, and nothing else: Hermes, the bindings of the profile's own state
+file (`$HERMES_HOME/synthetic-sociality-room/state.json`, where the profile's home puts it; the connector runs the same
+file); OpenClaw, the accounts its channel starts (the channel's own account resolution: enabled and configured, each
+with the state file it uses, also one the configuration names outside the default directory). OpenClaw compares the
+context's `agentAccountId` with an account id in the host's normalised form, and offers to no agent an account whose
+agent the host's route resolution cannot name (it fails or names none). Without a selectable account OpenClaw answers with a code (`success` false, `code`, `error`):
+`account_not_named` (`Two or more of this OpenClaw agent's Room accounts are in this Room, and the host named none of
+them for this turn.`) or `no_room` (`No Synthetic Sociality Room is configured for this OpenClaw agent.`; inside a Room
+turn whose Room holds none of the agent's accounts `None of this OpenClaw agent's Room accounts is in this Room.`).
 
 P7d-5 Memory of what was given. "Given in full" is kept per Room in the connector's state file (Hermes `state.json`
 binding field `documents_given`, OpenClaw state key `documentsGiven`): the discussion's epoch id, the host session id
@@ -843,7 +852,8 @@ then refused or kept); a turn that fails before the run, or a run that failed, m
 the connector. A new discussion (another epoch id) starts it empty. When the host session the turn runs in is known
 and differs from the recorded one (the host reset or replaced the session), the turn counts as the first turn again;
 a run whose session differs from the one the memory records, or from the one known when the turn was built, writes
-only what that run was given. A run that ended in the host's operational fallback (OpenClaw: the generic or the
+only what that run was given; a run whose session the connector does not know keeps the recorded session (an unknown
+session never overwrites a known one). A run that ended in the host's operational fallback (OpenClaw: the generic or the
 compaction fallback, settled as `fail`) is a run that failed. OpenClaw remembers the host session per agent and
 conversation.
 Hermes knows the session id from its core before the turn and from the turn's run; OpenClaw knows it only when the
@@ -856,7 +866,8 @@ reference line without a read.
 
 P7d-6 Tool availability. Hermes takes it from the tool selection core resolves for a Room turn (P2c-6): `available`,
 `unavailable` (the selection omits the tool) or `unknown`. OpenClaw cannot see the selection: the value is `unknown`
-until a Room session calls the tool, then `available`; never `unavailable`. `unknown` counts as offered. When the tool
+until a document read of a Room session succeeds (the tool answered `success` true), then `available`; a call that
+answered an error changes nothing; never `unavailable`. `unknown` counts as offered. When the tool
 is not `available` (`unknown`, or `unavailable`), a document larger than 24,000 characters is given once as its first
 24,000 characters, under `Content (cut: the first 24000 of <N> characters):` instead of `Content:`, within the turn's
 64,000 characters, and named by its reference line on the same turn. The status file carries the value as

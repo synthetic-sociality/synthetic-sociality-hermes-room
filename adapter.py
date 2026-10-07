@@ -5347,7 +5347,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         built = str(record.get("host_session") or "")
         recorded = str(record.get("recorded_session") or "")
-        ran = host_session_for_room(binding.room_id) or built
+        ran = host_session_for_room(binding.room_id) or built or recorded
         # The run's session differs from the one the turn was built for or
         # from the one the memory records (the host replaced the session, also
         # unseen across a restart): the earlier documents are not in it.

@@ -15,6 +15,7 @@ import dataclasses
 import hashlib
 import json
 import ast
+import http.server
 import logging
 import os
 import shutil
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -203,7 +205,7 @@ class ParityP7dTests(unittest.TestCase):
 
     def test_p7d_00_cases_and_constants_are_pinned(self):
         cases = CONFORMANCE["parityP7dCases"]
-        self.assertEqual(len(cases), 26)
+        self.assertEqual(len(cases), 28)
         for name, method in cases.items():
             self.assertTrue(name.startswith("P7d-"), name)
             self.assertTrue(hasattr(self, method), method)
@@ -1072,6 +1074,148 @@ class ParityP7dTests(unittest.TestCase):
             block = document_block(Discussion(self, failing).turn())
         self.assertIn("Content:\nBrief text.", block)
         self.assertIn("document library unavailable: ProtocolError", "\n".join(captured.output))
+
+    def test_p7d_27_the_tools_find_every_room_the_connector_runs_and_each_agent_sees_only_its_own(self):
+        # OpenClaw review r2 B1, the Hermes rule: a profile's Rooms are the
+        # bindings of its own state file, $HERMES_HOME/synthetic-sociality-room/
+        # state.json, where the profile's home puts it; the connector
+        # (adapter state_path()) and the tools (room_tools load()) read that one
+        # file. Real state files of two profiles outside ~/.hermes, the
+        # registered handlers and hook, a loopback Room double.
+        requests = []
+        rooms = {"rooma0000000001": ("Alpha", "doca00000000001"), "roomb0000000002": ("Beta", "docb00000000002"),
+                 "roomc0000000003": ("Gamma", "docc00000000003")}
+
+        class Answer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split("?")[0].split("/")
+                room_id = path[3] if len(path) > 3 else ""
+                requests.append((room_id, self.headers.get("Authorization", "").removeprefix("Bearer ")))
+                title, doc = rooms.get(room_id, ("", ""))
+                version = {"versionId": "v00000000000001", "name": f"{title}.md", "extractionStatus": "ready",
+                           "extractedText": f"Text of {title}."}
+                rest = path[4:]
+                if not title:
+                    status, body = 404, {"code": "not_found"}
+                elif rest == ["state"]:
+                    status, body = 200, dict(Room({}, documents_list=[dict(entry(doc, "v00000000000001"), name=f"{title}.md")],
+                                                  epoch_id="epoch-z").state(), title=title)
+                elif rest == ["artifacts"]:
+                    status, body = 200, {"items": []}
+                elif rest == ["artifacts", doc]:
+                    status, body = 200, {"artifactId": doc, "visibility": "room_shared", "currentVersion": version,
+                                         "versions": [version]}
+                elif rest == ["events"]:
+                    status, body = 200, {"events": [
+                        {"id": "e-1", "seq": 1, "type": "discussion.started", "actorRole": "human_owner", "actorId": "o",
+                         "payload": {"epoch": {"id": "epoch-z", "ordinal": 1, "startsAtSeq": 1}}},
+                        {"id": "e-2", "seq": 2, "type": "message.posted", "actorRole": "human_owner", "actorId": "o",
+                         "payload": {"body": f"Message in {title}.", "epochId": "epoch-z"}}], "hasMore": False, "headSeq": 3}
+                else:
+                    status, body = 404, {"code": "not_found"}
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}/api"
+        context = mock.MagicMock()
+        adapter.register(context)
+        handlers = {call.kwargs["name"]: call.kwargs["handler"] for call in context.register_tool.call_args_list}
+        hooks = {call.args[0]: call.args[1] for call in context.register_hook.call_args_list}
+        document, history = handlers[TOOL], handlers["synthetic_sociality_room_history"]
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = {"zurie": Path(directory) / "profiles" / "zurie", "aura": Path(directory) / "var" / "aura-home"}
+            owned = {"zurie": [("rooma0000000001", "cred-za"), ("roomb0000000002", "cred-zb")],
+                     "aura": [("roomc0000000003", "cred-ac"), ("rooma0000000001", "cred-aa")]}
+            for agent, home in profiles.items():
+                path = home / "synthetic-sociality-room" / "state.json"
+                bindings = [adapter.RoomBinding(base, room_id, f"m-{credential}", credential) for room_id, credential in owned[agent]]
+                state_module.save(state_module.PluginState(bindings=bindings), path)
+
+            def as_profile(agent):
+                return mock.patch.dict(os.environ, {"HERMES_HOME": str(profiles[agent])})
+
+            def call(handler, args, session_id):
+                before = len(requests)
+                return json.loads(handler(args, session_id=session_id)), requests[before:]
+
+            with as_profile("zurie"):
+                # The file the connector runs is the file the tools read.
+                self.assertEqual(state_module.state_path(), profiles["zurie"] / "synthetic-sociality-room" / "state.json")
+                hooks["pre_llm_call"](platform="synthetic_sociality", session_id="session-za", sender_id="rooma0000000001")
+                answer, sent = call(document, {"artifactId": "doca00000000001"}, "session-za")
+                self.assertEqual(answer.get("text"), "1: Text of Alpha.", answer)
+                self.assertEqual(set(sent), {("rooma0000000001", "cred-za")})
+                answer, sent = call(history, {}, "session-za")
+                self.assertEqual([item["body"] for item in answer["messages"]], ["Message in Alpha."], answer)
+                self.assertEqual(set(sent), {("rooma0000000001", "cred-za")})
+                answer, sent = call(document, {"artifactId": "docb00000000002", "room": "roomb0000000002"}, "session-za")
+                # The turn's own Room may be read before the refusal; nothing of
+                # the other Room is requested.
+                self.assertEqual(answer["code"], "room_mismatch")
+                self.assertTrue(set(sent) <= {("rooma0000000001", "cred-za")}, sent)
+                answer, sent = call(history, {}, "cli-zurie")
+                self.assertEqual(sorted(item["roomId"] for item in answer["rooms"]), ["rooma0000000001", "roomb0000000002"])
+                answer, sent = call(document, {"artifactId": "docc00000000003", "room": "roomc0000000003"}, "cli-zurie")
+                self.assertFalse(answer["success"])
+                self.assertNotIn("roomc0000000003", [room for room, _credential in requests])
+            with as_profile("aura"):
+                self.assertEqual(state_module.state_path(), profiles["aura"] / "synthetic-sociality-room" / "state.json")
+                hooks["pre_llm_call"](platform="synthetic_sociality", session_id="session-aa", sender_id="rooma0000000001")
+                answer, sent = call(document, {"artifactId": "doca00000000001"}, "session-aa")
+                self.assertEqual(answer.get("text"), "1: Text of Alpha.", answer)
+                self.assertEqual(set(sent), {("rooma0000000001", "cred-aa")})
+                answer, sent = call(history, {}, "cli-aura")
+                self.assertEqual(sorted(item["roomId"] for item in answer["rooms"]), ["rooma0000000001", "roomc0000000003"])
+                answer, sent = call(document, {"artifactId": "docb00000000002", "room": "roomb0000000002"}, "cli-aura")
+                self.assertFalse(answer["success"])
+            # Every credential reached only its own Room; nothing of another
+            # profile was read.
+            self.assertEqual({credential: room for room, credential in requests},
+                             {"cred-za": "rooma0000000001", "cred-aa": "rooma0000000001", "cred-zb": "roomb0000000002",
+                              "cred-ac": "roomc0000000003"})
+
+    def test_p7d_28_a_recorded_host_session_is_never_overwritten_by_a_run_whose_session_is_unknown(self):
+        # OpenClaw review r2 N1, the same sequence in Hermes: a restart, a turn
+        # whose run shows no session, a host reset, then the run shows S2.
+        # B: core knows no session at the second turn and S2 at the third; C:
+        # core knows none at all, only the runs show S1 and S2.
+        for label, peek_after_restart, peek_after_reset in (("B", None, "S2"), ("C", None, None)):
+            with self.subTest(label):
+                documents.TEXT_CACHE.clear()
+                origin._SESSION_BY_ROOM.clear()
+                origin._ROOM_BY_SESSION.clear()
+                room = Room({"brief": record("brief", {"v1": ("ready", PROOF_TEXT)})}, documents_list=[entry("brief")])
+                discussion = Discussion(self, room, peek="S1" if label == "B" else None)
+                self.assertIn(PROOF_TEXT.strip(), discussion.turn(run_session="S1"))
+                origin._SESSION_BY_ROOM.clear()
+                origin._ROOM_BY_SESSION.clear()
+                discussion.peek = peek_after_restart
+                self.assertNotIn(PROOF_TEXT[:200], discussion.turn())
+                self.assertEqual(discussion.memory, {"epoch_id": "epoch-2", "host_session": "S1", "given": ["brief/v1"]})
+                discussion.peek = peek_after_reset
+                third = discussion.turn(run_session="S2")
+                if peek_after_reset:
+                    # Known before the turn: a first turn again.
+                    self.assertIn(PROOF_TEXT.strip(), third)
+                else:
+                    # Seen only in the run: references, then the next turn gives it.
+                    self.assertNotIn(PROOF_TEXT[:200], third)
+                    self.assertEqual(discussion.memory, {"epoch_id": "epoch-2", "host_session": "S2", "given": []})
+                    self.assertIn(PROOF_TEXT.strip(), discussion.turn(run_session="S2"))
+                self.assertNotIn(PROOF_TEXT[:200], discussion.turn(run_session="S2"))
+                self.assertEqual(discussion.memory, {"epoch_id": "epoch-2", "host_session": "S2", "given": ["brief/v1"]})
 
 
 if __name__ == "__main__":
