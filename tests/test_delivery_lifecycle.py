@@ -2016,7 +2016,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Discussion documents once in full, then on demand (parity P7d)",
+            f"## {adapter.CONNECTOR_VERSION} — A deferred document tool counts as offered (parity P7e)",
             (ROOT / "README.md").read_text(),
         )
 
