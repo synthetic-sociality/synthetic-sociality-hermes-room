@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -70,8 +71,8 @@ from .room_tools import (
     room_post,
 )
 from .state import (
-    KEPT_REPLY_CHARACTER_LIMIT, MISSED_SOURCE_LIMIT, kept_reply_bound, PluginState, RoomBinding, load, state_path, state_root,
-    update, upsert,
+    KEPT_REPLY_CHARACTER_LIMIT, MISSED_SOURCE_LIMIT, kept_reply_bound, PluginState, RoomBinding, StateUnchanged,
+    file_identity, load, load_cached, state_path, state_root, update, upsert,
 )
 
 
@@ -94,14 +95,115 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.85"
+CONNECTOR_VERSION = "1.0.86"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
+# Contract P8-1: the heartbeat interval is the server's
+# `heartbeatIntervalSeconds` from the session answer (10 s when it names
+# none), at least the floor above and at most this cap, sent at the full
+# interval (Hermes adds no margin): the wait from one accepted heartbeat or
+# registration of a session to its next heartbeat is never longer than 60 s.
+HEARTBEAT_DEFAULT_INTERVAL_SECONDS = 10
+HEARTBEAT_MAX_INTERVAL_SECONDS = 60
+# Contract P8-1: a stream pass heartbeats only when none was accepted for the
+# interval plus this margin; the heartbeat loop is the session's clock.
+STREAM_PASS_HEARTBEAT_GRACE_SECONDS = 5.0
+# Contract P8-2: one enrollment listing per join lineage (base URL and
+# `clientInstanceId`) per interval; a numeric `pollAfterSeconds` in the
+# listing's answer replaces the interval, bounded to 15..300 s.
+ENROLLMENT_LISTING_INTERVAL_SECONDS = 60.0
+ENROLLMENT_POLL_AFTER_MIN_SECONDS = 15.0
+ENROLLMENT_POLL_AFTER_MAX_SECONDS = 300.0
+# Contract P8-3: the renewal maintenance tick, and how often a healthy
+# binding asks for the renewal intent; the tick's cadence applies while a
+# rotation journal exists, the binding is stopped for an expired credential,
+# or the stored expiry is less than 24 h away.
+RENEWAL_TICK_SECONDS = 15
+RENEWAL_INTENT_HEALTHY_SECONDS = 300.0
+RENEWAL_EXPIRY_HORIZON_SECONDS = 24 * 3600.0
+# Contract P8-4: the idle activity frame interval: half the freshness the
+# server announces. The plugin does not receive that value today.
+IDLE_ACTIVITY_FRAME_SECONDS = 20.0
 # Contract P2c-1: the store report (or, when enforced, the refusal) is logged
 # once per process.
 _SECRET_REFUSAL_LOGGED: set[bool] = set()
 _connected_rooms: set[str] = set()
+
+
+def _clock() -> float:
+    """Monotonic seconds for the P8 cadences (a fake clock in tests)."""
+    return time.monotonic()
+
+
+def _binding_fingerprint(binding: RoomBinding) -> str:
+    """Contract P8-6: a digest of every stored field of a binding (memory only)."""
+    encoded = json.dumps(asdict(binding), sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def heartbeat_interval_seconds(value: Any, default: Any = None) -> float:
+    """Contract P8-1: the server's instructed interval, floored and capped."""
+    fallback = HEARTBEAT_DEFAULT_INTERVAL_SECONDS if default is None else default
+    try:
+        seconds = int(value or fallback) if not isinstance(value, bool) else int(fallback)
+    except (TypeError, ValueError, OverflowError):
+        seconds = int(fallback)
+    return min(HEARTBEAT_MAX_INTERVAL_SECONDS, max(HEARTBEAT_MIN_INTERVAL_SECONDS, seconds))
+
+
+def idle_activity_frame_interval() -> float | None:
+    """Contract P8-4: seconds between two idle activity frames of a session.
+
+    Half the freshness the server announces; the plugin does not receive it
+    today, so IDLE_ACTIVITY_FRAME_SECONDS. None means never: the answer once
+    the server announces that presence comes from the session (no such
+    announcement exists yet).
+    """
+    return IDLE_ACTIVITY_FRAME_SECONDS
+
+
+def renewal_intent_urgent(binding: RoomBinding, now: float | None = None) -> bool:
+    """Contract P8-3: ask at the tick's cadence, not once per 300 s.
+
+    A rotation journal, a binding stopped for an expired credential, or a
+    stored expiry less than 24 h away. An absent or unparsable expiry counts
+    as healthy.
+    """
+    if binding.credential_rotation or binding.disabled_reason == "credential_expired":
+        return True
+    raw = str(binding.credential_expires_at or "").strip()
+    if not raw:
+        return False
+    try:
+        expires = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        return False
+    return expires.timestamp() - (time.time() if now is None else now) < RENEWAL_EXPIRY_HORIZON_SECONDS
+
+
+def enrollment_listing(value: Any) -> tuple[list[Any], float | None]:
+    """Contract P8-2: the enrollments and the listing interval of an answer.
+
+    A bare array, or an object whose `enrollments` is the array (unknown
+    members ignored); a numeric `pollAfterSeconds` is the next interval,
+    bounded to 15..300 s. Anything else is malformed, as before.
+    """
+    if isinstance(value, list):
+        return value, None
+    if isinstance(value, dict) and isinstance(value.get("enrollments"), list):
+        poll_after = value.get("pollAfterSeconds")
+        if isinstance(poll_after, (int, float)) and not isinstance(poll_after, bool) and poll_after == poll_after:
+            return value["enrollments"], min(ENROLLMENT_POLL_AFTER_MAX_SECONDS,
+                                             max(ENROLLMENT_POLL_AFTER_MIN_SECONDS, float(poll_after)))
+        return value["enrollments"], None
+    raise ProtocolError(
+        "Room API returned malformed connector enrollments",
+        code="connector_enrollments_malformed",
+        retryable=False,
+    )
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 _ROOM_ENVELOPE_FRAGMENT = re.compile(
     r'(?:(?:"action"\s*:)|'
@@ -3424,8 +3526,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         # The server owns the cadence.  Sending at half its
                         # advertised interval turns a reconnect into a rate
                         # limit storm, especially while an SSE connection is
-                        # being re-established.
-                        interval = max(HEARTBEAT_MIN_INTERVAL_SECONDS, int(connector.get("heartbeatIntervalSeconds") or 10))
+                        # being re-established. Contract P8-1: at most 60 s.
+                        interval = self._heartbeat_interval(binding.room_id, connector)
                         self._heartbeat_tasks[binding.room_id] = asyncio.create_task(
                             self._heartbeat_loop(binding, interval),
                             name=f"synthetic-sociality-heartbeat:{binding.room_id}",
@@ -3435,6 +3537,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         # signal into the bounded activity relay so an open
                         # Room tab can show it immediately instead of waiting
                         # for a canonical room refresh.
+                        self._room_map("_idle_frame_at")[binding.room_id] = _clock()
                         await self._publish(
                             binding,
                             f"presence:{binding.room_id}",
@@ -3575,6 +3678,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # resumes the same installation's session with current metadata);
         # later contacts heartbeat the session this process registered.
         if binding.connector_session_id and binding.room_id in registered:
+            # Contract P8-1: the heartbeat loop is the session's clock; a stream
+            # pass adds no heartbeat while one was accepted within the interval.
+            accepted = self._room_map("_heartbeat_accepted_at").get(binding.room_id)
+            if accepted is not None and _clock() - accepted < (
+                    self._heartbeat_interval(binding.room_id) + STREAM_PASS_HEARTBEAT_GRACE_SECONDS):
+                return dict(self._room_map("_session_answers").get(binding.room_id) or {})
             try:
                 heartbeat = await self._call(
                     binding,
@@ -3610,6 +3719,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if counts is None:
             counts = self._registrations = {}
         counts[binding.room_id] = counts.get(binding.room_id, 0) + 1
+        # Contract P8-2: a listing follows every accepted registration; P8-4:
+        # so does an idle frame (at the latest at the next heartbeat).
+        self._room_map("_enrollment_owed")[binding.room_id] = True
+        self._room_map("_idle_frame_at").pop(binding.room_id, None)
         self._note_connected(binding, session, registered=True)
         self._persist_binding(binding)
         return session
@@ -3693,26 +3806,31 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
         self._message_contract_checked.add(binding.room_id)
 
-    async def _heartbeat_loop(self, binding: RoomBinding, interval: int) -> None:
+    async def _heartbeat_loop(self, binding: RoomBinding, interval: float) -> None:
         # Contract P2c-3a: a failed heartbeat is retried on the reconnect
         # schedule, not at the heartbeat interval; success resets it.
+        # Contract P8-1: the interval of the latest session answer, at most 60 s.
         retry_delay: float | None = None
         step = 0
         try:
             while not self._stop.is_set() and binding.enabled and not binding.revoked:
-                await asyncio.sleep(interval if retry_delay is None else retry_delay)
+                current = min(HEARTBEAT_MAX_INTERVAL_SECONDS,
+                              self._room_map("_heartbeat_intervals").get(binding.room_id, interval))
+                await asyncio.sleep(current if retry_delay is None else retry_delay)
                 if self._stop.is_set():
                     return  # Contract P2c-3a: no contact after the stop.
                 retry_delay = None
                 if not await self._refresh_binding(binding) or not binding.enabled or binding.revoked:
                     return  # Contract P2c-3: none after a revocation or expiry either.
                 try:
+                    registered_now = False
                     if binding.room_id not in getattr(self, "_registered_rooms", {binding.room_id}):
                         # Contract P2c-3: the Room no longer knows this
                         # session (expired, removed, or not live for this
                         # installation): register it again, no restart.
                         logger.info("Room %s registering its connector session again", binding.room_id)
                         await self._ensure_connector(binding)
+                        registered_now = True
                     else:
                         heartbeat = await self._call(
                             binding,
@@ -3722,12 +3840,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             return  # ended meanwhile (P2c-3): its status stays stopped
                         self._note_connected(binding, heartbeat)
                     await self._accept_connector_enrollments(binding)
-                    await self._publish(
-                        binding,
-                        f"presence:{binding.room_id}",
-                        "heartbeat",
-                        suppress_errors=True,
-                    )
+                    # Contract P8-4: an idle frame after a registration, else
+                    # at most once per idle_activity_frame_interval().
+                    if registered_now or self._idle_frame_due(binding.room_id):
+                        self._room_map("_idle_frame_at")[binding.room_id] = _clock()
+                        await self._publish(
+                            binding,
+                            f"presence:{binding.room_id}",
+                            "heartbeat",
+                            suppress_errors=True,
+                        )
                     step = 0
                 except ProtocolError as error:
                     if error.revoked:
@@ -3779,8 +3901,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         """Bounded renewal discovery even when the only credential has expired."""
         while not self._stop.is_set():
             try:
-                for binding in load(self._state_file).bindings:
-                    if renewal.eligible(binding):
+                # Contract P8-6: the state file is parsed only when it changed.
+                for binding in load_cached(self._state_file).bindings:
+                    if renewal.eligible(binding) and self._renewal_intent_due(binding):
                         await self._maintain_renewal(binding)
             except asyncio.CancelledError:
                 raise
@@ -3788,7 +3911,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # Optional old routes can return HTML 200, malformed JSON or
                 # network failures. Never log raw errors/HTTP bodies here.
                 logger.warning("Room renewal maintenance unavailable; existing journals retained")
-            await asyncio.sleep(15)
+            await asyncio.sleep(RENEWAL_TICK_SECONDS)
+
+    def _renewal_intent_due(self, binding: RoomBinding) -> bool:
+        """Contract P8-3: a healthy binding asks at most once per 300 s."""
+        if binding.credential_rotation or renewal_intent_urgent(binding):
+            return True
+        asked = self._room_map("_renewal_asked_at").get(binding.room_id)
+        return asked is None or _clock() - asked >= RENEWAL_INTENT_HEALTHY_SECONDS
 
     async def _maintain_renewal(self, binding: RoomBinding) -> None:
         room_id = binding.room_id
@@ -3799,6 +3929,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 return
             intent = None
             if not binding.credential_rotation:
+                self._room_map("_renewal_asked_at")[room_id] = _clock()
                 intent = await asyncio.to_thread(renewal.discover, binding)
                 if intent is None:
                     return
@@ -3886,6 +4017,67 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         getattr(self, "_registered_rooms", set()).discard(binding.room_id)
         return False
 
+    def _room_map(self, name: str) -> dict[str, Any]:
+        """A per-Room map of this adapter (contract P8 cadences)."""
+        value = getattr(self, name, None)
+        if value is None:
+            value = {}
+            setattr(self, name, value)
+        return value
+
+    def _heartbeat_interval(self, room_id: str, answer: dict[str, Any] | None = None) -> float:
+        """Contract P8-1: the interval of the latest session answer."""
+        known = self._room_map("_heartbeat_intervals").get(room_id)
+        if known is not None:
+            return known
+        return heartbeat_interval_seconds((answer or {}).get("heartbeatIntervalSeconds"))
+
+    def _idle_frame_due(self, room_id: str) -> bool:
+        """Contract P8-4: whether an idle activity frame is due for this session."""
+        interval = idle_activity_frame_interval()
+        if interval is None:
+            return False
+        sent = self._room_map("_idle_frame_at").get(room_id)
+        return sent is None or _clock() - sent >= interval
+
+    def _enrollment_lineage(self, source: RoomBinding) -> dict[str, Any]:
+        """Contract P8-2: the listing schedule of a join lineage.
+
+        Keyed by (base URL, `clientInstanceId`); one adapter per process holds
+        every binding of its profile's state file, so this is process-wide.
+        """
+        lineages = getattr(self, "_enrollment_lineages", None)
+        if lineages is None:
+            lineages = self._enrollment_lineages = {}
+        key = (source.base_url, source.installation_id)
+        lineage = lineages.get(key)
+        if lineage is None:
+            lineage = lineages[key] = {"due_at": None, "interval": ENROLLMENT_LISTING_INTERVAL_SECONDS,
+                                       "used": {}, "members": {}}
+        return lineage
+
+    def _enrollment_listing_due(self, source: RoomBinding, lineage: dict[str, Any]) -> bool:
+        """Contract P8-2: list now with this binding?
+
+        Directly after an accepted registration of the binding; otherwise
+        once the lineage is due, with the binding of the lineage that listed
+        least recently among those seen at a heartbeat lately (a muted or
+        stopped one is not seen), or with any once the due time passed by 60 s.
+        """
+        now = _clock()
+        lineage["members"][source.room_id] = now
+        if self._room_map("_enrollment_owed").pop(source.room_id, None):
+            return True
+        due_at = lineage["due_at"]
+        if due_at is None:
+            return True
+        if now < due_at:
+            return False
+        window = max(lineage["interval"], HEARTBEAT_MAX_INTERVAL_SECONDS) + STREAM_PASS_HEARTBEAT_GRACE_SECONDS
+        candidates = [room for room, seen in lineage["members"].items() if now - seen <= window]
+        preferred = min(candidates, key=lambda room: (lineage["used"].get(room, float("-inf")), room))
+        return preferred == source.room_id or now - due_at >= HEARTBEAT_MAX_INTERVAL_SECONDS
+
     async def _accept_connector_enrollments(self, source: RoomBinding) -> None:
         """Durably activate owner-approved Rooms for this exact installation."""
         lock = getattr(self, "_enrollment_lock", None)
@@ -3893,13 +4085,23 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             lock = asyncio.Lock()
             self._enrollment_lock = lock
         async with lock:
+            lineage = self._enrollment_lineage(source)
             if not await self._membership_active_for_enrollments(source):
+                # Contract P8-2: a muted binding never lists for its lineage.
+                lineage["members"].pop(source.room_id, None)
                 return
+            if not self._enrollment_listing_due(source, lineage):
+                return
+            listed_at = _clock()
+            lineage["used"][source.room_id] = listed_at
+            lineage["due_at"] = listed_at + lineage["interval"]
             try:
-                pending = await self._call(
+                pending, poll_after = enrollment_listing(await self._call(
                     source,
                     lambda api: api.connector_enrollments(source.installation_id),
-                )
+                ))
+                lineage["interval"] = poll_after or ENROLLMENT_LISTING_INTERVAL_SECONDS
+                lineage["due_at"] = listed_at + lineage["interval"]
             except ProtocolError as error:
                 # Rolling upgrades may briefly run a server without this
                 # additive route.  Older deployments can also return their
@@ -3908,6 +4110,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if error.status in {404, 405, 501}:
                     return
                 if error.code == "connector_not_active":
+                    # Contract P8-2: this binding's answer; the lineage stays
+                    # due, and another of its bindings lists at its next
+                    # heartbeat.
+                    lineage["members"].pop(source.room_id, None)
+                    lineage["due_at"] = listed_at
                     if await self._own_membership_status(source) == "muted":
                         # Contract P2c-3b: a muted membership is inactive, not
                         # a lost session: no registration, no listing, a slow
@@ -6284,8 +6491,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if state_file is None:
             return
         try:
+            # Contract P8-6: read again only when the journal's identity changed.
             records = recovery.closures_for(
-                recovery.read_records(recovery.journal_path(state_file)),
+                recovery.read_records_cached(recovery.journal_path(state_file)),
                 binding.room_id, binding.membership_id, binding.installation_id,
             )
         except Exception as error:  # noqa: BLE001 - contract P3-4: never fatal to the watch loop
@@ -6886,7 +7094,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     async def _refresh_binding(self, binding: RoomBinding) -> bool:
         """Observe CLI lifecycle changes made by another process."""
-        latest = load().binding(binding.room_id)
+        # Contract P8-6: parsed again only when the file's identity changed.
+        latest = load_cached().binding(binding.room_id)
         if latest is not None and latest.enabled and not latest.revoked and not latest.credential_rotation and self._same_generation(latest, binding):
             return True
         binding.enabled = False
@@ -6913,6 +7122,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             except ValueError:
                 logger.warning("Room %s returned an invalid connector lease expiry", binding.room_id)
         self._lease_deadline[binding.room_id] = asyncio.get_running_loop().time() + remaining
+        # Contract P8-1: when the Room last accepted this session, its answer,
+        # and the interval it instructs (a later answer's value takes effect).
+        self._room_map("_heartbeat_accepted_at")[binding.room_id] = _clock()
+        self._room_map("_session_answers")[binding.room_id] = dict(evidence)
+        if registered or evidence.get("heartbeatIntervalSeconds") is not None:
+            self._room_map("_heartbeat_intervals")[binding.room_id] = heartbeat_interval_seconds(
+                evidence.get("heartbeatIntervalSeconds"))
         _connected_rooms.add(binding.room_id)
         self._mark_connected()
         self._status_room(binding, connected=True, registered=registered)
@@ -6926,7 +7142,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         )
 
     def _binding_generation_active(self, binding: RoomBinding) -> bool:
-        latest = load().binding(binding.room_id)
+        latest = load_cached().binding(binding.room_id)
         return bool(
             latest is not None
             and latest.enabled
@@ -6937,9 +7153,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         )
 
     def _persist_binding(self, binding: RoomBinding) -> bool:
-        """Persist runtime fields without a cross-process lost-update window."""
+        """Persist runtime fields without a cross-process lost-update window.
+
+        Contract P8-6: a binding unchanged since its last persist, in a file
+        nobody wrote since, is neither read nor written; a binding that the
+        merge leaves unchanged is not written. A change is written as before.
+        """
         if binding.room_id in getattr(self, "_renewing_rooms", set()):
             return False
+        target = state_path()
+        persisted = self._room_map("_persisted_bindings")
+        fingerprint = _binding_fingerprint(binding)
+        known = persisted.get(binding.room_id)
+        if known is not None and known[0] == str(target) and known[1] == fingerprint:
+            identity = file_identity(target)
+            if identity is not None and identity == known[2]:
+                return True
+        persisted.pop(binding.room_id, None)
+
         def merge(latest: PluginState) -> bool:
             existing = latest.binding(binding.room_id)
             if existing is None:
@@ -6949,54 +7180,67 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding.enabled = existing.enabled
                 binding.revoked = existing.revoked
                 return False
-            existing.connector_session_id = binding.connector_session_id
-            existing.message_payload_dialect = binding.message_payload_dialect
-            existing.message_payload_capabilities = list(binding.message_payload_capabilities)
-            existing.cursor = binding.cursor
-            existing.acknowledged_cursor = binding.acknowledged_cursor
-            existing.inbox = dict(binding.inbox)
-            existing.pending_since = dict(binding.pending_since)
-            existing.pending_retries = dict(binding.pending_retries)
-            existing.terminal_evidence = {
-                key: dict(evidence) for key, evidence in binding.terminal_evidence.items()
-            }
-            existing.turn_observed = dict(binding.turn_observed)
-            existing.turn_sequences = dict(binding.turn_sequences)
-            existing.delivery_intents = {
-                source_id: dict(intent) for source_id, intent in binding.delivery_intents.items()
-            }
-            existing.delivery_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
-            existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
-            existing.missed_sources = [dict(item) for item in binding.missed_sources]
-            existing.kept_reply = dict(binding.kept_reply)
-            existing.documents_given = copy.deepcopy(binding.documents_given)
-            existing.recovery_closures = {
-                key: dict(value) for key, value in {**existing.recovery_closures, **binding.recovery_closures}.items()
-            }
-            merged_authority = copy.deepcopy(binding.delivery_authority)
-            for key, durable_record in existing.delivery_authority.items():
-                if (
-                    isinstance(durable_record, dict)
-                    and durable_record.get("state") == "superseded"
-                ):
-                    merged_authority[key] = copy.deepcopy(durable_record)
-            existing.delivery_authority = merged_authority
-            binding.delivery_authority = copy.deepcopy(merged_authority)
-            existing.abandoned_delivery_intents = {
-                source_id: dict(receipt)
-                for source_id, receipt in binding.abandoned_delivery_intents.items()
-            }
-            if (
-                not existing.rotate_current_epoch_session
-                or getattr(binding, "_consuming_epoch_session_rotation", False)
-            ):
-                existing.epoch_session_routing_initialized = binding.epoch_session_routing_initialized
-                existing.legacy_session_epoch_id = binding.legacy_session_epoch_id
-                existing.rotate_current_epoch_session = binding.rotate_current_epoch_session
-            existing.transport = binding.transport
-            return True
+            before = asdict(existing)
+            merged = self._merge_binding(existing, binding)
+            if merged and asdict(existing) == before:
+                raise StateUnchanged(merged)
+            return merged
 
-        return update(merge)
+        try:
+            return update(merge)
+        except StateUnchanged as unchanged:
+            if unchanged.identity is not None:
+                persisted[binding.room_id] = (str(target), _binding_fingerprint(binding), unchanged.identity)
+            return bool(unchanged.result)
+
+    def _merge_binding(self, existing: RoomBinding, binding: RoomBinding) -> bool:
+        """Copy this runtime's fields of ``binding`` onto the stored one."""
+        existing.connector_session_id = binding.connector_session_id
+        existing.message_payload_dialect = binding.message_payload_dialect
+        existing.message_payload_capabilities = list(binding.message_payload_capabilities)
+        existing.cursor = binding.cursor
+        existing.acknowledged_cursor = binding.acknowledged_cursor
+        existing.inbox = dict(binding.inbox)
+        existing.pending_since = dict(binding.pending_since)
+        existing.pending_retries = dict(binding.pending_retries)
+        existing.terminal_evidence = {
+            key: dict(evidence) for key, evidence in binding.terminal_evidence.items()
+        }
+        existing.turn_observed = dict(binding.turn_observed)
+        existing.turn_sequences = dict(binding.turn_sequences)
+        existing.delivery_intents = {
+            source_id: dict(intent) for source_id, intent in binding.delivery_intents.items()
+        }
+        existing.delivery_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
+        existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
+        existing.missed_sources = [dict(item) for item in binding.missed_sources]
+        existing.kept_reply = dict(binding.kept_reply)
+        existing.documents_given = copy.deepcopy(binding.documents_given)
+        existing.recovery_closures = {
+            key: dict(value) for key, value in {**existing.recovery_closures, **binding.recovery_closures}.items()
+        }
+        merged_authority = copy.deepcopy(binding.delivery_authority)
+        for key, durable_record in existing.delivery_authority.items():
+            if (
+                isinstance(durable_record, dict)
+                and durable_record.get("state") == "superseded"
+            ):
+                merged_authority[key] = copy.deepcopy(durable_record)
+        existing.delivery_authority = merged_authority
+        binding.delivery_authority = copy.deepcopy(merged_authority)
+        existing.abandoned_delivery_intents = {
+            source_id: dict(receipt)
+            for source_id, receipt in binding.abandoned_delivery_intents.items()
+        }
+        if (
+            not existing.rotate_current_epoch_session
+            or getattr(binding, "_consuming_epoch_session_rotation", False)
+        ):
+            existing.epoch_session_routing_initialized = binding.epoch_session_routing_initialized
+            existing.legacy_session_epoch_id = binding.legacy_session_epoch_id
+            existing.rotate_current_epoch_session = binding.rotate_current_epoch_session
+        existing.transport = binding.transport
+        return True
 
     async def _wait_for_turn(
         self,

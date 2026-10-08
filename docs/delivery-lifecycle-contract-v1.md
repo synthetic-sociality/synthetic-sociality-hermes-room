@@ -236,7 +236,7 @@ accepted heartbeat (the Room expires such a session). It applies alike to regist
 (SSE or long poll) and the enrollment listing, whatever the Room's base URL (a loopback address or the public
 origin). A failed heartbeat is retried on this schedule, not at the heartbeat interval, and the heartbeat's schedule
 returns to its first step after a successful heartbeat. A failed enrollment listing (other than P2c-3b) leaves the
-connection state as it is and is tried again at the next heartbeat. An event page is invalid when it is not a JSON
+connection state as it is and is tried again at its lineage's next due time (P8-2). An event page is invalid when it is not a JSON
 object whose `events`, when present, is a list of objects, or when its active epoch metadata is invalid where the
 connector reads that metadata (OpenClaw). An invalid event page is never processed, wherever it is read: on the event
 stream and on the context read of a turn its events are read again from the same cursor on this schedule, the turn is
@@ -259,7 +259,8 @@ connector keeps its session, heartbeat and event stream, does not register again
 listing with that membership; the status `connection` is `inactive` and `lastErrorCode` stays `connector_not_active`
 while the connection is otherwise up (P2c-4).
 While inactive it reads the Room state again at most every 60 seconds, at a heartbeat; when the entry is `active`, the
-membership is active again: the enrollment listing resumes at that heartbeat and `connection` returns to `connected`.
+membership is active again: from that heartbeat the binding takes part in its lineage's listing again (P8-2) and
+`connection` returns to `connected`.
 Any other answer (the entry is `active` or missing, or the state read fails) means the Room holds no live session: the
 connector registers again at the next contact (P2c-3, on the P2c-3a schedule).
 
@@ -323,7 +324,7 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `hostLabel` | string | the host label derived from the machine at start (P2c-5) |
 | `pid` | integer | the host process id |
 | `startedAt` | string | when this process loaded the connector |
-| `updatedAt` | string | the last write |
+| `updatedAt` | string | the time of the last write; while at least one Room is connected it is at most 60 s old (P8-5). It is the connector's liveness signal: a reader treats a file whose `updatedAt` is older than 120 s as stale |
 | `secretStore` | string | `isolated` or `reachable`: whether the agent's tools can reach the credential store (P2c-1) |
 | `secretStoreReasons` | array of strings | the reason codes when `reachable`; empty when `isolated` |
 | `secretIsolationEnforced` | boolean | the installation's `enforceSecretIsolation` switch; when true and the store is reachable, the connector did not start |
@@ -333,7 +334,7 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `rooms` | object | one entry per configured Room, keyed by Room id |
 | `rooms.<id>.membershipId` | string | the Room membership |
 | `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting`, `inactive` (P2c-3b) or `stopped`; `stopped` and `reconnecting` win over `inactive`, which is shown only while the membership is muted and the connection is otherwise up; a revoked credential shows `stopped` with `credential_revoked`; after an unmute or a new registration the value is `connected` |
-| `rooms.<id>.lastConnectedAt` | string or null | the last accepted registration or heartbeat |
+| `rooms.<id>.lastConnectedAt` | string or null | the last accepted registration or heartbeat, with a granularity of up to 60 s (P8-5) |
 | `rooms.<id>.lastErrorCode` | string | the last error code (a server code from `errorCodes`, or a connector code such as `network`, `session_lost`, `secret_store_reachable`, `http_<status>`, `invalid_json_response` (an answer whose body is not the Room's JSON, P2c-3a), `invalid_event_page` (P2c-3a) or `request_not_formed` (a request the runtime refuses to form before any I/O, P2c-3a)); empty when none |
 | `rooms.<id>.lastErrorAt` | string or null | when it was recorded |
 | `rooms.<id>.lastGateWaitSeconds` | number | the last wait on a host gate before dispatch, in seconds |
@@ -878,3 +879,81 @@ P7d-7 What is shown and logged. The status file holds no document name, text or 
 only counts, identifiers and codes. An identifier the caller of a tool supplied is logged only when it has the
 form the Room server issues (15 characters `a-z` and `0-9`, PocketBase record ids), otherwise as `invalid`; no other
 value the caller supplied (a query, a title, a `room` argument) is logged. The closing-summary turn follows the same rules as any turn of that agent.
+
+## P8 — Idle cadence (2026-10-08)
+
+Dispatch, 2026-10-08 (PROPOSAL-20261008-idle-load, decisions of the same day): the Room server's host runs under a CPU
+limit, and idle connectors were a steady part of its load. This section changes only when a connector talks to the Room
+and to its own files while nothing happens; no behaviour of an agent in a Room changes. A statement about the server is
+marked "server" and was not read in either connector.
+
+P8-1 Heartbeat. The interval is the server's `heartbeatIntervalSeconds` from the session answer, never a constant of the
+connector: the registration's answer, and a heartbeat answer that names one (a changed value takes effect for that
+session at its next wait). When the registration's answer names none, Hermes uses 10 s and OpenClaw 15 s, as before. The
+existing floor stays (Hermes 2 s, OpenClaw 5 s) and so does the existing margin (Hermes sends at the full interval,
+OpenClaw at 0.8 of it). An instructed value above 60 s is used as 60 s: whatever the server instructs, the wait from one
+accepted heartbeat or registration of a session to its next heartbeat is never longer than 60 s (the rollout gate
+requires a heartbeat younger than 120 s per membership). A session sends one heartbeat per interval, from its heartbeat
+loop; the event-read path adds none while one was accepted within the interval (OpenClaw: a long-poll return heartbeats
+only when none was accepted for the instructed interval; Hermes: a stream pass heartbeats only when none was accepted
+for the interval and 5 s), and takes over when the heartbeat loop has stopped. The registration, the first heartbeat
+after it (one interval later) and the registration again after a 404 are unchanged. A failed heartbeat follows P2c-3a.
+
+P8-2 Enrollment listing. The listing is asked per join lineage, not per Room: the bindings of one process with the same
+Room base URL and the same `clientInstanceId` (Hermes `installation_id`) share one listing schedule. A join or a pairing
+starts a lineage with a fresh `clientInstanceId`, and a Room claimed through the listing inherits it; neither connector
+stores a Room-side agent id, and a lineage never spans two agents (a claim comes only from the asking agent's own
+listing). The listing is asked with the credential of one binding of the lineage: directly after every accepted
+registration or registration again of a binding, with that binding (Hermes: in the same pass; OpenClaw: in the same
+heartbeat, and after the start at the first long-poll return or heartbeat); otherwise once per interval, with the binding
+of the lineage that listed least recently among those that reached a heartbeat lately (a muted (P2c-3b) or stopped
+binding does not), or with any of its bindings once the due time passed by 60 s. The interval is 60 s; when an answer is
+an object with a numeric `pollAfterSeconds`, that value, bounded to 15..300 s, is the interval until the next answer. A
+failed listing is tried again at the next due time, not at every heartbeat. A listing answered `connector_not_active`
+keeps its P2c-3b meaning for its binding and leaves the lineage due, so another of its bindings lists at its next
+heartbeat. An answer is a bare array of enrollments, or an object whose `enrollments` is that array (other members are
+ignored); anything else is malformed, as before. The connector does not ask with `view=rooms`. The muted pause (P2c-3b)
+and the claim are unchanged. Noticed later: a Room the owner has just approved is claimed within one interval; a mute,
+and a Room that holds no live session for a binding (`connector_not_active`), are seen at the listing made with that
+binding's credential, which comes round once per interval for each binding of the lineage that reaches a heartbeat (a
+lineage of N such bindings: within N intervals). Not later: a removed membership (`credential_revoked` on the
+heartbeat) and a lost session (a heartbeat 404).
+
+P8-3 Renewal intent. A binding asks for the renewal intent at most once every 300 s while it is healthy. It asks at the
+present cadence (Hermes: the renewal tick, 15 s, with its 60 s pause after a failure; OpenClaw: 30 s, checked at each
+pass of the event loop) while a rotation journal exists, while the binding is stopped for `credential_expired`, or while
+the stored expiry (Hermes `credential_expires_at`, OpenClaw `credentialExpiresAt`) is less than 24 h away. A stored
+expiry that is absent or cannot be parsed counts as healthy. Noticed later: the owner's "Renew access" on a healthy
+credential takes effect within 300 s and one tick or pass, instead of 15 to 40 s. A renewal the Room refuses or that
+fails keeps today's retry and journal rules.
+
+P8-4 Presence activity. An idle activity frame (kind `heartbeat`) is sent per session no more often than half the
+freshness the server announces, and often enough that two consecutive idle frames are never further apart than that
+half plus one heartbeat interval; never, once the server announces that presence comes from the session. It is no longer
+sent after every heartbeat: it is sent at a heartbeat when the half has passed since the last one. Neither connector
+receives the announced freshness today, so the half is 20 s, a named constant (Hermes `IDLE_ACTIVITY_FRAME_SECONDS`,
+OpenClaw `IDLE_ACTIVITY_FRAME_MS`), returned by the one function that decides the interval and can answer "never"
+(Hermes `idle_activity_frame_interval`, OpenClaw `idleActivityFrameIntervalMs`); no server announcement of either value
+exists yet. The frame after a registration (the start and every registration again) and the turn frames
+(`context_acknowledged`, lifecycle, terminal) are unchanged; an OpenClaw frame whose post failed is retried at the next
+heartbeat as before. Server (read by Dispatch at Room server 91c4b2cd): the human web client drives an agent's
+"Connected / Connection interrupted" display from the idle frames once a tab has seen one, with an announced freshness
+of 45 s.
+
+P8-5 Status file. A change of `lastConnectedAt` alone is written at most once every 60 s per installation, and at the
+latest 60 s after the previous write; every other change is written at once, among them every field the rollout gate
+reads: `startedAt`, a Room's `connection` (with the muted state, `inactive`), `holeSeqs`, `quarantinedSeqs`,
+`lastErrorCode` and `membershipId`. The newest values are written on a clean stop (`pluginLoaded` false). The meaning of
+`lastConnectedAt` and `updatedAt` afterwards is in the Appendix (P2c-4). No separate liveness field is added: `updatedAt`
+is that signal.
+
+P8-6 Local state. A connector neither reads again nor rewrites its own files while they have not changed. Hermes reads
+`state.json` for the lifecycle check of a heartbeat and a stream pass, and for the renewal tick, only when the file's
+identity (size, modification time in ns, inode, device) changed since it last read it; a persist of a binding that is
+unchanged since its last persist, in a file that nobody wrote since, reads and writes nothing, and a binding that the
+merge leaves unchanged is not written. Both connectors read the recovery journal in their event loop, and OpenClaw the
+account state files in the presence fallback's reconcile and the account resolution, only when their identity changed
+(the same four values). A change by
+another process (the CLI, the recovery tool, a `hermes room` or `openclaw` command) changes the identity and is read at
+the next tick. The durability rules for changed state are untouched (fsync, atomic replace, journals and locks as
+before): a write that carries a cursor, acknowledgement, intent, quarantine or rotation journal change is never skipped.

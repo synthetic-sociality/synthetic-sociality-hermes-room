@@ -523,7 +523,9 @@ class P3Tests(unittest.TestCase):
             with self.assertLogs(adapter.logger, level="WARNING"):
                 asyncio.run(instance._apply_recovery_closures(binding))
             self.assertEqual(room.acks, [382], "the valid record still applies")
-            with mock.patch.object(recovery, "read_records", side_effect=RuntimeError("bad journal")), \
+            # Contract P8-6: an unchanged journal is served from memory; the
+            # failing read is the one the watch loop calls.
+            with mock.patch.object(recovery, "read_records_cached", side_effect=RuntimeError("bad journal")), \
                     self.assertLogs(adapter.logger, level="WARNING") as logs:
                 fresh = ledger_instance(paula_binding(), ProofRoom(), path)
                 asyncio.run(fresh._apply_recovery_closures(paula_binding()))

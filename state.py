@@ -7,7 +7,9 @@ import hashlib
 import os
 import re
 import secrets
+import stat as stat_module
 import tempfile
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
@@ -490,6 +492,53 @@ def load(path: Path | None = None) -> PluginState:
     return state
 
 
+def file_identity(path: Path) -> tuple[int, ...] | None:
+    """Contract P8-6: the identity of a regular state file, or None.
+
+    Size, modification time in ns, inode and device: every write of this
+    plugin replaces the file (a new inode), and another process that rewrites
+    it in place changes its size or modification time. (Not the change time:
+    ``load`` itself sets the mode, which changes it.)
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat_module.S_ISREG(info.st_mode):
+        return None
+    return (info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev)
+
+
+_cache_lock = threading.Lock()
+_cached_states: dict[str, tuple[tuple[int, ...], PluginState]] = {}
+
+
+def load_cached(path: Path | None = None) -> PluginState:
+    """Contract P8-6: ``load`` without re-reading a file that has not changed.
+
+    For read-only callers: the returned state is shared and must not be
+    changed. A file whose identity changed (a write by this process, the CLI,
+    the recovery tool or any other process) is read and validated again, with
+    the checks of ``load``.
+    """
+    target = path or state_path()
+    key = str(target)
+    identity = file_identity(target)
+    if identity is not None and not target.parent.is_symlink():
+        with _cache_lock:
+            cached = _cached_states.get(key)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+    state = load(target)
+    after = file_identity(target)
+    with _cache_lock:
+        if after is not None and after == identity:
+            _cached_states[key] = (after, state)
+        else:
+            _cached_states.pop(key, None)
+    return state
+
+
 def save(state: PluginState, path: Path | None = None) -> None:
     target = path or state_path()
     if target.is_symlink() or target.parent.is_symlink():
@@ -552,11 +601,32 @@ def _exclusive_state_lock(path: Path | None = None) -> Iterator[Path]:
         os.close(fd)
 
 
+class StateUnchanged(Exception):
+    """Contract P8-6: raised by a mutator that changed nothing; nothing is written.
+
+    ``update`` sets ``identity`` to the file's identity (under the lock) and
+    raises it on; ``result`` is what the mutator would have returned.
+    """
+
+    def __init__(self, result: Any = None) -> None:
+        super().__init__("state unchanged")
+        self.result = result
+        self.identity: tuple[int, ...] | None = None
+
+
 def update(mutator: Callable[[PluginState], T], path: Path | None = None) -> T:
-    """Apply one state mutation without a cross-process lost-update window."""
+    """Apply one state mutation without a cross-process lost-update window.
+
+    Contract P8-6: a mutator that raises ``StateUnchanged`` writes nothing; a
+    change is written exactly as before (fsync, atomic replace, lock).
+    """
     with _exclusive_state_lock(path) as target:
         current = load(target)
-        result = mutator(current)
+        try:
+            result = mutator(current)
+        except StateUnchanged as unchanged:
+            unchanged.identity = file_identity(target)
+            raise
         save(current, target)
         return result
 

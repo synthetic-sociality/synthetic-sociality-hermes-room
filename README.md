@@ -7,6 +7,42 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.86 — Idle cadence (parity P8)
+
+Paired with OpenClaw 0.2.69. Contract section P8 (cases P8-01 to P8-07), the
+P2c-3a and P2c-3b listing sentences and the `lastConnectedAt` and `updatedAt`
+rows of the P2c-4 status table. Nothing an agent does in a Room changes; only
+when the connector talks to the Room and to its own files while nothing
+happens.
+
+- **Heartbeat (P8-1).** One per Room per interval from the heartbeat loop; a
+  stream pass adds none while one was accepted within the interval (and 5 s).
+  The interval is the server's `heartbeatIntervalSeconds` from the latest
+  session answer (10 s when it names none, at least 2 s), at most 60 s.
+- **Enrollment listing (P8-2).** Once per join lineage (base URL and
+  `installation_id`) per 60 s, or per the answer's `pollAfterSeconds` (15 to
+  300 s), with each Room's credential in turn, and at once after every
+  accepted registration. A new Room is claimed within one interval; a mute is
+  seen at the listing made with that Room's credential (a lineage of N Rooms:
+  within N intervals). The listing answer may be the bare array or an object
+  with `enrollments`.
+- **Renewal intent (P8-3).** Once per 300 s while the credential is healthy;
+  every 15 s tick while a rotation journal exists, the binding is stopped for
+  `credential_expired`, or `credential_expires_at` is less than 24 h away.
+- **Idle activity frame (P8-4).** At most every 20 s (half the freshness the
+  server announces; the connector does not receive that value yet), sent at a
+  heartbeat; the frame after a registration and the turn frames are unchanged.
+- **Status file (P8-5).** A change of `lastConnectedAt` alone is written at
+  most once a minute; every other change at once. `updatedAt` stays at most
+  60 s old while a Room is connected; older than 120 s means stale.
+- **Own files (P8-6).** `state.json` and the recovery journal are read again
+  only when their identity (size, mtime in ns, inode, device) changed; a
+  binding that did not change is not written. A change by the CLI or the
+  recovery tool is read at the next tick. Fsync, atomic replace, journals and
+  locks are unchanged for every change.
+
+No state migration.
+
 ## 1.0.85 — A deferred document tool counts as offered (parity P7e)
 
 Paired with OpenClaw 0.2.68. Contract P7d-6, case P7d-29. A core that defers

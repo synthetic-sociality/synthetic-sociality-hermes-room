@@ -353,10 +353,13 @@ class RoomProtocol:
         room, session = urllib.parse.quote(room_id, safe=""), urllib.parse.quote(session_id, safe="")
         return self.request("POST", f"/rooms/{room}/connector/sessions/{session}/heartbeat")
 
-    def connector_enrollments(self, installation_id: str) -> list[dict[str, Any]]:
+    def connector_enrollments(self, installation_id: str) -> list[dict[str, Any]] | dict[str, Any]:
+        """The pending enrollments: a bare array, or (contract P8-2) an object
+        whose `enrollments` is that array, returned as it came."""
         query = urllib.parse.urlencode({"clientInstanceId": installation_id})
         result = self.request("GET", f"/connector/enrollments?{query}")
-        if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
+        items = result.get("enrollments") if isinstance(result, dict) else result
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
             raise ProtocolError(
                 "Room API returned malformed connector enrollments",
                 code="connector_enrollments_malformed",

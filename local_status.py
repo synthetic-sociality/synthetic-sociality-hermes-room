@@ -27,12 +27,23 @@ WEB_READ_TOOL_NAMES = ("browser", "browser_navigate", "web_extract", "web_fetch"
 # Contract P2c-4 (ISSUE-023): why a dispatch waited on the host.
 GATE_WAIT_REASONS = frozenset({"", "host_run_busy", "host_session_unobservable", "held_by_moderator"})
 _CODE_LIMIT = 64
+# Contract P8-5: a change of `lastConnectedAt` alone is written at most this
+# often per installation; every other change is written at once.
+CONNECTED_AT_WRITE_SECONDS = 60.0
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _timer(delay: float, callback: Any) -> Any:
+    """Run ``callback`` once after ``delay`` seconds; returns a cancel function."""
+    timer = threading.Timer(max(0.0, delay), callback)
+    timer.daemon = True
+    timer.start()
+    return timer.cancel
 
 
 def _code(value: Any) -> str:
@@ -45,10 +56,17 @@ def _code(value: Any) -> str:
 class LocalStatus:
     """Process-local status, written whole on every change."""
 
-    def __init__(self, path: Path, *, plugin: str, version: str, host_label: str) -> None:
+    def __init__(self, path: Path, *, plugin: str, version: str, host_label: str,
+                 clock: Any = None, schedule: Any = None) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
         self._failed = False
+        # Contract P8-5: when the file was last written (monotonic), and the
+        # pending write of a `lastConnectedAt`-only change (a cancel function).
+        self._clock = clock or time.monotonic
+        self._schedule = schedule or _timer
+        self._written_at: float | None = None
+        self._pending_cancel: Any = None
         self._data: dict[str, Any] = {
             "schema": SCHEMA,
             "plugin": plugin,
@@ -138,7 +156,8 @@ class LocalStatus:
                 "quarantinedSeqs": [],
                 "ledgerCode": "",
             })
-            before = json.dumps(entry, sort_keys=True)
+            before = json.dumps({**entry, "lastConnectedAt": None}, sort_keys=True)
+            connected_before = entry["lastConnectedAt"]
             if membership_id:
                 entry["membershipId"] = str(membership_id)
             key = str(room_id)
@@ -185,9 +204,33 @@ class LocalStatus:
                 entry["lastGateWaitSeconds"] = round(max(0.0, float(gate_wait_seconds)), 1)
                 entry["lastGateWaitAt"] = _now()
                 entry["lastGateWaitReason"] = gate_wait_reason if gate_wait_reason in GATE_WAIT_REASONS else ""
-            changed = json.dumps(entry, sort_keys=True) != before
+            changed = json.dumps({**entry, "lastConnectedAt": None}, sort_keys=True) != before
+            connected_changed = entry["lastConnectedAt"] != connected_before
         if changed:
             self.write()
+        elif connected_changed:
+            self._write_connected_at()
+
+    def _write_connected_at(self) -> None:
+        """Contract P8-5: a `lastConnectedAt`-only change, at most once per 60 s."""
+        with self._lock:
+            if self._pending_cancel is not None:
+                return  # already due; that write carries the newest value
+            written_at = self._written_at
+            wait = 0.0 if written_at is None else CONNECTED_AT_WRITE_SECONDS - (self._clock() - written_at)
+            if wait > 0:
+                self._pending_cancel = self._schedule(wait, self._write_pending)
+                return
+        self.write()
+
+    def _write_pending(self) -> None:
+        with self._lock:
+            if self._pending_cancel is None:
+                return  # written meanwhile
+            self._pending_cancel = None
+        if not self.path.parent.is_dir():
+            return  # a deferred time alone never creates the directory again
+        self.write()
 
     LINK_STATES = frozenset({"not_linked", "pending", "connecting", "connected", "reconnecting", "stopped"})
 
@@ -213,6 +256,14 @@ class LocalStatus:
         with self._lock:
             self._data["updatedAt"] = _now()
             payload = json.dumps(self._data, indent=2, sort_keys=True) + "\n"
+            # Contract P8-5: this write carries every pending value.
+            self._written_at = self._clock()
+            cancel, self._pending_cancel = self._pending_cancel, None
+        if cancel is not None:
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 - a timer that already ran
+                pass
         directory = self.path.parent
         try:
             if not directory.is_dir():

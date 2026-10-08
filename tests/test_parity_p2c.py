@@ -588,7 +588,9 @@ class P2cTests(unittest.TestCase):
                 pending.cancel()
             await asyncio.gather(task, *instance._heartbeat_tasks.values(), return_exceptions=True)
 
+        # Contract P8-2: the listing has its own interval; shortened like the heartbeat.
         with mock.patch.object(adapter, "HEARTBEAT_MIN_INTERVAL_SECONDS", 0.2), \
+                mock.patch.object(adapter, "ENROLLMENT_LISTING_INTERVAL_SECONDS", 0.2), \
                 self.assertLogs(adapter.logger, level="INFO") as logs:
             asyncio.run(run())
         self.assertEqual(connects, [])

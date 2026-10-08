@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.85",
+  "adapterVersion": "1.0.86",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -1298,14 +1298,37 @@
       }
     ]
   },
+  "parityP8Contract": "docs/delivery-lifecycle-contract-v1.md#p8--idle-cadence-2026-10-08",
+  "parityP8Cases": {
+    "P8-01 an idle session sends exactly one heartbeat per interval, the interval of the latest session answer, at most 60 s": "test_p8_01_an_idle_session_sends_exactly_one_heartbeat_per_interval_capped_at_60_s",
+    "P8-02 N Rooms of one join lineage make one listing per interval; two lineages in one process make two": "test_p8_02_n_rooms_of_one_join_lineage_make_one_listing_per_interval_two_lineages_in_one_process_make_two",
+    "P8-03 a newly approved Room is claimed at the next listing; a mute is seen at the listing made with that Room's credential; revoked and lost sessions are seen at the heartbeat as before": "test_p8_03_a_new_room_is_claimed_at_the_next_listing_a_mute_at_the_listing_with_its_credential_revoked_and_lost_sessions_at_the_heartbeat",
+    "P8-04 a healthy binding asks for the renewal intent once per 300 s; with a rotation journal, an expired credential or an expiry within 24 h it asks at the present cadence": "test_p8_04_a_healthy_binding_asks_for_the_renewal_intent_once_per_300_s_otherwise_at_the_present_cadence",
+    "P8-05 an idle session posts an activity frame no more often than half the announced freshness, and the registration and turn frames are unchanged": "test_p8_05_an_idle_session_posts_an_activity_frame_no_more_often_than_half_the_announced_freshness",
+    "P8-06 status.json is not rewritten for heartbeats alone within 60 s; any other change is written at once": "test_p8_06_status_json_is_not_rewritten_for_heartbeats_alone_within_60_s_any_other_change_at_once",
+    "P8-07 the state file is neither parsed nor written while unchanged across heartbeats; a change made by another process (CLI, recovery tool) is picked up at the next tick": "test_p8_07_the_state_file_is_neither_parsed_nor_written_while_unchanged_and_an_outside_change_is_picked_up"
+  },
+  "parityP8Constants": {
+    "heartbeatMaximumSeconds": 60,
+    "enrollmentListingIntervalSeconds": 60,
+    "enrollmentPollAfterBoundsSeconds": [
+      15,
+      300
+    ],
+    "renewalIntentHealthySeconds": 300,
+    "renewalExpiryHorizonSeconds": 86400,
+    "idleActivityFrameSeconds": 20,
+    "connectedAtWriteSeconds": 60
+  },
   "parityContractSectionSha256": {
     "P3": "a689096e24f9fee13e0603006274c303f3435ee823f082a84a63b765deb8906b",
     "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "1b4a1e0e72401bffd1a0f23dcd68b865859e39d71ccd8eb28377dbdadeaa8456",
-    "Appendix": "b284817954ed94726a9dee18add3f3b56bd3fe02d2639b23b8288d2d74254d58",
+    "P2c": "bd376ce8350c3a3213b36a6770e357cbcf80e6bb3548eccbafa0b01ee839d940",
+    "Appendix": "96da1c168697180290254b7fb108772bd1ce331120e2174d1457ec25b8761fc1",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
-    "P7d": "19c7cf3b5289e782fbe4be89e803d7ed61b2742a72f3b6f488023cc8baec3b24"
+    "P7d": "19c7cf3b5289e782fbe4be89e803d7ed61b2742a72f3b6f488023cc8baec3b24",
+    "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d"
   }
 }

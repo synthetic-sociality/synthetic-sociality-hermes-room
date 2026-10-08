@@ -287,6 +287,39 @@ def read_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _journal_identity(path: Path) -> tuple[int, ...] | None:
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev)
+
+
+_cached_records: dict[str, tuple[tuple[int, ...], list[dict[str, Any]]]] = {}
+
+
+def read_records_cached(path: Path) -> list[dict[str, Any]]:
+    """Contract P8-6: ``read_records`` without reading a journal that has not changed.
+
+    An append by the recovery tool changes its size and modification time. The
+    records are shared and must not be changed.
+    """
+    key = str(path)
+    identity = _journal_identity(path)
+    if identity is None:
+        _cached_records.pop(key, None)
+        return []
+    cached = _cached_records.get(key)
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    records = read_records(path)
+    if _journal_identity(path) == identity:
+        _cached_records[key] = (identity, records)
+    else:
+        _cached_records.pop(key, None)
+    return records
+
+
 def closures_for(records: Iterable[dict[str, Any]], room_id: str, membership_id: str,
                  client_instance_id: str) -> dict[int, dict[str, Any]]:
     """The latest sealed closure per seq for exactly this binding."""
