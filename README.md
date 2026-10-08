@@ -7,9 +7,21 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.85 — A deferred document tool counts as offered (parity P7e)
+
+Paired with OpenClaw 0.2.68. Contract P7d-6, case P7d-29. A core that defers
+plugin tools behind its Tool Search bridge (`tool_search`, `tool_describe`,
+`tool_call`) still executes a call to the document tool, so the tool counts as
+offered: the Room-turn tool selection reads the core's uncollapsed catalog
+(`skip_tool_search_assembly=True`; a core without the parameter is asked as
+before). With 1.0.84 on such a core `documentTool` read `unavailable` and a
+document over 24,000 characters was cut to its first 24,000 once; now it is
+`available` and the document goes by its reference line, naming the tool. No
+state migration.
+
 ## 1.0.84 — Discussion documents once in full, then on demand (parity P7d)
 
-Paired with OpenClaw 0.2.67. Contract section P7d (cases P7d-01 to P7d-26) and
+Paired with OpenClaw 0.2.67. Contract section P7d (cases P7d-01 to P7d-29) and
 the `documentTool` row of the P2c-4 status table. For a Room server that lists
 the discussion's documents in its state (`activeTopic.documents`, server
 ebad3df and later; the deployed hold-signal-47320f7 does).

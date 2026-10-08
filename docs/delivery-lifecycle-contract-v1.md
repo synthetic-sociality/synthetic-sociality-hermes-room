@@ -867,8 +867,9 @@ reference line without a read.
 P7d-6 Tool availability. Hermes takes it from the tool selection core resolves for a Room turn (P2c-6): `available`,
 `unavailable` (the selection omits the tool) or `unknown`. OpenClaw cannot see the selection: the value is `unknown`
 until a document read of a Room session succeeds (the tool answered `success` true), then `available`; a call that
-answered an error changes nothing; never `unavailable`. `unknown` counts as offered. When the tool
-is not `available` (`unknown`, or `unavailable`), a document larger than 24,000 characters is given once as its first
+answered an error changes nothing; never `unavailable`. `unknown` counts as offered. A tool the host defers behind its
+own tool search (the host still executes a call to it) counts as offered; Hermes reads the host's uncollapsed catalog
+for this. When the tool is not `available` (`unknown`, or `unavailable`), a document larger than 24,000 characters is given once as its first
 24,000 characters, under `Content (cut: the first 24000 of <N> characters):` instead of `Content:`, within the turn's
 64,000 characters, and named by its reference line on the same turn. The status file carries the value as
 `documentTool` (Appendix).

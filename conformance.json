@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.84",
+  "adapterVersion": "1.0.85",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -689,7 +689,8 @@
     "P7d-25 a run that ended in the host's operational fallback marks nothing given": "test_p7d_25_a_run_that_ended_in_the_operational_fallback_marks_nothing",
     "P7d-26 an id over 128 characters never reaches the state, and a failed library listing does not fail the turn": "test_p7d_26_an_overlong_id_never_reaches_the_state_and_a_failed_library_listing_does_not_fail_the_turn",
     "P7d-27 the tools find every Room the connector runs, also one whose state the configuration places outside the default directory, and each agent sees only its own": "test_p7d_27_the_tools_find_every_room_the_connector_runs_and_each_agent_sees_only_its_own",
-    "P7d-28 a recorded host session is never overwritten by a run whose session is unknown": "test_p7d_28_a_recorded_host_session_is_never_overwritten_by_a_run_whose_session_is_unknown"
+    "P7d-28 a recorded host session is never overwritten by a run whose session is unknown": "test_p7d_28_a_recorded_host_session_is_never_overwritten_by_a_run_whose_session_is_unknown",
+    "P7d-29 a document tool deferred behind the host's tool search is available": "test_p7d_29_a_document_tool_deferred_behind_the_hosts_tool_search_is_available"
   },
   "parityP7dConstants": {
     "toolName": "synthetic_sociality_room_document",
@@ -1305,6 +1306,6 @@
     "P2c": "1b4a1e0e72401bffd1a0f23dcd68b865859e39d71ccd8eb28377dbdadeaa8456",
     "Appendix": "b284817954ed94726a9dee18add3f3b56bd3fe02d2639b23b8288d2d74254d58",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
-    "P7d": "3c66f68e7d778356dfbd5197b52bc6c1e80ee29cb30ca9f0592aaa5fb042f32e"
+    "P7d": "19c7cf3b5289e782fbe4be89e803d7ed61b2742a72f3b6f488023cc8baec3b24"
   }
 }

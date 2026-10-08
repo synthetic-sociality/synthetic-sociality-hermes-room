@@ -94,7 +94,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.84"
+CONNECTOR_VERSION = "1.0.85"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -590,9 +590,17 @@ def _room_turn_tool_selection() -> set[str] | None:
             disabled = parse_config_string_list(raw) or None
         except ImportError:  # an older core passes the configured list as it is
             disabled = raw or None
-        definitions = model_tools.get_tool_definitions(
-            enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True,
-        )
+        try:
+            # P7d-6: the uncollapsed catalog; a tool the host defers behind its
+            # tool search is still offered (the host executes a call to it).
+            definitions = model_tools.get_tool_definitions(
+                enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True,
+                skip_tool_search_assembly=True,
+            )
+        except TypeError:  # an older core without tool search
+            definitions = model_tools.get_tool_definitions(
+                enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True,
+            )
         names = {
             str(((item or {}).get("function") or {}).get("name") or (item or {}).get("name") or "")
             for item in definitions or []

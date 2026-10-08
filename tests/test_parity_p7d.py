@@ -205,7 +205,7 @@ class ParityP7dTests(unittest.TestCase):
 
     def test_p7d_00_cases_and_constants_are_pinned(self):
         cases = CONFORMANCE["parityP7dCases"]
-        self.assertEqual(len(cases), 28)
+        self.assertEqual(len(cases), 29)
         for name, method in cases.items():
             self.assertTrue(name.startswith("P7d-"), name)
             self.assertTrue(hasattr(self, method), method)
@@ -1216,6 +1216,62 @@ class ParityP7dTests(unittest.TestCase):
                     self.assertIn(PROOF_TEXT.strip(), discussion.turn(run_session="S2"))
                 self.assertNotIn(PROOF_TEXT[:200], discussion.turn(run_session="S2"))
                 self.assertEqual(discussion.memory, {"epoch_id": "epoch-2", "host_session": "S2", "given": ["brief/v1"]})
+
+    def test_p7d_29_a_document_tool_deferred_behind_the_hosts_tool_search_is_available(self):
+        # Canary 2026-10-08: core 7cadfaa66 defers plugin tools behind its Tool
+        # Search bridge; the collapsed list names only the bridge tools.
+        bridge = ["tool_search", "tool_describe", "tool_call"]
+        catalog = ["terminal", "web_extract", TOOL, "synthetic_sociality_room_history"]
+        calls = []
+
+        def current_core(enabled_toolsets=None, disabled_toolsets=None, quiet_mode=False,
+                         skip_tool_search_assembly=False):
+            calls.append(skip_tool_search_assembly)
+            names = catalog if skip_tool_search_assembly else ["terminal", "web_extract", *bridge]
+            return [{"function": {"name": name}} for name in names]
+
+        def older_core(enabled_toolsets=None, disabled_toolsets=None, quiet_mode=False):
+            calls.append(None)
+            return [{"function": {"name": name}} for name in older_names]
+
+        def resolve(definitions):
+            run = types.ModuleType("gateway.run")
+            run._load_gateway_config = lambda: {"platform_toolsets": {adapter.NAME: ["synthetic_sociality_room"]}}
+            tools_config = types.ModuleType("hermes_cli.tools_config")
+            tools_config._get_platform_tools = lambda config, platform: set(config["platform_toolsets"][platform])
+            core = types.ModuleType("model_tools")
+            core.get_tool_definitions = definitions
+            hermes_cli = sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli")
+            with mock.patch.dict(sys.modules, {"gateway.run": run, "hermes_cli": hermes_cli,
+                                               "hermes_cli.tools_config": tools_config, "model_tools": core}):
+                instance = object.__new__(adapter.SyntheticSocialityAdapter)
+                instance._tool_selection = adapter._room_turn_tool_selection()
+                return instance
+
+        instance = resolve(current_core)
+        self.assertEqual(calls, [True])
+        self.assertEqual(instance._tool_selection, set(catalog))
+        self.assertEqual(instance._document_tool_state(), "available")
+        # Web reading keeps its value: core tools are never deferred.
+        self.assertEqual(sorted(name for name in local_status.WEB_READ_TOOL_NAMES if name in instance._tool_selection),
+                         ["web_extract"])
+        # Available: a document over 24,000 characters goes by reference, naming the tool.
+        room = Room({"long": record("long", {"v1": ("ready", LARGE_TEXT)})}, documents_list=[entry("long")])
+        discussion = Discussion(self, room, selection=instance._tool_selection)
+        for _turn in range(2):
+            text = discussion.turn()
+            self.assertEqual(document_block(text), "\n\n".join([
+                documents.DOCUMENT_CONTEXT_HEADER, reference("long.md", "long", "v1", len(LARGE_TEXT), given=False),
+                FOOTER]))
+            self.assertNotIn("Content (cut:", text)
+        # An older core without the parameter: the call as before, with its answer.
+        for older_names, expected in ((catalog, "available"), (["terminal"], "unavailable")):
+            with self.subTest(older_core=expected):
+                calls.clear()
+                instance = resolve(older_core)
+                self.assertEqual(calls, [None])
+                self.assertEqual(instance._tool_selection, set(older_names))
+                self.assertEqual(instance._document_tool_state(), expected)
 
 
 if __name__ == "__main__":
