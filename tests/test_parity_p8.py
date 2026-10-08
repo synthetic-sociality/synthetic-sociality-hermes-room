@@ -566,6 +566,8 @@ class P8IdleCadenceTests(unittest.TestCase):
                 instance = idle_instance(room, running, real_state=True)
                 instance._state_file = path
                 await start(instance, running)
+                # A watch removes itself from ``_tasks`` when it ends: keep the tasks.
+                watches = dict(instance._tasks)
                 await clock.run_until(START + 600)
                 observed["idle"] = ([at for at in reads if at >= START + 120], [at for at in writes if at >= START + 120])
                 # Another process (the CLI: hermes room disable) changes the file.
@@ -580,8 +582,9 @@ class P8IdleCadenceTests(unittest.TestCase):
                 writes.clear()
                 await clock.run_until(START + 600 + 25)
                 observed["after"] = (list(reads), list(writes))
-                observed["s1_done"] = instance._tasks["s1"].done() and "s1" not in instance._heartbeat_tasks
-                observed["s2_running"] = not instance._tasks["s2"].done()
+                observed["s1_done"] = (watches["s1"].done() and "s1" not in instance._tasks
+                                       and "s1" not in instance._heartbeat_tasks)
+                observed["s2_running"] = not watches["s2"].done() and instance._tasks.get("s2") is watches["s2"]
                 await stop(instance)
 
             with simulated(clock), mock.patch.dict(os.environ, {"HERMES_HOME": scratch}), \

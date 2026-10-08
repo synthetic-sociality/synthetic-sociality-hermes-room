@@ -7174,12 +7174,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         def merge(latest: PluginState) -> bool:
             existing = latest.binding(binding.room_id)
             if existing is None:
-                return False
+                # Contract P8-6: nothing of this binding is merged, so the
+                # file is not rewritten.
+                raise StateUnchanged(False)
             same_generation = self._same_generation(existing, binding)
             if not same_generation or not existing.enabled or existing.revoked or existing.credential_rotation:
                 binding.enabled = existing.enabled
                 binding.revoked = existing.revoked
-                return False
+                raise StateUnchanged(False)
             before = asdict(existing)
             merged = self._merge_binding(existing, binding)
             if merged and asdict(existing) == before:
@@ -7189,7 +7191,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         try:
             return update(merge)
         except StateUnchanged as unchanged:
-            if unchanged.identity is not None:
+            # Only an accepted, unchanged merge is remembered; a refused one
+            # (the binding is gone, replaced, stopped or rotating) is asked
+            # again at the next persist.
+            if unchanged.result and unchanged.identity is not None:
                 persisted[binding.room_id] = (str(target), _binding_fingerprint(binding), unchanged.identity)
             return bool(unchanged.result)
 

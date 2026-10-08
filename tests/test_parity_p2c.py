@@ -682,11 +682,24 @@ class P2cTests(unittest.TestCase):
         instance._persist_binding = lambda _binding: True
         instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
 
+        clock = [1000.0]
+
         async def run():
+            # The stored session id is never heartbeated unconfirmed: the first
+            # contact registers, whatever was stored.
             await instance._ensure_connector(binding)
+            self.assertEqual(calls, [("register", "Mac-mini")])
+            # Contract P8-1: a later contact adds no heartbeat while the Room
+            # accepted this session in this process within the interval ...
+            await instance._ensure_connector(binding)
+            self.assertEqual(calls, [("register", "Mac-mini")])
+            # ... and heartbeats the session this process registered once none
+            # was accepted for the interval (10 s when none is named) and 5 s.
+            clock[0] += 15.0
             await instance._ensure_connector(binding)
 
-        asyncio.run(run())
+        with mock.patch.object(adapter, "_clock", lambda: clock[0]):
+            asyncio.run(run())
         self.assertEqual(calls, [("register", "Mac-mini"), ("heartbeat", "session-resumed")])
         self.assertNotIn("hostLabel", adapter.RoomBinding.__dataclass_fields__)
 
