@@ -2124,6 +2124,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         cycle_attempt: dict[str, Any] | None,
         attempt_action: str = "pass",
         terminal_reason: str = "model_skip",
+        contribution_type: str = "claim",
     ) -> dict[str, Any]:
         """Durably freeze model output and all stable delivery inputs."""
         intent = binding.delivery_intents.setdefault(source_id, {})
@@ -2177,7 +2178,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             "body": str(body or ""),
             "responds_to": responds_to,
             "recipient_membership_ids": recipients,
-            "contribution_type": "question" if recipients else "claim",
+            "contribution_type": (persisted_post.get("contribution_type", "question" if recipients else "claim")
+                                  if isinstance(persisted_post, dict) else contribution_type),
             "coordination_mode": coordination_mode,
             "observed_seq": int(observed_seq),
             "observed_epoch_id": observed_epoch_id,
@@ -2445,6 +2447,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
             body = None
         else:
+            try:
+                contribution_type = extract_contribution_type(content)
+            except ValueError:
+                return SendResult(success=False, error="unsupported Room contributionType")
             body = extract_visible_body(content)
         cycle_attempt = getattr(self, "_cycle_attempts", {}).get(source_id)
         responds_to_id = getattr(self, "_cycle_response_sources", {}).get(source_id, source_id)
@@ -2512,6 +2518,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             selected = self._select_delivery_intent(
                 binding, source_id, body, responds_to_id, open_recipients,
                 coordination_mode, observed, observed_epoch, cycle_attempt,
+                contribution_type=contribution_type if body is not None else "claim",
                 attempt_action=(
                     operational_outcome["attempt_action"] if typed_operational_outcome
                     else ("fail" if gateway_operational_error else "pass")
@@ -3189,7 +3196,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "addresses": addresses,
                 "responds_to": str(cycle_payload.get("responds_to") or source_id),
                 "recipient_membership_ids": recipients,
-                "contribution_type": "question" if recipients else "claim",
+                "contribution_type": selected.get("contribution_type", "question" if recipients else "claim") if selected else "claim",
                 "idempotency_key": str((selected or {}).get("message_idempotency_key") or stable_key(
                     "message", source_id, room_id=binding.room_id, membership_id=binding.membership_id,
                 )),
@@ -3245,6 +3252,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             responds_to_id=str(cycle_payload.get("responds_to") or source_id),
                             standalone=bool(cycle_payload.get("standalone")),
                             addresses=addresses,
+                            contribution_type=intent["post"].get("contribution_type", "question" if cycle_payload.get("recipients") else "claim"),
                         )
                     return _with_message_payload_dialect(
                         _with_logical_contribution_id(
@@ -3253,6 +3261,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     ).post_message(
                         chat_id, turn_id, observed, source_id, body, observed_epoch,
                         addresses=addresses,
+                        contribution_type=intent["post"].get("contribution_type", "question" if cycle_payload.get("recipients") else "claim"),
                     )
                 event = await self._call(
                     binding,
@@ -7588,6 +7597,23 @@ def _runtime_capability_context(
     )
 
 
+def extract_contribution_type(content: str) -> str:
+    value = (content or "").strip()
+    fenced = _FENCE.match(value)
+    candidate = fenced.group(1).strip() if fenced else value
+    for encoded in (candidate, _restore_escaped_json_layout(candidate)):
+        try:
+            envelope, offset = _ROOM_JSON_DECODER.raw_decode(encoded)
+            if not encoded[offset:].strip() and isinstance(envelope, dict) and envelope.get("action") == "contribute":
+                value = envelope.get("contributionType", "claim")
+                if value not in ("claim", "question", "response"):
+                    raise ValueError("unsupported Room contributionType")
+                return value
+        except (json.JSONDecodeError, _DuplicateJSONKey):
+            pass
+    return "claim"
+
+
 def extract_visible_body(content: str) -> str | None:
     """Return only user-facing prose from plain or fenced structured output."""
     value = (content or "").strip()
@@ -7616,7 +7642,9 @@ def extract_visible_body(content: str) -> str | None:
                 if not isinstance(action, str):
                     return None
                 if action == "contribute":
-                    if set(envelope) != {"action", "body"}:
+                    if set(envelope) not in ({"action", "body"}, {"action", "body", "contributionType"}):
+                        return None
+                    if envelope.get("contributionType", "claim") not in ("claim", "question", "response"):
                         return None
                     body = envelope.get("body")
                     return body.strip() if isinstance(body, str) and body.strip() else None

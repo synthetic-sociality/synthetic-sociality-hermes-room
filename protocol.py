@@ -673,7 +673,10 @@ class RoomProtocol:
         logical_contribution_id: str = "",
         payload_dialect: str = "",
         addresses: str = "",
+        contribution_type: str = "claim",
     ) -> dict[str, Any]:
+        if contribution_type not in ("claim", "question", "response"):
+            raise ValueError("unsupported Room contributionType")
         payload_dialect = payload_dialect or self._message_payload_dialect_override
         if payload_dialect not in MESSAGE_PAYLOAD_DIALECTS:
             raise ValueError(f"unsupported Room message payload dialect: {payload_dialect}")
@@ -684,7 +687,7 @@ class RoomProtocol:
             "observedEpochId": observed_epoch_id,
             "idempotencyKey": self._idempotency_key(idempotency_key or stable_key("message", source_event_id)),
             "respondsTo": [] if standalone else [responds_to_id or source_event_id],
-            "contributionType": "question" if recipient_membership_ids else "claim",
+            "contributionType": contribution_type,
             "body": body,
         }
         if addresses:

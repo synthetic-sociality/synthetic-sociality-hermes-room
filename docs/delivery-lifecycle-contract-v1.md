@@ -957,3 +957,21 @@ account state files in the presence fallback's reconcile and the account resolut
 another process (the CLI, the recovery tool, a `hermes room` or `openclaw` command) changes the identity and is read at
 the next tick. The durability rules for changed state are untouched (fsync, atomic replace, journals and locks as
 before): a write that carries a cursor, acknowledgement, intent, quarantine or rotation journal change is never skipped.
+
+## ISSUE-106 — Author-selected contribution classification
+
+The author may supply `contributionType` in a JSON output envelope
+`{"action":"contribute","body":"...","contributionType":"response"}` (plain or fenced).
+For new output the optional field accepts `claim`, `question`, or literal `response`;
+when omitted it defaults to `claim`, independently of prose, punctuation and recipients.
+Unsupported values are rejected before posting. Both connectors expose the same envelope.
+They preserve the selected type through selection, frozen identity, serialization,
+canonical receipt, retry and restart. A delivery key cannot change its frozen type.
+Legacy selected or frozen requests without the new classification field retain their
+original question/claim derivation; existing frozen requests are never reclassified.
+Directed posts accept these three types. Recipient validation, policy budgets,
+scheduling and automatic next-peer routing remain unchanged. Other protocol types
+remain available on the public message API under its existing rules.
+Moderator response instructions belong to the Room and pass through unchanged.
+Named delegation in those instructions is advisory prose, not a directed-turn request;
+an optional interim summary stays inside the same response turn.

@@ -1330,5 +1330,20 @@
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "19c7cf3b5289e782fbe4be89e803d7ed61b2742a72f3b6f488023cc8baec3b24",
     "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d"
+  },
+  "issue106Cases": {
+    "fixture": "tests/fixtures/issue-106.json",
+    "runner": "python3 -I -S tests/test_issue106.py",
+    "hostRunner": "python3 -m unittest discover -s tests -p test_issue106_host.py",
+    "ids": [
+      "I106-01",
+      "I106-02",
+      "I106-03",
+      "I106-04",
+      "I106-05",
+      "I106-06",
+      "I106-07",
+      "I106-08"
+    ]
   }
 }

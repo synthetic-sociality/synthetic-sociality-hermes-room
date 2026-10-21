@@ -1,0 +1,39 @@
+{
+  "cases": [
+    {
+      "id": "I106-01",
+      "text": "Same text?",
+      "type": "claim"
+    },
+    {
+      "id": "I106-02",
+      "text": "Same text?",
+      "type": "question"
+    },
+    {
+      "id": "I106-03",
+      "text": "Same text?",
+      "type": "response"
+    },
+    {
+      "id": "I106-04",
+      "text": "Same text?",
+      "type": null
+    }
+  ],
+  "rejected": [
+    "answer",
+    "evidence",
+    "",
+    null,
+    7,
+    {},
+    []
+  ],
+  "invariants": {
+    "I106-05": "selected type persists through ambiguous retry, disk reload and canonical receipt",
+    "I106-06": "legacy frozen directed question replays unchanged",
+    "I106-07": "unsupported types never post",
+    "I106-08": "moderator multi-question instruction passes through unchanged"
+  }
+}

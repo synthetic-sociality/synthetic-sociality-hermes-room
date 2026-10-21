@@ -40,13 +40,9 @@ SENTENCE = CONFORMANCE["parityP7cNoStatusSentence"]
 # A bound against a hang only: every wait below ends on an event or a condition,
 # none of them on the clock (P7c-10, P7c-16, N10).
 HANG_GUARD = 120.0
-RESPONSE_INSTRUCTION = (
-    "The moderator has intervened; the message this turn answers is the moderator's. Respond to it first: "
-    "acknowledge it briefly, then answer it. If the moderator's point is unclear to you, ask one short clarifying "
-    "question instead of guessing. The discussion then continues in the direction the moderator set."
-)
+RESPONSE_INSTRUCTION = "The moderator has intervened; the message this turn answers is the moderator's. Respond to it first: acknowledge it briefly, then address every sub-question by answering it or explicitly leaving it to another participant by name. If the moderator's point is unclear to you, ask one short clarifying question instead of guessing. You may include a short interim summary within this turn before the round continues. Naming another participant is advisory prose only and does not schedule a directed turn. The discussion then continues in the direction the moderator set."
 INTERJECTION = {"id": "m-50", "seq": 50, "type": "message.posted", "actorRole": "human_owner", "actorId": "owner-1",
-                "payload": {"body": "Please also consider the family's view."}}
+                "payload": {"body": "What is the family's view? What should the doctor do next?"}}
 ADDRESSED = {**INTERJECTION, "payload": {**INTERJECTION["payload"], "resolvedRecipientMembershipIds": ["member-1"]}}
 OWN = {"id": "m-44", "seq": 44, "type": "message.posted", "actorRole": "participant_agent", "actorId": "member-1",
        "payload": {"body": "My own earlier point.", "respondsTo": ["m-43"]}}
@@ -202,7 +198,7 @@ class P7cTests(unittest.TestCase):
                                            context=(START, HUMAN, PEER, message)).text
         for label, prompt in prompts.items():
             with self.subTest(label):
-                self.assertIn("\n\n#50 Owner: Please also consider the family's view.\n", prompt)
+                self.assertIn("\n\n#50 Owner: What is the family's view? What should the doctor do next?\n", prompt)
                 self.assertIn(f"[Room phase instruction — server-provided, verbatim]\n{RESPONSE_INSTRUCTION}\n"
                               "[/Room phase instruction]", prompt)
                 self.assertIn("[Autonomous discussion phase response, round 2,", prompt)
@@ -216,7 +212,7 @@ class P7cTests(unittest.TestCase):
         attempt["cycle"]["totalTurns"] = 3
         prompt = build_message(attempt_ready(53, 2, source="m-50"), attempt=attempt,
                                context=(START, HUMAN, PEER, INTERJECTION)).text
-        self.assertIn("\n\n#50 Owner: Please also consider the family's view.\n", prompt)
+        self.assertIn("\n\n#50 Owner: What is the family's view? What should the doctor do next?\n", prompt)
         self.assertIn("[Autonomous discussion phase follow_up, round 2, turn 4/6]", prompt)
         self.assertNotIn("[Room phase instruction", prompt)
 

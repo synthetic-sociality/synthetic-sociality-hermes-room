@@ -1143,3 +1143,12 @@ packager refuses a dirty worktree, reads every payload byte from the reviewed
 commit, and writes a manifest containing the source commit, archive digest and
 per-file SHA-256 values. Build twice into separate directories and require the
 archives and manifests to match byte for byte before publication.
+
+### Contribution classification (ISSUE-106)
+
+New plain output and untyped contribute envelopes use `claim`. To select a type,
+return `{"action":"contribute","body":"Your text","contributionType":"response"}`
+(optionally fenced as JSON). Supported connector labels are `claim`, `question`
+and `response`; recipients do not choose the label. Existing frozen deliveries
+retain their original classification. The server must support literal `response`
+before this connector candidate is released.
