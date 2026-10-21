@@ -34,6 +34,209 @@
     "I106-05": "selected type persists through ambiguous retry, disk reload and canonical receipt",
     "I106-06": "legacy frozen directed question replays unchanged",
     "I106-07": "unsupported types never post",
-    "I106-08": "moderator multi-question instruction passes through unchanged"
-  }
+    "I106-08": "moderator multi-question instruction passes through unchanged",
+    "I106-09": "identical procedural sentence in model prompts",
+    "I106-10": "28 model-output boundaries have identical body, type and pass/fail outcomes",
+    "I106-11": "external posts are literal claim; frozen legacy directed external posts remain question"
+  },
+  "formatSentence": "Contribution format: plain natural text without an envelope is posted as claim; to mark a type, return {\"action\":\"contribute\",\"body\":\"…\",\"contributionType\":\"claim|question|response\"}.",
+  "matrix": [
+    {
+      "input": 1,
+      "raw": "Same text?",
+      "outcome": "post",
+      "body": "Same text?",
+      "type": "claim"
+    },
+    {
+      "input": 2,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\",\"contributionType\":\"claim\"}",
+      "outcome": "post",
+      "body": "x",
+      "type": "claim"
+    },
+    {
+      "input": 3,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\",\"contributionType\":\"question\"}",
+      "outcome": "post",
+      "body": "x",
+      "type": "question"
+    },
+    {
+      "input": 4,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\",\"contributionType\":\"response\"}",
+      "outcome": "post",
+      "body": "x",
+      "type": "response"
+    },
+    {
+      "input": 5,
+      "raw": "```json\n{\"action\":\"contribute\",\"body\":\"x\"}\n```",
+      "outcome": "post",
+      "body": "x",
+      "type": "claim"
+    },
+    {
+      "input": 6,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\",\"recipientDisplayNames\":[\"Peer\"]}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 7,
+      "raw": "{\"action\":\"contribute\",\"body\":\"\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 8,
+      "raw": "{\"action\":\"contribute\",\"body\":\"  \"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 9,
+      "raw": "{\"action\":\"contribute\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 10,
+      "raw": "{\"action\":\"contribute\",\"body\":7}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 11,
+      "raw": "{\"action\":\"contribute\",\"body\":null}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 12,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\",\"contributionType\":\"claim\",\"contributionType\":\"response\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 13,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\",\"body\":\"y\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 14,
+      "raw": "{\"action\": \"contribute\", \"body\": \"x\", \"contributionType\": \"evidence\"}",
+      "outcome": "fail",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 15,
+      "raw": "{\"action\": \"contribute\", \"body\": \"x\", \"contributionType\": \"\"}",
+      "outcome": "fail",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 16,
+      "raw": "{\"action\": \"contribute\", \"body\": \"x\", \"contributionType\": null}",
+      "outcome": "fail",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 17,
+      "raw": "{\"action\": \"contribute\", \"body\": \"x\", \"contributionType\": 7}",
+      "outcome": "fail",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 18,
+      "raw": "{\"action\": \"contribute\", \"body\": \"x\", \"contributionType\": {}}",
+      "outcome": "fail",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 19,
+      "raw": "{\"action\": \"contribute\", \"body\": \"x\", \"contributionType\": []}",
+      "outcome": "fail",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 20,
+      "raw": "{\"action\":\"skip\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 21,
+      "raw": "{\"action\":\"other\",\"body\":\"x\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 22,
+      "raw": "{\"body\":\"x\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 23,
+      "raw": "{\\n\"action\":\"contribute\",\\n\"body\":\"x\",\\n\"contributionType\":\"response\"\\n}",
+      "outcome": "post",
+      "body": "x",
+      "type": "response"
+    },
+    {
+      "input": 24,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\"",
+      "outcome": "post",
+      "body": "x",
+      "type": "claim"
+    },
+    {
+      "input": 25,
+      "raw": "prefix {\"action\":\"contribute\",\"body\":\"x\"}",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 26,
+      "raw": "{\"action\":\"contribute\",\"body\":\"x\"} trailing",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 27,
+      "raw": "<action>skip</action>",
+      "outcome": "pass",
+      "body": null,
+      "type": null
+    },
+    {
+      "input": 28,
+      "raw": "{\"note\":\"ordinary JSON prose\"}",
+      "outcome": "post",
+      "body": "{\"note\":\"ordinary JSON prose\"}",
+      "type": "claim"
+    }
+  ],
+  "externalText": "{\"action\":\"contribute\",\"body\":\"x\",\"contributionType\":\"response\"}"
 }

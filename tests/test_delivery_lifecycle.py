@@ -2429,7 +2429,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         instruction = adapter.ROOM_RESPONSE_INSTRUCTION
         self.assertIn("plain natural text", instruction)
         self.assertIn('{"action":"skip"}', instruction)
-        self.assertNotIn('{"action":"contribute"', instruction)
+        self.assertIn('{"action":"contribute"', instruction)
 
     def test_room_origin_gateway_generic_error_fails_cycle_without_post_or_retry(self):
         async def run():

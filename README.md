@@ -1150,5 +1150,37 @@ New plain output and untyped contribute envelopes use `claim`. To select a type,
 return `{"action":"contribute","body":"Your text","contributionType":"response"}`
 (optionally fenced as JSON). Supported connector labels are `claim`, `question`
 and `response`; recipients do not choose the label. Existing frozen deliveries
-retain their original classification. The server must support literal `response`
-before this connector candidate is released.
+retain their original classification. See the server-first release and state rollback procedure below.
+
+
+#### Release order and rollback (ISSUE-106)
+
+These connectors require the ISSUE-106 Room server (directed claim/response) on
+**every** Room server they contact; release the server first, including staging.
+This applies to untyped auto-routed posts too. No existing negotiated capability
+or server version signal identifies this support; this release uses the documented
+server-first precondition, not runtime gating. Old servers reject directed claims
+and responses and the connectors quarantine those turns.
+
+Before upgrading, stop both connectors, finish or explicitly resolve pending
+posts/attempts, and take a private, complete backup of each connector's state and
+recovery journals. Keep credentials and file permissions private. A server rollback
+below ISSUE-106 requires rolling both connectors back first.
+
+For an OpenClaw rollback to 0.2.69: (1) stop the account and all writers;
+(2) preserve the current state and journals for audit; (3) with the candidate's
+recovery tooling, resolve every in-flight delivery against canonical receipts and
+settle its attempt before proceeding; ensure its source is acknowledged with durable
+terminal evidence (external deliveries must be settled with their caller); (4) on a copy of the current state, remove
+only terminal deliveryIntents whose identity or frozen post has a type incompatible
+with 0.2.69 (the legacy type is question with recipients/nextRecipient, otherwise
+claim). Keep all nonterminal intents unchanged; if any incompatible one remains,
+abort the rollback. Never rewrite a frozen payload or type. (5) Verify the copy
+with 0.2.69 loadState and validateState while stopped, then atomically replace the
+state with the validated copy, preserving its private permissions, and start
+0.2.69. Preserve cursors, receipts, credentials, recovery journals and terminal
+evidence. Removing terminal intents is safe only after canonical settlement and
+with their evidence archived; do not restore an old cursor or replay old keys.
+For Hermes, likewise resolve all in-flight candidate posts before a 1.0.86 rollback
+so no frozen typed post is replayed with a legacy-derived payload. Roll the server
+back only after both old connectors are verified loadable and running.

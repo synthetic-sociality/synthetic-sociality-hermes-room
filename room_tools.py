@@ -491,6 +491,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
                 "body": body,
                 "coordinationMode": coordination_mode,
                 "recipientMembershipIds": recipient_ids,
+                "contributionType": "claim",
                 "messagePayloadDialect": payload_dialect,
                 "turnObserved": int(state.get("headSeq") or 0),
             }, create=True)
@@ -504,6 +505,8 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
         if action.get("roomId") != binding.room_id or action.get("body") != body:
             raise ProtocolError("external action origin was reused with different content")
         recipient_ids = list(action.get("recipientMembershipIds") or [])
+        # Missing classification marks a frozen pre-ISSUE-106 action.
+        contribution_type = action.get("contributionType", "question" if recipient_ids else "claim")
         action_mode = str(action.get("coordinationMode") or "coordinated")
         if action_mode != coordination_mode and not action.get("canonicalEventId"):
             raise ProtocolError(
@@ -570,6 +573,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
                     ).post_message(
                         binding.room_id, "", observed, source_id, body,
                         epoch_id, recipient_membership_ids=recipient_ids, standalone=True,
+                        contribution_type=contribution_type,
                     ))
                     break
                 except ProtocolError as error:
@@ -630,6 +634,7 @@ def room_post(args: dict[str, Any], **metadata: Any) -> str:
             ).post_message(
                 binding.room_id, str(action.get("turnId") or ""), observed, source_id, body,
                 epoch_id, recipient_membership_ids=recipient_ids, standalone=True,
+                contribution_type=contribution_type,
             )
 
         try:

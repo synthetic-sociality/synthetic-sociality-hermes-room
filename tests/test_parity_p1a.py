@@ -294,9 +294,10 @@ class ParityP1aTests(unittest.TestCase):
 
     def test_p1a_04_pass_envelope_documented_technically_without_usage_advice(self):
         instruction = adapter.ROOM_RESPONSE_INSTRUCTION
+        self.assertIn('Contribution format: plain natural text without an envelope is posted as claim; to mark a type, return {"action":"contribute","body":"…","contributionType":"claim|question|response"}.', instruction)
         self.assertEqual(instruction, (
-            'Reply format: to pass, return exactly {"action":"skip"}. Any other reply is posted '
-            "to the Room as your contribution, as plain natural text, not wrapped in JSON, XML or a code fence."
+            'Reply format: to pass, return exactly {"action":"skip"}. '
+            'Contribution format: plain natural text without an envelope is posted as claim; to mark a type, return {"action":"contribute","body":"…","contributionType":"claim|question|response"}.'
         ))
         for advice in ("if ", "when", "appropriate", "otherwise", "only", "should", "nothing to add"):
             self.assertNotIn(advice, instruction.lower())

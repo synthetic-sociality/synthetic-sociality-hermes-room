@@ -123,10 +123,12 @@ phase instructions (`phaseInstruction`). The connector passes this text verbatim
 rewrite, or summarise it.
 
 P1a-3 Connector-authored text is limited to procedural facts: the Room and discussion identity, the phase name, the agent's
-own identity, the remaining turn or byte budget as numbers, the reply-marker syntax, and how to pass technically
+own identity, the remaining turn or byte budget as numbers, the reply-marker syntax, contribution-type envelope syntax, and how to pass technically
 (the envelope), without any suggestion of when to use it. When the Room policy sets a per-response word limit
 (maxContributionWords, owner decision 2026-10-01: applies in open and coordinated modes), the connector states it as a
-number on every turn, taken from the cycle budget or the policy.
+number on every turn, taken from the cycle budget or the policy. The shared procedural format sentence is:
+
+Contribution format: plain natural text without an envelope is posted as claim; to mark a type, return {"action":"contribute","body":"…","contributionType":"claim|question|response"}.
 
 P1a-4 When the Room provides no phase instruction, the connector adds none; it states only the procedural facts.
 
@@ -975,3 +977,44 @@ remain available on the public message API under its existing rules.
 Moderator response instructions belong to the Room and pass through unchanged.
 Named delegation in those instructions is advisory prose, not a directed-turn request;
 an optional interim summary stays inside the same response turn.
+
+
+Malformed contribute envelopes (extra or duplicate keys, or a missing, non-string
+or blank body) post nothing and settle the attempt as pass. Decoded unsupported type
+values fail without a post, before visible-body selection. The shared I106-10
+matrix pins the existing narrow layout recovery and rejection rules.
+External send/tool posts are literal text, never parsed as model envelopes; new
+external posts use claim. Legacy frozen external posts retain their original type.
+
+
+#### Release order and rollback (ISSUE-106)
+
+These connectors require the ISSUE-106 Room server (directed claim/response) on
+**every** Room server they contact; release the server first, including staging.
+This applies to untyped auto-routed posts too. No existing negotiated capability
+or server version signal identifies this support; this release uses the documented
+server-first precondition, not runtime gating. Old servers reject directed claims
+and responses and the connectors quarantine those turns.
+
+Before upgrading, stop both connectors, finish or explicitly resolve pending
+posts/attempts, and take a private, complete backup of each connector's state and
+recovery journals. Keep credentials and file permissions private. A server rollback
+below ISSUE-106 requires rolling both connectors back first.
+
+For an OpenClaw rollback to 0.2.69: (1) stop the account and all writers;
+(2) preserve the current state and journals for audit; (3) with the candidate's
+recovery tooling, resolve every in-flight delivery against canonical receipts and
+settle its attempt before proceeding; ensure its source is acknowledged with durable
+terminal evidence (external deliveries must be settled with their caller); (4) on a copy of the current state, remove
+only terminal deliveryIntents whose identity or frozen post has a type incompatible
+with 0.2.69 (the legacy type is question with recipients/nextRecipient, otherwise
+claim). Keep all nonterminal intents unchanged; if any incompatible one remains,
+abort the rollback. Never rewrite a frozen payload or type. (5) Verify the copy
+with 0.2.69 loadState and validateState while stopped, then atomically replace the
+state with the validated copy, preserving its private permissions, and start
+0.2.69. Preserve cursors, receipts, credentials, recovery journals and terminal
+evidence. Removing terminal intents is safe only after canonical settlement and
+with their evidence archived; do not restore an old cursor or replay old keys.
+For Hermes, likewise resolve all in-flight candidate posts before a 1.0.86 rollback
+so no frozen typed post is replayed with a legacy-derived payload. Roll the server
+back only after both old connectors are verified loadable and running.

@@ -306,8 +306,8 @@ ROOM_HISTORY_INSTRUCTION = (
 # only. The pass envelope is documented technically, without advice on when to
 # use it; how to deliberate is the model's and the Room's decision.
 ROOM_RESPONSE_INSTRUCTION = (
-    'Reply format: to pass, return exactly {"action":"skip"}. Any other reply is posted '
-    "to the Room as your contribution, as plain natural text, not wrapped in JSON, XML or a code fence."
+    'Reply format: to pass, return exactly {"action":"skip"}. '
+    'Contribution format: plain natural text without an envelope is posted as claim; to mark a type, return {"action":"contribute","body":"…","contributionType":"claim|question|response"}.'
 )
 ROOM_IDENTITY_FACT = "Your reply is posted to the Room under your own Room membership."
 # Contract P7c-3: where the word bound comes from (same in OpenClaw).

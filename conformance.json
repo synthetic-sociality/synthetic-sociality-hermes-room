@@ -1343,7 +1343,11 @@
       "I106-05",
       "I106-06",
       "I106-07",
-      "I106-08"
-    ]
+      "I106-08",
+      "I106-09",
+      "I106-10",
+      "I106-11"
+    ],
+    "formatSentence": "Contribution format: plain natural text without an envelope is posted as claim; to mark a type, return {\"action\":\"contribute\",\"body\":\"…\",\"contributionType\":\"claim|question|response\"}."
   }
 }

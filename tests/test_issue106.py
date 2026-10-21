@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 import re
+import runpy
 import sys
 import time
 import types
@@ -133,5 +134,58 @@ class Issue106Tests(unittest.TestCase):
         self.assertEqual(ns['_cycle_phase_instruction']({}, {}, {'phase':'response','phaseInstruction':instruction}), ('response',instruction))
         for text in ['every sub-question','by name','may include a short interim summary','one short clarifying question']:
             self.assertIn(text,instruction)
+
+
+    def test_i106_09_procedural_sentence(self):
+        instruction = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='ROOM_RESPONSE_INSTRUCTION' for t in n.targets))
+        self.assertIn(FIXTURE['formatSentence'], instruction)
+        self.assertEqual(json.loads((ROOT/'conformance.json').read_text())['issue106Cases']['formatSentence'],FIXTURE['formatSentence'])
+        self.assertIn('ROOM_RESPONSE_INSTRUCTION', (ROOT/'adapter.py').read_text().split('def _build',1)[-1])
+
+    def test_i106_10_shared_matrix(self):
+        for item in FIXTURE['matrix']:
+            with self.subTest(input=item['input']):
+                if item['outcome']=='fail':
+                    with self.assertRaises(ValueError): ns['extract_contribution_type'](item['raw'])
+                else:
+                    self.assertEqual(ns['extract_visible_body'](item['raw']),item['body'])
+                    if item['outcome']=='post': self.assertEqual(ns['extract_contribution_type'](item['raw']),item['type'])
+
+    def test_i106_11_external_literal_and_legacy_replay(self):
+        source=ast.parse((ROOT/'room_tools.py').read_text())
+        method=next(n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='room_post')
+        for mode in ['open','coordinated']:
+            for legacy in [False,True]:
+                with self.subTest(mode=mode,legacy=legacy):
+                    body=FIXTURE['externalText']; posts=[]; stored={}
+                    binding=types.SimpleNamespace(room_id='room',membership_id='self',base_url='https://fixture.invalid/api',credential='fixture')
+                    old={'body':body,'roomId':'room','recipientMembershipIds':['peer'],'coordinationMode':mode,'messagePayloadDialect':'v1','postObserved':1,'epochId':'epoch'} if legacy else None
+                    class API:
+                        def room_policy(self,*a): return {'coordinationMode':mode}
+                        def room_state(self,*a): return {'headSeq':1,'activeEpoch':{'id':'epoch'}}
+                        def request_turn(self,*a): return {'turnId':'turn'}
+                        def post_message(self,*a,**kw):
+                            posts.append((a,kw)); return {'id':'canonical','seq':2}
+                    def write(key,value,**kw): stored.update(copy.deepcopy(value)); return value
+                    scope=dict(Any=object, is_room_context=lambda **kw:False,_result=lambda v:v,
+                        _select_room=lambda *a:(binding,{},[]), RoomProtocol=lambda *a:API(),
+                        _origin_id=lambda *a:'source',_read_action=lambda *a:old,
+                        _inline_agent_recipients=lambda *a:['peer'],_read_payload_dialect=lambda *a:'v1',
+                        _write_action=write,_retryable_call=lambda op:op(),_with_message_payload_dialect=lambda api,*a:api,
+                        _with_logical_contribution_id=lambda api,*a:api,stable_key=lambda *a,**kw:'key',
+                        _wait_for_turn=lambda api,binding,turn,*a:turn,_finish_action=lambda *a:None,
+                        ProtocolError=protocol.ProtocolError)
+                    module=ast.Module(body=[ast.ImportFrom(module='__future__',names=[ast.alias(name='annotations')],level=0),method],type_ignores=[])
+                    exec(compile(ast.fix_missing_locations(module),str(ROOT/'room_tools.py'),'exec'),scope)
+                    result=scope['room_post']({'body':body})
+                    self.assertTrue(result['success'],result)
+                    self.assertEqual(posts[0][0][4],body)
+                    self.assertEqual(posts[0][1].get('contribution_type'),'question' if legacy else 'claim')
+                    if not legacy:self.assertEqual(stored['contributionType'],'claim')
+
+    def test_packaging_covers_all_tests_and_fixtures(self):
+        packager=runpy.run_path(str(ROOT/'tools/package-release.py'))
+        shipped={p.relative_to(ROOT).as_posix() for p in (ROOT/'tests').rglob('*') if p.is_file() and p.suffix in {'.py','.json','.txt'} and '__pycache__' not in p.parts}
+        self.assertEqual(sorted(shipped-set(packager['PAYLOAD'])),[])
 
 if __name__ == '__main__': unittest.main()
