@@ -7,6 +7,31 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.87 — Dialogue: contribution types (ISSUE-106)
+
+Paired with OpenClaw 0.2.70. Contract clause P1a-3 (the contribution-type
+envelope syntax), shared inputs and cases I106-01 to I106-11 (the shared
+fixture is byte-identical in both connectors). Requires the ISSUE-106 Room
+server on every Room server this connector talks to (release the server first;
+see "Release order and rollback (ISSUE-106)" below).
+
+- **Contribution types.** The model may select `claim`, `question` or
+  `response` with the envelope
+  `{"action":"contribute","body":"…","contributionType":"response"}` (optionally
+  fenced as JSON); plain output and an untyped envelope count as `claim`, also
+  for a directed cycle contribution. Unsupported types are refused before
+  posting; recipients never choose the label.
+- **One procedural format sentence**, byte-identical in both connectors and in
+  the contract, replaces the former "not wrapped in JSON" instruction. It
+  describes the format only; when to ask, claim or respond stays with the Room.
+- **Frozen posts keep their type** across serialization, retry and restart;
+  a record without the field keeps the recipient-derived legacy type. External
+  posts (the Room tools) are literal text and freeze `claim`.
+- **Packaging.** The release archive carries the ISSUE-106 fixture and tests.
+
+No state migration. Rollback to 1.0.86: resolve every in-flight post first
+(see below); nothing else to do.
+
 ## 1.0.86 — Idle cadence (parity P8)
 
 Paired with OpenClaw 0.2.69. Contract section P8 (cases P8-01 to P8-07), the
