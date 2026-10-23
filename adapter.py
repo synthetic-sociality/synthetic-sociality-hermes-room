@@ -2117,6 +2117,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return dialect
         return "v2" if "logical_contribution_id" in value else "v1"
 
+    @share_file.serialize_selection
     def _select_delivery_intent(
         self,
         binding: RoomBinding,

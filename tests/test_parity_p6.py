@@ -338,7 +338,7 @@ class ParityP5BoundTests(unittest.TestCase):
 
 
 class PluginManifestTests(unittest.TestCase):
-    def test_manifest_equals_1_0_79_except_version(self):
+    def test_manifest_equals_1_0_79_plus_document_and_share_tools(self):
         # The installers (install-hermes-systemd.sh, install-hermes-mac.sh) refuse
         # a release whose plugin.yaml differs from the installed one in anything
         # but the version: line ("STOP: plugin.yaml differs beyond version");
@@ -352,6 +352,7 @@ class PluginManifestTests(unittest.TestCase):
 
         fixture = without_version(ROOT / "tests" / "fixtures" / "plugin-1.0.79.yaml")
         fixture.insert(fixture.index("  - synthetic_sociality_room_post") + 1, "  - synthetic_sociality_room_document")
+        fixture.insert(fixture.index("  - synthetic_sociality_room_document") + 1, "  - synthetic_sociality_room_share_file")
         fixture.insert(fixture.index("  - pre_tool_call") + 1, "  - transform_tool_result")
         self.assertEqual(without_version(ROOT / "plugin.yaml"), fixture)
         self.assertIn(f"version: {adapter.CONNECTOR_VERSION}", (ROOT / "plugin.yaml").read_text().splitlines())

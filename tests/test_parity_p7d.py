@@ -724,6 +724,7 @@ class ParityP7dTests(unittest.TestCase):
         self.assertIn("transform_tool_result", [call.args[0] for call in context.register_hook.call_args_list])
         manifest = (ROOT / "plugin.yaml").read_text()
         self.assertIn(f"  - {TOOL}\n", manifest)
+        self.assertIn("  - synthetic_sociality_room_share_file\n", manifest)
         self.assertIn("  - transform_tool_result\n", manifest)
         without_version = "".join(line for line in manifest.splitlines(keepends=True) if not line.startswith("version:"))
         self.assertEqual(hashlib.sha256(without_version.encode()).hexdigest(), CONFORMANCE["parityP7dHermesManifestSha256"])

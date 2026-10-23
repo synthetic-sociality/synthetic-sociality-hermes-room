@@ -597,6 +597,8 @@ class RoomProtocol:
 
     def create_artifact(self, room_id: str, data: bytes, name: str, mime_type: str, title: str) -> dict[str, Any]:
         """P10 multipart create; caller journals uncertainty, never retries create."""
+        from .share_file import sanitize_title
+        title = sanitize_title(title)
         boundary = "room-" + uuid.uuid4().hex
         parts = []
         for field, value in (("title", title), ("visibility", "room_shared")):

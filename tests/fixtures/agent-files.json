@@ -55,5 +55,39 @@
     "currentVersion": {
       "versionId": "version-fixture"
     }
-  }
+  },
+  "repairCases": [
+    {
+      "name": "P10-R01 case-alias exclusion and root use filesystem identity",
+      "scenario": "case-alias"
+    },
+    {
+      "name": "P10-R02 registered share results frame hostile names as untrusted data",
+      "scenario": "filename-injection"
+    },
+    {
+      "name": "P10-R03 edited title cannot bypass uncertain create after reload",
+      "scenario": "title-quarantine"
+    },
+    {
+      "name": "P10-R04 paused intent persist then turn end creates and stages nothing",
+      "scenario": "turn-end"
+    },
+    {
+      "name": "P10-R05 titles are bounded single-line metadata without host paths",
+      "scenario": "sanitize-title"
+    },
+    {
+      "name": "P10-R06 uncertain intent identifies possible orphan without local paths",
+      "scenario": "orphan-audit"
+    },
+    {
+      "name": "P10-R07 post sealing during paused persist creates and stages nothing",
+      "scenario": "post-seal"
+    },
+    {
+      "name": "P10-R08 late create receipt is never staged after turn closes",
+      "scenario": "late-receipt"
+    }
+  ]
 }
