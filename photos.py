@@ -22,7 +22,9 @@ def source_photos(event: dict, events: list, cycle_source: dict | None = None) -
     entries = []
     for item in [cycle_source, source]:
         if isinstance(item, dict):
-            entries.extend((item.get("payload") or {}).get("attachments") or [])
+            entries.extend({**attachment, "sourceSeq": item.get("seq") or 0}
+                           for attachment in (item.get("payload") or {}).get("attachments") or []
+                           if isinstance(attachment, dict))
     return discussion_documents({"activeTopic": {"documents": entries}}) or []
 
 
@@ -87,7 +89,7 @@ def photo_context(entries: list[dict], given: list[str], membership: str,
                 audience = current.get("allowedMembershipIds") or []
                 if visibility not in ("room_shared", "restricted") or (visibility == "restricted" and membership not in audience):
                     reason = "sharing"
-                elif entry.get("classification") == "restricted" and membership not in (entry.get("allowedMembershipIds") or audience):
+                elif entry.get("classification") == "restricted" and membership not in (entry.get("allowedMembershipIds", audience) or []):
                     reason = "sharing"
                 else:
                     data, content_type = download(aid, vid, mime)

@@ -105,6 +105,18 @@
     {
       "name": "P9-20 aggregate byte cap",
       "scenario": "bytes"
+    },
+    {
+      "name": "P9-21 replacement tokens stay inside untrusted block",
+      "scenario": "replacement"
+    },
+    {
+      "name": "P9-22 P5 fallback keeps newest photo",
+      "scenario": "p5newest"
+    },
+    {
+      "name": "P9-23 explicit empty audience refuses bytes",
+      "scenario": "emptyaudience"
     }
   ]
 }
