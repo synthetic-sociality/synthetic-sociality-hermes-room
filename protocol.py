@@ -16,6 +16,12 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
+@dataclass
+class MultipartBody:
+    data: bytes
+    content_type: str
+
+
 MAX_JSON_RESPONSE_BYTES = 16 << 20
 MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY = "messages.logical_contribution.v1"
 MESSAGE_PAYLOAD_DIALECTS = frozenset({"v1", "v2"})
@@ -253,10 +259,10 @@ class RoomProtocol:
         return result
 
     def _request_once(self, method: str, path: str, payload: Any = None, *, credential: str | None = None) -> Any:
-        body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+        body = payload.data if isinstance(payload, MultipartBody) else None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
         headers = {"Accept": "application/json", "User-Agent": "synthetic-sociality-hermes/1.0"}
         if body is not None:
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = payload.content_type if isinstance(payload, MultipartBody) else "application/json"
         token = self.credential if credential is None else credential
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -589,6 +595,18 @@ class RoomProtocol:
         room = urllib.parse.quote(room_id, safe="")
         return self.request("GET", f"/rooms/{room}/policy")
 
+    def create_artifact(self, room_id: str, data: bytes, name: str, mime_type: str, title: str) -> dict[str, Any]:
+        """P10 multipart create; caller journals uncertainty, never retries create."""
+        boundary = "room-" + uuid.uuid4().hex
+        parts = []
+        for field, value in (("title", title), ("visibility", "room_shared")):
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n'.encode() + value.encode() + b"\r\n")
+        filename = urllib.parse.quote(name, safe="")
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"; filename*=UTF-8\'\'{filename}\r\nContent-Type: {mime_type}\r\n\r\n'.encode() + data + b"\r\n")
+        parts.append(f'--{boundary}--\r\n'.encode())
+        return self.request("POST", f"/rooms/{urllib.parse.quote(room_id, safe='')}/artifacts",
+                            MultipartBody(b"".join(parts), f"multipart/form-data; boundary={boundary}"))
+
     def artifact(self, room_id: str, artifact_id: str) -> dict[str, Any]:
         room = urllib.parse.quote(room_id, safe="")
         artifact = urllib.parse.quote(artifact_id, safe="")
@@ -695,6 +713,7 @@ class RoomProtocol:
         payload_dialect: str = "",
         addresses: str = "",
         contribution_type: str = "claim",
+        attachments: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         if contribution_type not in ("claim", "question", "response"):
             raise ValueError("unsupported Room contributionType")
@@ -711,6 +730,8 @@ class RoomProtocol:
             "contributionType": contribution_type,
             "body": body,
         }
+        if attachments:
+            payload["attachments"] = attachments
         if addresses:
             payload["addresses"] = addresses
         if payload_dialect == "v2":

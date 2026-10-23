@@ -12,6 +12,7 @@ provides_tools:
   - synthetic_sociality_room_history
   - synthetic_sociality_room_post
   - synthetic_sociality_room_document
+  - synthetic_sociality_room_share_file
 provides_hooks:
   - pre_llm_call
   - pre_tool_call

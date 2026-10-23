@@ -1,0 +1,143 @@
+"""P10 shared synthetic cases. File and HTTP I/O stay on offline seams."""
+from __future__ import annotations
+import asyncio
+import copy
+import io
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+from support import load_module, ROOT
+share = load_module('share_file')
+protocol = load_module('protocol')
+documents = load_module('documents')
+fixture = json.loads((ROOT / 'tests/fixtures/agent-files.json').read_text())
+assert json.loads((ROOT / 'conformance.json').read_text())['parityP10Cases'] == fixture['cases']
+
+class ShareCases(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.root = self.base / 'workspace'
+        self.root.mkdir()
+        self.path = self.root / fixture['file']['name']
+        self.path.write_text(fixture['file']['text'])
+        self.records, self.created, self.saved = {}, [], []
+        def create(data, name, mime, title):
+            self.created.append((data, name, mime, title))
+            self.assertEqual(list(self.saved[-1].values())[-1]['state'], 'creating')
+            return copy.deepcopy(fixture['artifact'])
+        self.create = create
+        self.persist = lambda: self.saved.append(copy.deepcopy(self.records)) or True
+        self.turn = share.ShareTurn(self.records, self.root, [self.root / 'private'], self.persist, create)
+
+    def exercise(self, scenario):
+        args = {'path': str(self.path)}
+        if scenario in ('outside','symlink'):
+            outside = self.base / 'other.md'; outside.write_text('private')
+            if scenario == 'outside': args['path'] = str(outside)
+            else:
+                alias = self.root / 'alias.md'; alias.symlink_to(outside); args['path'] = str(alias)
+        if scenario == 'type':
+            self.path = self.root / 'secret.env'; self.path.write_text('not allowed'); args['path'] = str(self.path)
+        if scenario == 'size': self.path.write_bytes(b'x' * (share.LIMIT + 1))
+        if scenario == 'no-turn':
+            self.assertEqual(json.loads(share.room_share_file(args)), share.refused('no Room turn')); return
+        if scenario == 'others':
+            entry = dict(artifactId='artifact-fixture',versionId='version-fixture',name='draft.md',mimeType='text/markdown',classification='room_shared',authorRole='agent',authoredByMembershipId='other-agent')
+            listed = documents.discussion_documents({'activeTopic':{'documents':[entry]}})
+            self.assertEqual(len(listed),1)
+            text, offered, _ = documents.discussion_document_context(listed,lambda *_: ('ready', fixture['file']['text']),given=[],tool='available')
+            self.assertIn(fixture['file']['text'].strip(),text)
+            self.assertEqual(offered,['artifact-fixture/version-fixture']); return
+        result = self.turn.share(args)
+        if scenario in ('outside','symlink','type','size'):
+            self.assertEqual(result,share.refused({'outside':'outside-share-root','symlink':'outside-share-root'}.get(scenario,scenario)))
+            self.assertEqual(self.created,[]); return
+        self.assertTrue(result['success'])
+        self.assertEqual(self.created[0],(fixture['file']['text'].encode(),'draft.md','text/markdown','draft.md'))
+        self.assertEqual(self.saved[-1][next(iter(self.records))]['result'],result)
+        if scenario == 'title':
+            second = self.turn.share(dict(args,title='Draft title'))
+            self.assertTrue(second['success']); self.assertEqual(self.created[-1][3],'Draft title')
+        if scenario == 'two':
+            second = self.root / 'second.txt'; second.write_text('two')
+            self.assertTrue(self.turn.share({'path':str(second)})['success']); self.assertEqual(len(share.refs(self.records)),2)
+        if scenario == 'crash':
+            restored = json.loads(json.dumps(self.saved[-1]))
+            replay = share.ShareTurn(restored,self.root,[],lambda: True,lambda *_: self.fail('duplicate create'))
+            self.assertEqual(replay.share(args),result); self.assertEqual(len(self.created),1)
+        if scenario == 'post':
+            class Capture(protocol.RoomProtocol):
+                def request(inner, method, path, payload=None, **kwargs): return payload
+            payload = Capture('https://fixture.invalid/api','synthetic').post_message('room','turn',1,'source','Shared.',attachments=share.refs(self.records))
+            self.assertEqual(payload['attachments'],[{'artifactId':'artifact-fixture','versionId':'version-fixture'}])
+
+    def test_caps_stores_ambiguity_and_sealed(self):
+        private = self.root / 'private'; private.mkdir(); (private / 'hidden.md').write_text('private')
+        self.assertEqual(self.turn.share({'path':str(private/'hidden.md')})['code'],'outside-share-root')
+        for index in range(8):
+            p=self.root/f'{index}.txt'; p.write_text('ok')
+            self.assertTrue(self.turn.share({'path':str(p)})['success'])
+        self.assertEqual(self.turn.share({'path':str(self.path)})['code'],'per-turn cap')
+        self.turn.sealed=lambda: True
+        self.assertEqual(self.turn.share({'path':str(self.path)})['code'],'no Room turn')
+        records={}
+        turn=share.ShareTurn(records,self.root,[],lambda: True,lambda *_: (_ for _ in ()).throw(OSError('ambiguous')))
+        self.assertEqual(turn.share({'path':str(self.path)})['code'],'upload-uncertain')
+        turn.create=lambda *_: self.fail('retry')
+        self.assertEqual(turn.share({'path':str(self.path)})['code'],'upload-uncertain')
+
+    def test_write_failure_before_create_and_after_receipt(self):
+        for fail_at in (1,2):
+            records, calls, disk = {}, [], []
+            def persist():
+                calls.append('save')
+                if calls.count('save') == fail_at: raise OSError('disk')
+                disk.append(copy.deepcopy(records)); return True
+            turn=share.ShareTurn(records,self.root,[],persist,lambda *_: calls.append('create') or fixture['artifact'])
+            self.assertEqual(turn.share({'path':str(self.path)})['code'],'upload-uncertain')
+            self.assertEqual(calls.count('create'),0 if fail_at==1 else 1)
+            if fail_at==2:
+                replay=share.ShareTurn(disk[0],self.root,[],lambda: True,lambda *_: self.fail('duplicate'))
+                self.assertEqual(replay.share({'path':str(self.path)})['code'],'upload-uncertain')
+
+    def test_background_host_lifetime_and_stale_turn_refusal(self):
+        origin=load_module('origin_context')
+        async def run():
+            release=asyncio.Event()
+            owner=asyncio.create_task(release.wait())
+            share.begin('room',self.turn)
+            origin.remember_room_session('session','room')
+            share.note_host_turn('session','turn','room')
+            share.finish_dispatch('room',self.turn,owner)
+            args={'path':str(self.path)}
+            self.assertEqual(json.loads(share.room_share_file(args,session_id='session',turn_id='old'))['code'],'no Room turn')
+            self.assertTrue(json.loads(share.room_share_file(args,session_id='session',turn_id='turn'))['success'])
+            release.set(); await owner; await asyncio.sleep(0)
+            self.assertEqual(json.loads(share.room_share_file(args,session_id='session',turn_id='turn'))['code'],'no Room turn')
+        asyncio.run(run())
+
+    def test_multipart_and_refusal_mapping(self):
+        class Response(io.BytesIO):
+            status=201
+        with mock.patch.object(protocol,'_urlopen',return_value=Response(json.dumps(fixture['artifact']).encode())) as opened:
+            client=protocol.RoomProtocol('https://fixture.invalid/api','synthetic')
+            value=client.create_artifact('room one',b'hello','draft.md','text/markdown','Title')
+            self.assertEqual(value,fixture['artifact'])
+            request=opened.call_args.args[0]
+            self.assertEqual(request.get_header('Authorization'),'Bearer synthetic')
+            self.assertIn('multipart/form-data',request.get_header('Content-type'))
+            self.assertIn(b'name="visibility"\r\n\r\nroom_shared',request.data)
+            self.assertIn(b'Content-Type: text/markdown',request.data)
+        for status,code,wanted in [(413,'message_too_large','size'),(400,'invalid_enum','type'),(403,'not_allowed','upload')]:
+            turn=share.ShareTurn({},self.root,[],lambda: True,lambda *_: (_ for _ in ()).throw(protocol.ProtocolError('synthetic',status=status,code=code)))
+            self.assertEqual(turn.share({'path':str(self.path)})['code'],wanted)
+
+for case in fixture['cases']:
+    def run(self, scenario=case['scenario']): self.exercise(scenario)
+    run.__doc__=case['name']
+    setattr(ShareCases,'test_'+case['scenario'].replace('-','_'),run)

@@ -234,7 +234,7 @@ class ParityP1aTests(unittest.TestCase):
                 self.assertNotIn("[Active Room guidance", prompt)
                 # The tail is procedural only; the word limit is the one optional fact.
                 tail = re.compile(
-                    re.escape(f"{adapter.ROOM_HISTORY_INSTRUCTION} {adapter.ROOM_IDENTITY_FACT} ")
+                    re.escape(f"{adapter.ROOM_HISTORY_INSTRUCTION} {adapter.ROOM_IDENTITY_FACT} {adapter.share_file.SHARE_INSTRUCTION} ")
                     + r"(At most \d+ words per response \(Room policy maxContributionWords"
                     + r"(, as frozen for this discussion cycle)?\); there is no minimum\. )?"
                     + re.escape(adapter.ROOM_RESPONSE_INSTRUCTION)

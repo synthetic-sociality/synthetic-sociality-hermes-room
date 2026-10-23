@@ -178,6 +178,7 @@
     "cycle_superseded",
     "idempotency_mismatch",
     "invalid_contribution",
+    "invalid_enum",
     "invitation_consumed",
     "invitation_expired",
     "invitation_invalid",
@@ -1442,6 +1443,53 @@
     {
       "name": "P9-23 explicit empty audience refuses bytes",
       "scenario": "emptyaudience"
+    }
+  ],
+  "parityP10Contract": "docs/delivery-lifecycle-contract-v1.md#p10--agent-files-to-the-room-2026-10-23",
+  "parityP10Cases": [
+    {
+      "name": "P10-01 share one file",
+      "scenario": "one"
+    },
+    {
+      "name": "P10-02 title given/omitted",
+      "scenario": "title"
+    },
+    {
+      "name": "P10-03 path outside the root refused",
+      "scenario": "outside"
+    },
+    {
+      "name": "P10-04 symlink escape refused",
+      "scenario": "symlink"
+    },
+    {
+      "name": "P10-05 unknown type refused",
+      "scenario": "type"
+    },
+    {
+      "name": "P10-06 over the cap refused",
+      "scenario": "size"
+    },
+    {
+      "name": "P10-07 two files in one turn",
+      "scenario": "two"
+    },
+    {
+      "name": "P10-08 retry after a crash between create and post does not duplicate",
+      "scenario": "crash"
+    },
+    {
+      "name": "P10-09 outside a Room turn refused",
+      "scenario": "no-turn"
+    },
+    {
+      "name": "P10-10 the post carries the attachments",
+      "scenario": "post"
+    },
+    {
+      "name": "P10-11 other agents see the document in the next turn's P7d list",
+      "scenario": "others"
     }
   ]
 }

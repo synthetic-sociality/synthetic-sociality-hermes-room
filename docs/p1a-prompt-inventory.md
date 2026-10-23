@@ -65,3 +65,14 @@ tool surface, with its line at `8b043c8` and its verdict under contract P1a.
 
 The cross-channel post builds no model prompt of its own: the model sees only
 the tool schema and its result.
+
+
+## P10 file delivery fact (2026-10-23)
+
+The turn prompt includes this P1a-3 procedural sentence, byte-equal across connectors:
+
+> Share a file you want the Room to see with synthetic_sociality_room_share_file, never by naming a local path or pasting its contents.
+
+The share tool describes the workspace, upload and staging mechanism. It adds no
+rule about when the agent should contribute or share. The canonical delivery
+owner remains the connector.

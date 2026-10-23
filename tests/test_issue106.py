@@ -25,6 +25,10 @@ protocol = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = protocol
 spec.loader.exec_module(protocol)
 
+share_spec = importlib.util.spec_from_file_location('issue106_share_file', ROOT / 'share_file.py')
+share_file = importlib.util.module_from_spec(share_spec)
+share_spec.loader.exec_module(share_file)
+
 # Only local source and standard library. No gateway, plugins or user config.
 tree = ast.parse((ROOT / 'adapter.py').read_text())
 names = {'_restore_escaped_json_layout', '_decode_compatibility_body',
@@ -37,7 +41,7 @@ assignments = {'_JSON_STRING_TOKEN', '_FENCE', '_ROOM_JSON_DECODER', '_ROOM_ENVE
                '_JSON_OBJECT_KEY', '_ESCAPED_JSON_OBJECT_KEY'}
 methods = {'_select_delivery_intent', '_post_with_fresh_context', '_persisted_payload_dialect', '_record_canonical_delivery'}
 from datetime import datetime
-ns = dict(copy=copy, datetime=datetime, json=json, re=re, time=time, asyncio=asyncio, logger=logging.getLogger(__name__),
+ns = dict(share_file=share_file, copy=copy, datetime=datetime, json=json, re=re, time=time, asyncio=asyncio, logger=logging.getLogger(__name__),
           ProtocolError=protocol.ProtocolError, stable_key=protocol.stable_key,
           _cycle_delivery_payload=lambda *a, **kw: {},
           _post_cycle_authority_attempt=lambda *a: None)
@@ -88,7 +92,7 @@ class Issue106Tests(unittest.TestCase):
     def test_i106_05_06_frozen_retry_restart_and_legacy(self):
         for kind in ['claim','question','response',None]:
             with self.subTest(kind=kind):
-                binding = types.SimpleNamespace(room_id='room',membership_id='self',delivery_intents={},delivery_lifecycle={},turn_sequences={},message_payload_dialect='v1')
+                binding = types.SimpleNamespace(room_id='room',membership_id='self',delivery_intents={},share_uploads={},delivery_lifecycle={},turn_sequences={},message_payload_dialect='v1')
                 instance = Harness()
                 args = (binding,'source','Same text?','source',['peer'],'open',1,'epoch',None)
                 kwargs = {} if kind is None else {'contribution_type':kind}

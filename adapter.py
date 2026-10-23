@@ -23,6 +23,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from .photos import PHOTO_TYPES, append_photo_context, effective_photos, host_image_store, photo_context, source_photos
 
+from . import share_file
 from . import cli, local_status, recovery, renewal, secret_isolation
 from . import link as device_link
 from .context import canonical_room_context as _canonical_room_context
@@ -542,6 +543,7 @@ def _on_pre_llm_call(**kwargs: Any) -> None:
     if is_room_context(**kwargs) and _platform_name(kwargs.get("platform")) == NAME:
         # Contract P7d-5: the host session this Room turn runs in.
         remember_room_session(kwargs.get("session_id"), kwargs.get("sender_id"))
+        share_file.note_host_turn(kwargs.get("session_id"), kwargs.get("turn_id"), kwargs.get("sender_id"))
 
 
 def _platform_name(value: Any) -> str:
@@ -611,6 +613,8 @@ def _secret_store_dirs() -> list[Any]:
 def _on_pre_tool_call(
     tool_name: str = "", **kwargs: Any,
 ) -> dict[str, str] | None:
+    if tool_name == share_file.TOOL_NAME:
+        return None  # P10 checks its own root and every excluded store before reading.
     # Contract P2c-1, in every session: a file, search or patch path inside the
     # Room store, or a shell/code call naming it, is refused. A fence error
     # refuses too; older cores let a raising hook through.
@@ -1903,6 +1907,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return {
                 "action": "post",
                 "body": str(post.get("body") or ""),
+                "attachments": copy.deepcopy(post.get("attachments", [])),
                 "responds_to": str(post.get("responds_to") or cycle.get("responds_to") or ""),
                 "recipient_membership_ids": recipients,
                 "coordination_mode": str(post.get("coordination_mode") or "coordinated"),
@@ -2177,6 +2182,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 getattr(self, "_event_seq", {}).get(binding.room_id, {}).get(source_id, 0)
             ),
             "body": str(body or ""),
+            "attachments": share_file.refs(binding.share_uploads.get(source_id, {})),
             "responds_to": responds_to,
             "recipient_membership_ids": recipients,
             "contribution_type": (persisted_post.get("contribution_type", "question" if recipients else "claim")
@@ -3194,6 +3200,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "observed_seq": observed,
                 "observed_epoch_id": observed_epoch,
                 "body": body,
+                "attachments": copy.deepcopy(selected.get("attachments", [])),
                 "addresses": addresses,
                 "responds_to": str(cycle_payload.get("responds_to") or source_id),
                 "recipient_membership_ids": recipients,
@@ -3215,6 +3222,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     code="binding_changed",
                     retryable=False,
                 )
+        if selected and intent["post"].get("attachments", []) != selected.get("attachments", []):
+            raise ProtocolError("Frozen Room attachments do not match selection", code="attachment_mismatch", retryable=False)
         # Pre-1.0.20 durable post intents did not always carry their key.
         # Reconstruct only the exact legacy derivation for those old shapes;
         # every newly selected intent above persists its v2 actor-scoped key.
@@ -3253,6 +3262,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             responds_to_id=str(cycle_payload.get("responds_to") or source_id),
                             standalone=bool(cycle_payload.get("standalone")),
                             addresses=addresses,
+                            **({"attachments": intent["post"]["attachments"]} if intent["post"].get("attachments") else {}),
                             contribution_type=intent["post"].get("contribution_type", "question" if cycle_payload.get("recipients") else "claim"),
                         )
                     return _with_message_payload_dialect(
@@ -3262,6 +3272,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     ).post_message(
                         chat_id, turn_id, observed, source_id, body, observed_epoch,
                         addresses=addresses,
+                        **({"attachments": intent["post"]["attachments"]} if intent["post"].get("attachments") else {}),
                         contribution_type=intent["post"].get("contribution_type", "question" if cycle_payload.get("recipients") else "claim"),
                     )
                 event = await self._call(
@@ -5470,6 +5481,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             f"{shared_context}\n\n{handover_context + chr(10) + chr(10) if handover_context else ''}{artifact_context}\n\n{current_input}{cycle_context}{''.join(chr(10) + line for line in missed_facts)}{chr(10) + chr(10) + kept_block if kept_block else ''}\n\n"
             f"{ROOM_HISTORY_INSTRUCTION} "
             f"{ROOM_IDENTITY_FACT} "
+            f"{share_file.SHARE_INSTRUCTION} "
             f"{word_limit_fact}"
             f"{ROOM_RESPONSE_INSTRUCTION}"
             f"{no_status_fact}"
@@ -5502,7 +5514,39 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if room_keys is None:
                 room_keys = self._room_session_keys = {}
             room_keys[binding.room_id] = session_key
-        await self.handle_message(message_event)
+        records = binding.share_uploads.get(event_id, {})
+        def persist_share():
+            binding.share_uploads[event_id] = records
+            return self._persist_binding(binding)
+        extra = getattr(getattr(self, "config", None), "extra", None) or {}
+        root = share_file.configured_root(extra)
+        turn = share_file.ShareTurn(
+            records, root, _secret_store_dirs(), persist_share,
+            lambda data, name, mime, title: RoomProtocol(binding.base_url, binding.credential).create_artifact(binding.room_id, data, name, mime, title),
+            sealed=lambda: bool(binding.delivery_intents.get(event_id, {}).get("selected") or binding.delivery_intents.get(event_id, {}).get("post")),
+        )
+        share_file.begin(binding.room_id, turn)
+        try:
+            await self.handle_message(message_event)
+        except BaseException:
+            share_file.end(binding.room_id, turn)
+            raise
+        # Hermes handle_message starts the model in the session's background
+        # owner task and returns immediately. Keep the tool active until that
+        # task exits; synchronous hosts/tests finish at this call boundary.
+        owner_key = session_key
+        if not owner_key:
+            try:
+                # Older supported cores expose the builder but no adapter helper.
+                from gateway.session import build_session_key
+                profile = getattr(self, "_session_key_profile", lambda _source: None)(source)
+                owner_key = build_session_key(source,
+                    group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                    thread_sessions_per_user=extra.get("thread_sessions_per_user", False), profile=profile)
+            except Exception:
+                owner_key = ""
+        owner = (getattr(self, "_session_tasks", None) or {}).get(owner_key)
+        share_file.finish_dispatch(binding.room_id, turn, owner)
         return True
 
     async def _photo_context(self, binding, event_id, entries, epoch_id, session_key):
@@ -7261,6 +7305,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         existing.delivery_intents = {
             source_id: dict(intent) for source_id, intent in binding.delivery_intents.items()
         }
+        existing.share_uploads = copy.deepcopy(binding.share_uploads)
         existing.delivery_lifecycle = copy.deepcopy(binding.delivery_lifecycle)
         existing.cycle_attempt_owners = dict(binding.cycle_attempt_owners)
         existing.missed_sources = [dict(item) for item in binding.missed_sources]
@@ -7721,7 +7766,7 @@ def register(ctx) -> None:
             "Shared multi-agent Room; speak only as your configured Hermes identity. For an "
             "inbound Room turn, return the contribution directly. Never call "
             "synthetic_sociality_room_post from inside a Room turn because this adapter already "
-            "owns canonical delivery."
+            "owns canonical delivery. " + share_file.SHARE_INSTRUCTION
         ),
     )
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
@@ -7771,6 +7816,14 @@ def register(ctx) -> None:
         handler=room_document,
         # One description text for the tool, the schema's (equal in OpenClaw).
         description=ROOM_DOCUMENT_SCHEMA["description"],
+        emoji="◌",
+    )
+    ctx.register_tool(
+        name=share_file.TOOL_NAME,
+        toolset="synthetic_sociality_room",
+        schema=share_file.SCHEMA,
+        handler=share_file.room_share_file,
+        description=share_file.DESCRIPTION,
         emoji="◌",
     )
     ctx.register_tool(

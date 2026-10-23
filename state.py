@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterator, TypeVar
 import fcntl
 
 from .documents import valid_given_memory
+from .share_file import valid_uploads, valid_refs
 from .secret_isolation import remember_secrets
 
 
@@ -134,6 +135,8 @@ class RoomBinding:
     # server's accepted idempotency request rather than use a newer room head
     # or regenerated model output.
     delivery_intents: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # P10: source-bound upload uncertainty markers and receipts, before post.
+    share_uploads: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Canonical delivery receipts and unfinished post-delivery lifecycle work.
     # This journal is intentionally separate: terminal source acknowledgement
     # may remove the frozen delivery intent while cycle/turn completion remains
@@ -431,9 +434,14 @@ class RoomBinding:
                 raise ValueError("Room resolved lifecycle audit evidence is invalid")
             if source_id in binding.delivery_lifecycle or source_id in binding.delivery_intents:
                 raise ValueError("Room resolved lifecycle audit overlaps live work")
+        if not valid_uploads(binding.share_uploads):
+            raise ValueError("Room share upload journal is invalid")
         for source_id, intent in binding.delivery_intents.items():
             if not isinstance(source_id, str) or not source_id or not isinstance(intent, dict):
                 raise ValueError("Room delivery intent is invalid")
+            for part in (intent.get("selected"), intent.get("post")):
+                if isinstance(part, dict) and not valid_refs(part.get("attachments", [])):
+                    raise ValueError("Room frozen attachments are invalid")
             if intent.get("delivery_state") != "posted":
                 continue
             canonical = intent.get("canonical_event")
