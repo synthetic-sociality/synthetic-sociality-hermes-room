@@ -545,7 +545,7 @@ class ParityP7dTests(unittest.TestCase):
                                               "extractedText": "The P5 brief."}}}
         source = {"id": "m-42", "seq": 42, "type": "message.posted", "actorRole": "human_owner", "actorId": "owner-1",
                   "payload": {"body": "Brief attached.", "attachments": [
-                      {"artifactId": "brief", "versionId": "v1", "name": "brief.md", "mediaType": "text/markdown",
+                      {"artifactId": "brief", "versionId": "v1", "name": "brief.md", "mimeType": "text/markdown",
                        "sha256": "c" * 64}]}}
         attempt = {"cycle": {"id": "cycle-1", "generation": 1, "totalTurns": 1, "sourceEventId": "m-42",
                              "budgets": {"totalTurns": 4}}, "attempt": {"id": "attempt-1", "round": 1}}
@@ -668,7 +668,7 @@ class ParityP7dTests(unittest.TestCase):
             "empty": record("empty", {"v1": ("ready", None)}),
             "other": record("other", {"v1": ("ready", "Another discussion's text.")}),
         }, library=[{"artifactId": "shared", "visibility": "room_shared",
-                     "currentVersion": {"versionId": "v1", "name": "shared.md", "mediaType": "text/markdown",
+                     "currentVersion": {"versionId": "v1", "name": "shared.md", "mimeType": "text/markdown",
                                         "sha256": "e" * 64, "extractionStatus": "ready"}}]
           + [{"artifactId": f"lib-{index}", "visibility": "room_shared",
               "currentVersion": {"versionId": "v1", "name": f"lib-{index}.pdf"}} for index in range(32)],

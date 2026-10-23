@@ -1,0 +1,110 @@
+{
+  "photos": [
+    {
+      "mimeType": "image/png",
+      "hex": "89504e470d0a1a0a0000000d4948445200000002000000020802000000fdd49a730000001249444154789c63344a99c6c0c0c0c40006000dd60130cf20e73e0000000049454e44ae426082",
+      "size": 75,
+      "sha256": "0532a8c7438f798a78024e97769cb696619728e21f445d123447ad38dafaa727"
+    },
+    {
+      "mimeType": "image/jpeg",
+      "hex": "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffdb0043010909090c0b0c180d0d1832211c213232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232ffc00011080002000203012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00e6a8a28af74f14ffd9",
+      "size": 632,
+      "sha256": "f79a39c6d228ecf4d79663355f0640f59902a2ca6c7992049ced84bd142d3bbe"
+    },
+    {
+      "mimeType": "image/webp",
+      "hex": "524946463800000057454250565038202c000000f001009d012a0200020001402625a00274ba01f800044c0000fef01bdfff1bb7186fc177fbef406f03000000",
+      "size": 64,
+      "sha256": "2b01934c09d40b27615e3716abef8abbc06c5209af368b51eb6ffe209a96cdee"
+    },
+    {
+      "mimeType": "image/gif",
+      "hex": "474946383761020002008100003264960000000000000000002c0000000002000200000806000108041010003b",
+      "size": 45,
+      "sha256": "07ed47b18207ae3d400a7524d51ea55fa7c52cb519151e8a9190ae669a93b470"
+    }
+  ],
+  "cases": [
+    {
+      "name": "P9-01 photo given once",
+      "scenario": "once"
+    },
+    {
+      "name": "P9-02 second turn by reference",
+      "scenario": "reference"
+    },
+    {
+      "name": "P9-03 three photo types",
+      "scenario": "types"
+    },
+    {
+      "name": "P9-04 GIF is a document",
+      "scenario": "gif"
+    },
+    {
+      "name": "P9-05 restricted outside audience is not fetched",
+      "scenario": "restricted"
+    },
+    {
+      "name": "P9-06 sha256 mismatch refused",
+      "scenario": "hash"
+    },
+    {
+      "name": "P9-07 size over cap named",
+      "scenario": "oversize"
+    },
+    {
+      "name": "P9-08 per-turn cap keeps newest",
+      "scenario": "turncap"
+    },
+    {
+      "name": "P9-09 revoked after first turn",
+      "scenario": "revoked"
+    },
+    {
+      "name": "P9-10 host without image path",
+      "scenario": "nohost"
+    },
+    {
+      "name": "P9-11 P5 fallback reads mimeType",
+      "scenario": "p5"
+    },
+    {
+      "name": "P9-12 size mismatch refused",
+      "scenario": "size"
+    },
+    {
+      "name": "P9-13 Content-Type mismatch refused",
+      "scenario": "mime"
+    },
+    {
+      "name": "P9-14 fetch error named",
+      "scenario": "error"
+    },
+    {
+      "name": "P9-15 session and epoch reset",
+      "scenario": "reset"
+    },
+    {
+      "name": "P9-16 sanitized store names",
+      "scenario": "name"
+    },
+    {
+      "name": "P9-17 binary client cap and redirect refusal",
+      "scenario": "client"
+    },
+    {
+      "name": "P9-18 host inbound media hand-over",
+      "scenario": "host"
+    },
+    {
+      "name": "P9-19 sharing filters run first",
+      "scenario": "sharing"
+    },
+    {
+      "name": "P9-20 aggregate byte cap",
+      "scenario": "bytes"
+    }
+  ]
+}

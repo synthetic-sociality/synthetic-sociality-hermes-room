@@ -1209,3 +1209,7 @@ with their evidence archived; do not restore an old cursor or replay old keys.
 For Hermes, likewise resolve all in-flight candidate posts before a 1.0.86 rollback
 so no frozen typed post is replayed with a legacy-derived payload. Roll the server
 back only after both old connectors are verified loadable and running.
+
+## Room photos
+
+PNG, JPEG and WebP attachments are verified against their exact version manifest and handed to the Hermes image cache as inbound images, once per discussion and host session. The host chooses native vision or its configured description fallback; the connector calls no model. Optional upload descriptions remain extra context. Explicit photo status lines name refusals and references. Sharing checks, byte caps, given-memory and retention are specified in [delivery contract P9](docs/delivery-lifecycle-contract-v1.md#p9--photos-to-the-model-2026-10-23). Text-only hosts require their own vision fallback configuration.

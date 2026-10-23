@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from .photos import PHOTO_TYPES, append_photo_context, effective_photos, host_image_store, photo_context, source_photos
 
 from . import cli, local_status, recovery, renewal, secret_isolation
 from . import link as device_link
@@ -5419,6 +5420,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
         except Exception as error:
             logger.warning("Room %s document context unavailable: %s", binding.room_id, error)
+        photo_entries = listed if listed is not None else source_photos(prompt_event, context_events, cycle_source)
+        photo_status, photo_media = await self._photo_context(
+            binding, event_id, photo_entries, str(active_epoch_id), session_key,
+        )
+        artifact_context = append_photo_context(artifact_context, photo_status)
         cycle_context = ""
         if cycle_attempt:
             cycle, attempt = cycle_attempt["cycle"], cycle_attempt["attempt"]
@@ -5483,7 +5489,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         )
         message_event = MessageEvent(
             text=prompt,
-            message_type=MessageType.TEXT,
+            message_type=MessageType.PHOTO if photo_media else MessageType.TEXT,
+            media_urls=[item["path"] for item in photo_media],
+            media_types=[item["contentType"] for item in photo_media],
             source=source,
             message_id=dispatch_source,
             raw_message={**event, "_dispatchGeneration": dispatch_generation},
@@ -5496,6 +5504,31 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             room_keys[binding.room_id] = session_key
         await self.handle_message(message_event)
         return True
+
+    async def _photo_context(self, binding, event_id, entries, epoch_id, session_key):
+        """P9: local media plus status, with offers committed by P7d completion."""
+        session = self._host_session_id(session_key)
+        given = effective_photos(binding.documents_given, epoch_id, session)
+        if not given and not any(entry.get("mimeType") in PHOTO_TYPES for entry in entries):
+            return "", []
+        store = host_image_store() if getattr(MessageType, "PHOTO", None) is not None else None
+        statuses, offered, media = await self._call(binding, lambda api: photo_context(
+            entries, given, binding.membership_id,
+            lambda aid: api.artifact(binding.room_id, aid),
+            lambda aid, vid, mime: api.download_artifact(binding.room_id, aid, vid, mime), store,
+        ))
+        offers = getattr(self, "_documents_offered", None)
+        if offers is None:
+            offers = self._documents_offered = {}
+        if event_id not in offers:
+            memory = binding.documents_given or {}
+            recorded = str(memory.get("host_session") or "") if memory.get("epoch_id") == epoch_id else ""
+            offers[event_id] = {"epoch_id": epoch_id, "host_session": session, "recorded_session": recorded,
+                                "given": _effective_given(memory, epoch_id, session), "offered": []}
+        offers[event_id].update({"photos_given": given, "photos_offered": offered})
+        while len(offers) > 64:
+            offers.pop(next(iter(offers)))
+        return statuses, media
 
     def _document_tool_state(self) -> str:
         """Contract P7d-6: the document tool in the Room-turn tool selection."""
@@ -5578,6 +5611,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         changed = (built and ran and built != ran) or (recorded and ran and recorded != ran)
         base = [] if changed else list(record.get("given") or [])
         memory = _given_memory(record["epoch_id"], base, list(record.get("offered") or []), ran)
+        if record.get("photos_given") or record.get("photos_offered"):
+            memory["photos"] = _given_memory(record["epoch_id"], [] if changed else record.get("photos_given", []),
+                                             record.get("photos_offered", []), ran)["given"]
         if memory == binding.documents_given:
             return
         if not _valid_given_memory(memory):

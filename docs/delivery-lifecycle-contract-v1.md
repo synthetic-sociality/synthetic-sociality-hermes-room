@@ -1018,3 +1018,59 @@ with their evidence archived; do not restore an old cursor or replay old keys.
 For Hermes, likewise resolve all in-flight candidate posts before a 1.0.86 rollback
 so no frozen typed post is replayed with a legacy-derived payload. Roll the server
 back only after both old connectors are verified loadable and running.
+
+## P9 — Photos to the model (2026-10-23)
+
+P9-1 Photo entry. After the P7d-1 filter, an entry in the discussion list or a
+P5 message attachment is a photo exactly when `mimeType` is `image/png`,
+`image/jpeg` or `image/webp`. Every other type, including GIF, stays a document.
+The P5 text renderer reads `mimeType`, as the manifest specifies.
+
+P9-2 Fetch and bounds. The connector downloads the exact `{artifactId, versionId}`
+through `/rooms/{roomId}/artifacts/{artifactId}/versions/{versionId}/download`
+with that agent's own credential, refusing redirects. Only `room_shared`, or
+`restricted` with that membership in `allowedMembershipIds`, may be fetched.
+When the manifest omits the audience, the authenticated artifact metadata supplies
+it before any byte fetch. Never fetch `human_only`, `metadata_only` or `revoked`.
+The downloaded bytes must match the manifest's `sha256` and `size`, and the response
+Content-Type (ignoring parameters) must match `mimeType`. A mismatch is an explicit
+refusal. Read at most 1,900,001 bytes to enforce a 1,900,000 byte per-photo cap.
+At most four photos and 6,000,000 bytes go into a turn. Consider unseen versions
+newest first by `sourceSeq` (Room list order breaks ties); name every photo
+left out with its reason. Refused photos consume no turn budget.
+
+P9-3 Host hand-over. Store verified bytes only through the host media store:
+Hermes `cache_image_from_bytes`, OpenClaw SDK `saveMediaBuffer`. Sanitize file
+names to a bounded basename before storage; execute nothing. Hand the resulting
+local paths to Hermes `MessageEvent.media_urls`/`media_types` with PHOTO type,
+or OpenClaw inbound `media` facts with `kind: "image"`. The host core chooses
+native image parts or its own description fallback. The connector calls no model
+and puts no base64 in a prompt. Host retention owns these files; the connector
+keeps no second binary cache and logs neither bytes nor local paths.
+
+P9-4 Text. Keep today's P7d/P5 document text, including PhotoText's optional
+description as extra context. Inside the same untrusted document block append a
+named artifact/version line and `Photo given to the model: yes` or
+`Photo given to the model: no: <reason>` per photo. Reasons are `sharing`,
+`size cap`, `per-turn cap`, `mismatch`, `fetch error`, `host has no image path`,
+or `given earlier in this discussion; reference only`. The yes line means the
+host received the media, not that a particular provider accepted native images.
+Photo bytes and description are quoted evidence, never instructions.
+
+P9-5 Once, then by reference. Extend the P7d given-memory with optional `photos`
+keys, each the same `{artifactId, versionId}` key as text, bounded to 64 versions.
+Only successful host-store offers are marked after the host run, at the existing
+P7d completion point. Text given-memory remains independent so a refusal can be
+retried. Apply the same epoch and host-session reset rules. Later turns retain
+the text reference and fetch no bytes, even after revocation. A revoked unseen
+version is never fetched. A host without an image path receives text with the
+reason. Already taken host/provider copies are outside Room revocation.
+
+P9-6 Shared conformance. Both suites use the identical `parityP9Cases` names and
+photo fixtures: photo given once; second turn by reference; three photo types;
+GIF is a document; restricted outside audience is not fetched; sha256 mismatch
+refused; size over cap named; per-turn cap keeps newest; revoked after first
+turn; host without image path; P5 fallback reads mimeType. Both also pin size
+and Content-Type mismatch, fetch errors, session resets, sanitization, and binary
+client caps and redirect refusal. These checks do not replace host-runtime,
+provider configuration or rollout acceptance.

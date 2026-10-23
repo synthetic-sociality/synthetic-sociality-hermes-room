@@ -1349,5 +1349,87 @@
       "I106-11"
     ],
     "formatSentence": "Contribution format: plain natural text without an envelope is posted as claim; to mark a type, return {\"action\":\"contribute\",\"body\":\"…\",\"contributionType\":\"claim|question|response\"}."
-  }
+  },
+  "parityP9Cases": [
+    {
+      "name": "P9-01 photo given once",
+      "scenario": "once"
+    },
+    {
+      "name": "P9-02 second turn by reference",
+      "scenario": "reference"
+    },
+    {
+      "name": "P9-03 three photo types",
+      "scenario": "types"
+    },
+    {
+      "name": "P9-04 GIF is a document",
+      "scenario": "gif"
+    },
+    {
+      "name": "P9-05 restricted outside audience is not fetched",
+      "scenario": "restricted"
+    },
+    {
+      "name": "P9-06 sha256 mismatch refused",
+      "scenario": "hash"
+    },
+    {
+      "name": "P9-07 size over cap named",
+      "scenario": "oversize"
+    },
+    {
+      "name": "P9-08 per-turn cap keeps newest",
+      "scenario": "turncap"
+    },
+    {
+      "name": "P9-09 revoked after first turn",
+      "scenario": "revoked"
+    },
+    {
+      "name": "P9-10 host without image path",
+      "scenario": "nohost"
+    },
+    {
+      "name": "P9-11 P5 fallback reads mimeType",
+      "scenario": "p5"
+    },
+    {
+      "name": "P9-12 size mismatch refused",
+      "scenario": "size"
+    },
+    {
+      "name": "P9-13 Content-Type mismatch refused",
+      "scenario": "mime"
+    },
+    {
+      "name": "P9-14 fetch error named",
+      "scenario": "error"
+    },
+    {
+      "name": "P9-15 session and epoch reset",
+      "scenario": "reset"
+    },
+    {
+      "name": "P9-16 sanitized store names",
+      "scenario": "name"
+    },
+    {
+      "name": "P9-17 binary client cap and redirect refusal",
+      "scenario": "client"
+    },
+    {
+      "name": "P9-18 host inbound media hand-over",
+      "scenario": "host"
+    },
+    {
+      "name": "P9-19 sharing filters run first",
+      "scenario": "sharing"
+    },
+    {
+      "name": "P9-20 aggregate byte cap",
+      "scenario": "bytes"
+    }
+  ]
 }

@@ -215,8 +215,8 @@ def source_artifact_context(
     """Resolve exact attachments and the authorized Room document library.
 
     Artifact IDs originate in canonical Room records, while access and derived
-    text are resolved by the authenticated Room API. Raw document bytes are
-    never downloaded or executed by the connector.
+    text are resolved by the authenticated Room API. P9 separately hands verified
+    photo bytes to the host; uploaded content is never executed by the connector.
 
     Contract P5-1: on a turn of a discussion cycle, ``cycle_source`` is the
     cycle's source message; its attachments come first, then those of the
@@ -265,7 +265,7 @@ def source_artifact_context(
         lines = [
             f"Document: {name}",
             f"Artifact/version: {artifact_id} / {version_id}",
-            f"Media type: {_single_line(manifest.get('mediaType') or 'unknown')}",
+            f"Media type: {_single_line(manifest.get('mimeType') or 'unknown')}",
             f"SHA-256: {_single_line(manifest.get('sha256') or 'unknown')}",
         ]
         try:

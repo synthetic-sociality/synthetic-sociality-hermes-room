@@ -350,7 +350,8 @@ def valid_given_memory(value: Any) -> bool:
         return True
     given = value.get("given")
     return (
-        set(value) == {"epoch_id", "host_session", "given"}
+        set(value) in ({"epoch_id", "host_session", "given"}, {"epoch_id", "host_session", "given", "photos"})
+        and ("photos" not in value or valid_given_memory({k: v for k, v in {**value, "given": value["photos"]}.items() if k != "photos"}))
         and isinstance(value["epoch_id"], str) and bool(value["epoch_id"]) and len(value["epoch_id"]) <= 512
         and isinstance(value["host_session"], str) and len(value["host_session"]) <= 512
         and isinstance(given, list) and len(given) <= DOCUMENTS_GIVEN_LIMIT

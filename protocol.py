@@ -594,6 +594,27 @@ class RoomProtocol:
         artifact = urllib.parse.quote(artifact_id, safe="")
         return self.request("GET", f"/rooms/{room}/artifacts/{artifact}")
 
+    def download_artifact(self, room_id: str, artifact_id: str, version_id: str, mime_type: str) -> tuple[bytes, str]:
+        """P9: bounded binary download with this membership's credential, no redirects."""
+        room, artifact, version = (urllib.parse.quote(item, safe="") for item in (room_id, artifact_id, version_id))
+        path = f"/rooms/{room}/artifacts/{artifact}/versions/{version}/download"
+        headers = {"Accept": mime_type, "Authorization": f"Bearer {self.credential}"}
+        request = _new_request(self.base_url + path, headers=headers, method="GET")
+        try:
+            with _urlopen(request, timeout=self.timeout) as response:
+                if response.status != 200:
+                    raise ProtocolError("Photo fetch failed", retryable=True)
+                data = response.read(1_900_001)
+                if len(data) > 1_900_000:
+                    raise ProtocolError("Photo exceeds size cap", code="photo_size_cap")
+                content_type = response.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as error:
+            raise ProtocolError("Photo fetch failed", status=error.code) from None
+        except (OSError, http.client.HTTPException):
+            raise ProtocolError("Photo fetch failed", retryable=True) from None
+        _contact_succeeded(room_contact(self.base_url, "GET", path))
+        return data, content_type
+
     def artifacts(self, room_id: str) -> dict[str, Any]:
         room = urllib.parse.quote(room_id, safe="")
         return self.request("GET", f"/rooms/{room}/artifacts")

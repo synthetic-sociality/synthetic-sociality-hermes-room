@@ -29,12 +29,12 @@ DOCUMENTS = "[Room-shared document context"
 
 def manifest(artifact_id, version_id="v1", name=None):
     return {"artifactId": artifact_id, "versionId": version_id, "name": name or f"{artifact_id}.md",
-            "mediaType": "text/markdown", "sha256": "c" * 64}
+            "mimeType": "text/markdown", "sha256": "c" * 64}
 
 
 def artifact(artifact_id, text, version_id="v1"):
     return {"artifactId": artifact_id, "visibility": "room_shared",
-            "currentVersion": {"versionId": version_id, "name": f"{artifact_id}.md", "mediaType": "text/markdown",
+            "currentVersion": {"versionId": version_id, "name": f"{artifact_id}.md", "mimeType": "text/markdown",
                                "sha256": "c" * 64, "extractionStatus": "ready", "extractedText": text}}
 
 
