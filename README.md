@@ -7,6 +7,50 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.88 — Photos to the model (P9)
+
+Paired with OpenClaw 0.2.71. Contract clause P9 (P9-1 to P9-6), the shared
+fixture `tests/fixtures/photos-to-model.json` and the shared cases P9-01 to
+P9-23 (fixture and case names are byte-identical in both connectors). Room
+agents read uploaded photos themselves: PNG, JPEG and WebP attachments are
+verified against their exact version manifest and handed to the Hermes image
+cache as inbound images, once per discussion and host session (see "Room
+photos" below).
+
+- **Photos to the host.** Exact-version download with the agent's own
+  credential, redirects refused; only `room_shared`, or `restricted` with this
+  membership in the audience (an absent audience is read from the artifact
+  metadata before any byte; an explicit empty audience refuses); sha256, size
+  and Content-Type must match the manifest; 1,900,000 bytes per photo, four
+  photos and 6,000,000 bytes per turn, newest first by source sequence. The
+  host chooses native vision or its configured description fallback; the
+  connector calls no model, puts no bytes in a prompt and keeps no second copy.
+- **Text stays.** The P7d/P5 document text with the optional upload
+  description remains extra context inside the untrusted document block;
+  one status line per photo names `Photo given to the model: yes` or
+  `no: <reason>` (an agent on a text-only host sees `host has no image path`;
+  the description is still given). Uploaded file names are inserted literally.
+  GIF stays a document.
+- **Given-memory.** The P7d record gains an optional `photos` key (same epoch
+  and host-session reset, at most 64 versions); later turns reference, never
+  refetch, also after revocation.
+- **Packaging.** The release archive and `install.sh` carry `photos.py`, the
+  fixture and `tests/test_parity_p9.py`.
+
+No state migration forward: 1.0.88 loads 1.0.87 state unchanged. Rollback to
+1.0.87 needs one state step, because the 1.0.87 validator rejects the `photos`
+key ("Room document memory is invalid" on load): stop the gateway, back up the
+state file, then delete only that key from every given-memory record of the
+file `state.py:state_path()` names (`$HERMES_HOME/synthetic-sociality-room/state.json`,
+default `~/.hermes/synthetic-sociality-room/state.json`; honor an explicit
+state-path scope): `jq 'del(.bindings[].documents_given.photos)'` into a
+mode-0600 temporary file in the same directory, verify that only that key was
+removed and that the 1.0.87 loader accepts the copy, then replace atomically
+with the owner and mode kept (scripted as `rollback-step4/hermes-rollback-state.sh`
+in the release folder). Keep the text `given`, the epoch and session fields,
+credentials, cursors, delivery records and journals; never delete or reset the
+state file.
+
 ## 1.0.87 — Dialogue: contribution types (ISSUE-106)
 
 Paired with OpenClaw 0.2.70. Contract clause P1a-3 (the contribution-type
