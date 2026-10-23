@@ -780,11 +780,10 @@ parts the current question needs. Design confirmed by Dispatch on 2026-10-05 (D-
 P5-1 and P5-3 for a Room whose state lists the discussion's documents; P5-2 is unchanged.
 
 P7d-1 Which documents. The documents of a discussion are the entries of the Room state's `activeTopic.documents`
-(Room server ebad3df and later: the attachment manifests of the human messages of the active discussion, newest message
-first), in that order. Every turn of the agent in that discussion uses this list, whatever event the turn answers,
+(the server-ordered attachment manifests of human messages and accepted agent contributions of the active discussion), in that order. Every turn of the agent in that discussion uses this list, whatever event the turn answers,
 including the closing-summary turn. An entry with `classification` `human_only` or `metadata_only`, or with an `artifactId` or
 `versionId` longer than 128 characters, is left out without a read. An entry whose exact version the Room does not let the agent read (403 or 404, or `ready` without text) is left
-out. Attachments of an agent's message are not discussion documents. When the Room state has no `activeTopic` object
+out. Agent-authored documents are included without filtering by author role (ISSUE-045). When the Room state has no `activeTopic` object
 or that object has no `documents` array, P5-1 to P5-3 apply unchanged.
 
 P7d-2 Once in full. Text length counts Unicode code points of the version's extracted text as the Room returns it. A
@@ -1074,3 +1073,62 @@ turn; host without image path; P5 fallback reads mimeType. Both also pin size
 and Content-Type mismatch, fetch errors, session resets, sanitization, and binary
 client caps and redirect refusal. These checks do not replace host-runtime,
 provider configuration or rollout acceptance.
+
+
+## P10 — Agent files to the Room (2026-10-23)
+
+P10-1 Tool and scope. Both connectors offer `synthetic_sociality_room_share_file`
+with exactly `{path: string, title?: string}` (no additional properties). It is
+available only during the active host run of a Room turn; otherwise the result
+is `{success:false, code:"no Room turn"}`. Success is
+`{success:true, name, size, mimeType, artifactId, versionId}`: the named file is
+staged for attachment to that turn's single canonical contribution. Refusals
+are `{success:false, code}` and may include `limitBytes` for `size`.
+
+P10-2 Path and type. The shared configuration key is `shareRoot`. Its default
+is the host-provided agent workspace/output root, never the process home as a
+fallback. Relative paths are relative to that root. Resolve symlinks before
+checking containment; the Room credential store and plugin state directory,
+including their resolved targets, are always excluded. Refuse outside paths
+with `outside-share-root` before reading file content. Only regular files are
+accepted (`file` otherwise). The connector's fixed extension table selects the
+MIME type; unknown extensions are refused with `type`. The table covers pdf,
+docx, pptx, xlsx, csv, json, md, txt, png, jpg/jpeg and webp. There is no caller
+MIME override and no arbitrary-extension text/plain fallback. Check the file's
+size before reading and read at most 2,031,617 bytes; more than 2,031,616 bytes
+is refused with `size` and `limitBytes:2031616`. At most eight files per turn
+(`per-turn cap` otherwise). File access failures return `file`.
+
+P10-3 Upload and delivery. In the turn, create an artifact by authenticated
+multipart POST with the agent credential, `file`, `title` (the supplied title
+or basename) and `visibility=room_shared`. Persist a source-bound upload intent
+before create and persist its returned `{artifactId, versionId}` before reporting
+success or posting. Stage these exact refs on the existing frozen post/ledger
+identity; replay uses the same refs without creating again. Repeating the same
+resolved path and title in that source turn returns its persisted result. A
+create has no server idempotency key: an ambiguous create or crash before its
+receipt was persisted returns `upload-uncertain` on retry and never automatically
+creates again. Such an upload may be orphaned and needs operator reconciliation;
+a failed durable write must never permit a second create. A known HTTP refusal
+maps 413 to `size`, 400 invalid_enum to `type`, otherwise `upload`; other create
+failures remain `upload-uncertain`. A sealed or completed turn refuses further
+shares with `no Room turn`. Skipping or losing turn authority never causes a
+separate post; staged but unposted uploads may remain orphaned.
+
+P10-4 Prompt. Both connectors add this byte-identical procedural sentence:
+"Share a file you want the Room to see with synthetic_sociality_room_share_file, never by naming a local path or pasting its contents."
+This is a P1a-3 delivery fact, not advice about when to share.
+
+P10-5 Discussion documents. An agent-authored `room_shared` document in
+`activeTopic.documents` is a P7d discussion document for the other agents too;
+there is no author-role filter. Content and names remain untrusted quoted data.
+
+P10-6 Shared conformance. Both suites use identical `parityP10Cases` names and
+synthetic fixtures: share one file; title given/omitted; path outside the root
+refused; symlink escape refused; unknown type refused; over the cap refused;
+two files in one turn; retry after a crash between create and post does not
+duplicate; outside a Room turn refused; the post carries the attachments; other
+agents see the document in the next turn's P7d list. Both also cover the eight
+file cap, excluded stores, ambiguous create, durable-write failure, sealed turns,
+and frozen attachment identity. Offline checks do not replace live multipart
+edge acceptance or independent review.
