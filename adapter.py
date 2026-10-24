@@ -50,7 +50,7 @@ from .documents import (
     read_version as _read_document_version,
     valid_given_memory as _valid_given_memory,
 )
-from .origin_context import forget_room_context, host_session_for_room, is_room_context, remember_room_session
+from .origin_context import forget_room_context, host_session_for_room, is_room_context
 from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
     InvalidEventPage,
@@ -542,8 +542,10 @@ def _terminal_reason_execution_failure(reason: str) -> dict[str, str]:
 def _on_pre_llm_call(**kwargs: Any) -> None:
     if is_room_context(**kwargs) and _platform_name(kwargs.get("platform")) == NAME:
         # Contract P7d-5: the host session this Room turn runs in.
-        remember_room_session(kwargs.get("session_id"), kwargs.get("sender_id"))
-        share_file.note_host_turn(kwargs.get("session_id"), kwargs.get("turn_id"), kwargs.get("sender_id"))
+        share_file.note_host_turn(
+            kwargs.get("session_id"), kwargs.get("turn_id"), kwargs.get("sender_id"),
+            parent_session_id=kwargs.get("parent_session_id"),
+        )
 
 
 def _platform_name(value: Any) -> str:
@@ -613,6 +615,7 @@ def _secret_store_dirs() -> list[Any]:
 def _on_pre_tool_call(
     tool_name: str = "", **kwargs: Any,
 ) -> dict[str, str] | None:
+    share_file.note_host_tool_call(kwargs.get("session_id"))
     if tool_name == share_file.TOOL_NAME:
         return None  # P10 checks its own root and every excluded store before reading.
     # Contract P2c-1, in every session: a file, search or patch path inside the
@@ -5537,7 +5540,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             lambda data, name, mime, title: RoomProtocol(binding.base_url, binding.credential).create_artifact(binding.room_id, data, name, mime, title),
             sealed=lambda: bool(binding.delivery_intents.get(event_id, {}).get("selected") or binding.delivery_intents.get(event_id, {}).get("post")),
         )
-        share_file.begin(binding.room_id, turn, self._host_session_id(session_key) or session_key)
+        host_session = self._host_session_id(session_key)
+        if not host_session:
+            logger.warning(
+                "Room %s share session unresolved; routing keys are not authority; waiting for the first dispatch hook",
+                binding.room_id,
+            )
+        share_file.begin(binding.room_id, turn, host_session)
         try:
             await self.handle_message(message_event)
         except BaseException:

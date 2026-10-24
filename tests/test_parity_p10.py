@@ -147,6 +147,76 @@ class ShareCases(unittest.TestCase):
         self.assertEqual(self.created, [])
         self.assertTrue(json.loads(share.room_share_file(args, session_id='fresh-session'))['success'])
 
+    def test_replayed_hook_cannot_join_the_next_run_or_reassign_another_room(self):
+        adapter = load_module('adapter')
+        origin = load_module('origin_context')
+        room = 'replay-room'
+        hook = dict(platform=adapter.NAME, sender_id=room,
+                    session_id='old-session', turn_id='old-hook-turn')
+        share.begin(room, self.turn, 'old-session')
+        self.addCleanup(share.end, room, self.turn)
+        adapter._on_pre_llm_call(**hook)
+        share.end(room, self.turn)
+        current = share.ShareTurn({}, self.root, [], lambda: True,
+                                  lambda *_: self.created.append('new') or fixture['artifact'])
+        share.begin(room, current, 'new-session')
+        self.addCleanup(share.end, room, current)
+        args = {'path': str(self.path)}
+        self.assertEqual(json.loads(share.room_share_file(args, session_id='old-session')),
+                         share.refused('no-room-turn'))
+        adapter._on_pre_llm_call(**hook)  # exact old hook, while the NEW run is active
+        self.assertEqual(json.loads(share.room_share_file(args, session_id='old-session')),
+                         share.refused('no-room-turn'))
+        self.assertEqual(self.created, [])
+        other = share.ShareTurn({}, self.root, [], lambda: True,
+                                lambda *_: self.fail('cross-Room upload'))
+        share.begin('other-replay-room', other, 'other-session')
+        self.addCleanup(share.end, 'other-replay-room', other)
+        adapter._on_pre_llm_call(**{**hook, 'sender_id': 'other-replay-room',
+                                   'session_id': 'new-session'})
+        self.assertEqual(origin.room_for_session('new-session'), room)
+        self.assertNotIn('new-session', other.host_sessions)
+        self.assertTrue(json.loads(share.room_share_file(args, session_id='new-session'))['success'])
+        self.assertEqual(self.created, ['new'])
+
+    def test_colliding_member_routing_keys_never_authorize_an_unresolved_run(self):
+        from types import SimpleNamespace
+        from test_parity_p1a import adapter, build_message, HUMAN
+        from test_delivery_lifecycle import hermes_build_session_key
+        keys, answers, warning_counts = [], [], []
+        for member in ('member-a', 'member-b'):
+            def prepare(instance, binding):
+                binding.membership_id = member
+                original_handle = instance.handle_message
+                original_source = instance.build_source
+                def source(**kwargs):
+                    value = original_source(**kwargs)
+                    value.scope_id = value.user_id_alt = value.prospective_thread_id = None
+                    return value
+                instance.build_source = source
+                instance.config = SimpleNamespace(extra={'shareRoot': str(self.root)})
+                instance._event_session_key = lambda event: hermes_build_session_key(event.source)
+                instance._session_store = SimpleNamespace(peek_session_id=lambda _key: '')
+                instance._persist_binding = lambda _binding: True
+                async def handle(message):
+                    keys.append(hermes_build_session_key(message.source))
+                    self.assertEqual((message.source.chat_id, message.source.user_id),
+                                     (binding.room_id, binding.room_id))
+                    if member == 'member-b':
+                        answers.append(json.loads(adapter.share_file.room_share_file(
+                            {'path': str(self.path)}, session_id=keys[0])))
+                    await original_handle(message)
+                instance.handle_message = handle
+            with mock.patch.object(adapter.RoomProtocol, 'create_artifact', return_value=fixture['artifact']) as create, \
+                    mock.patch.object(adapter.logger, 'warning') as warning:
+                build_message(HUMAN, prepare=prepare)
+            self.assertEqual(create.call_count, 0)
+            warning_counts.append(sum('share session unresolved; routing keys are not authority' in call.args[0]
+                                      for call in warning.call_args_list))
+        self.assertEqual(keys[0], keys[1])  # actual core builder + adapter sources, same epoch
+        self.assertEqual(answers, [share.refused('no-room-turn')])
+        self.assertEqual(warning_counts, [1, 1])
+
     def test_hook_adds_rotated_session_only_while_room_run_is_active(self):
         share.note_host_turn('premature-session', 'hook-id', 'rotated-room')
         share.begin('rotated-room', self.turn, 'initial-session')
@@ -154,6 +224,11 @@ class ShareCases(unittest.TestCase):
         args = {'path': str(self.path)}
         self.assertEqual(json.loads(share.room_share_file(args, session_id='premature-session'))['code'], 'no-room-turn')
         share.note_host_turn('rotated-session', 'hook-id', 'rotated-room')
+        self.assertEqual(json.loads(share.room_share_file(args, session_id='rotated-session'))['code'], 'no-room-turn')
+        adapter = load_module('adapter')
+        adapter._on_pre_llm_call(platform=adapter.NAME, sender_id='rotated-room',
+                                 session_id='rotated-session', parent_session_id='initial-session')
+        share.note_host_turn('rotated-session', 'hook-id', 'rotated-room')  # idempotent
         self.assertTrue(json.loads(share.room_share_file(args, session_id='rotated-session', turn_id='tool-id'))['success'])
         share.end('rotated-room', self.turn)
         share.note_host_turn('late-session', 'hook-id', 'rotated-room')
@@ -163,10 +238,10 @@ class ShareCases(unittest.TestCase):
     def test_adapter_binds_known_session_before_handle_message_without_hook(self):
         from types import SimpleNamespace
         from test_parity_p1a import adapter, build_message, HUMAN
-        for resolved in (True, False):
-            with self.subTest(resolved_session=resolved):
+        for resolved, hook in ((True, False), (False, False), (False, True)):
+            with self.subTest(resolved_session=resolved, hook=hook):
                 answers = []
-                session = 'adapter-session' if resolved else 'synthetic-routing-key'
+                session = 'adapter-session' if resolved or hook else 'synthetic-routing-key'
                 def prepare(instance, binding):
                     original_handle = instance.handle_message
                     instance.config = SimpleNamespace(extra={'shareRoot': str(self.root)})
@@ -174,16 +249,29 @@ class ShareCases(unittest.TestCase):
                     instance._session_store = SimpleNamespace(peek_session_id=lambda _key: session if resolved else '')
                     instance._persist_binding = lambda _binding: True
                     async def handle(message):
+                        if hook:
+                            adapter._on_pre_llm_call(platform=adapter.NAME, sender_id=binding.room_id,
+                                                     session_id=session, turn_id='hook-scheme')
+                        if not resolved and not hook:
+                            with mock.patch.object(adapter, '_secret_store_dirs', return_value=[]):
+                                adapter._on_pre_tool_call(tool_name='read_file', session_id=session, args={})
+                            adapter._on_pre_llm_call(platform=adapter.NAME, sender_id=binding.room_id,
+                                                     session_id='too-late-session')
                         answers.append(json.loads(adapter.share_file.room_share_file(
                             {'path': str(self.path)}, session_id=session)))
+                        if not resolved and not hook:
+                            adapter._on_pre_llm_call(platform=adapter.NAME, sender_id=binding.room_id,
+                                                     session_id='too-late-session')
+                            self.assertEqual(json.loads(adapter.share_file.room_share_file(
+                                {'path': str(self.path)}, session_id='too-late-session'))['code'], 'no-room-turn')
                         await original_handle(message)
                     instance.handle_message = handle
                 with mock.patch.object(adapter.RoomProtocol, 'create_artifact', return_value=fixture['artifact']) as create, mock.patch.dict(
                     'sys.modules', {'gateway.session': SimpleNamespace(build_session_key=lambda *_args, **_kw: 'synthetic-routing-key')}
                 ):
                     build_message(HUMAN, prepare=prepare)
-                self.assertTrue(answers[0]['success'])
-                self.assertEqual(create.call_count, 1)
+                self.assertEqual(answers[0]['success'], resolved or hook)
+                self.assertEqual(create.call_count, int(resolved or hook))
                 self.assertEqual(json.loads(adapter.share_file.room_share_file(
                     {'path': str(self.path)}, session_id=session))['code'], 'no-room-turn')
 

@@ -200,6 +200,7 @@ def begin(room_id, turn, session_id=''):
     with _ACTIVE_LOCK:
         if room_id in _ACTIVE: raise RuntimeError('Room share run already active')
         turn.host_sessions = set()
+        turn.host_hook_pending = True
         _bind_session(room_id, turn, session_id)
         _ACTIVE[room_id] = turn
 
@@ -215,16 +216,49 @@ def finish_dispatch(room_id, turn, owner):
     else:
         end(room_id, turn)
 
-def note_host_turn(session_id, turn_id, room_id):
-    # Hooks can discover a newly created/rotated session. Their turn ids are
-    # not a portable authorization token: some executors omit or rename them.
+def note_host_turn(session_id, turn_id, room_id, parent_session_id=''):
+    # Only the first pre-tool hook may discover an unresolved dispatch's
+    # session. Once bound, require the same session or core-reported lineage.
+    # Hook/tool turn ids remain optional, nonportable metadata.
+    from .origin_context import remember_room_session, room_for_session
+    session_id = session_id.strip() if isinstance(session_id, str) else ''
+    parent_session_id = parent_session_id.strip() if isinstance(parent_session_id, str) else ''
+    if not session_id or not room_id:
+        return False
     with _ACTIVE_LOCK:
+        previous_room = room_for_session(session_id)
+        if (previous_room and previous_room != room_id) or any(
+            session_id in other.host_sessions
+            for other_room, other in _ACTIVE.items() if other_room != room_id
+        ):
+            return False  # a hook cannot move another Room's session
         turn = _ACTIVE.get(room_id)
-        if turn is not None:
+        if turn is None:
+            remember_room_session(session_id, room_id)
+            return True  # retain P7d provenance without granting share access
+        allowed = turn.active and (
+            session_id in turn.host_sessions
+            or parent_session_id in turn.host_sessions
+            or (not turn.host_sessions and turn.host_hook_pending)
+        )
+        turn.host_hook_pending = False
+        if allowed:
             _bind_session(room_id, turn, session_id)
+        return allowed
+
+def note_host_tool_call(session_id):
+    from .origin_context import room_for_session
+    room = room_for_session(session_id)
+    with _ACTIVE_LOCK:
+        for room_id, turn in _ACTIVE.items():
+            # Without a resolved identity, an unattributable tool call closes
+            # discovery conservatively; a later hook cannot grant authority.
+            if room_id == room or (not room and not turn.host_sessions):
+                turn.host_hook_pending = False
 
 def room_share_file(args, **metadata):
     from .origin_context import room_for_session
+    note_host_tool_call(metadata.get('session_id'))
     room = room_for_session(metadata.get('session_id'))
     with _ACTIVE_LOCK:
         turn = _ACTIVE.get(room)
