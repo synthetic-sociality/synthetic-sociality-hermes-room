@@ -80,7 +80,8 @@ def probe():
         (root / 'draft.md').write_text('Synthetic shared file.\n')
         turn = share.ShareTurn({}, root, [], lambda: True,
             lambda *_: creates.append(True) or {'artifactId': 'synthetic-artifact', 'versionId': 'synthetic-version'})
-        share.begin('synthetic-room', turn)
+        # Dispatch resolves the session before hooks; hooks cannot discover it.
+        share.begin('synthetic-room', turn, agent.session_id)
         try:
             eval(compile(ast.Expression(hook), str(core / 'agent/turn_context.py'), 'eval'), {
                 '_invoke_hook': lifecycle.invoke_hook, 'agent': agent,

@@ -615,7 +615,6 @@ def _secret_store_dirs() -> list[Any]:
 def _on_pre_tool_call(
     tool_name: str = "", **kwargs: Any,
 ) -> dict[str, str] | None:
-    share_file.note_host_tool_call(kwargs.get("session_id"))
     if tool_name == share_file.TOOL_NAME:
         return None  # P10 checks its own root and every excluded store before reading.
     # Contract P2c-1, in every session: a file, search or patch path inside the
@@ -5543,7 +5542,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         host_session = self._host_session_id(session_key)
         if not host_session:
             logger.warning(
-                "Room %s share session unresolved; routing keys are not authority; waiting for the first dispatch hook",
+                "Room %s share session unresolved; routing keys are not authority; sharing disabled for this dispatch",
                 binding.room_id,
             )
         share_file.begin(binding.room_id, turn, host_session)
