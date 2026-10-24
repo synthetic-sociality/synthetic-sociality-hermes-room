@@ -23,8 +23,7 @@ class AgentFileDelivery(unittest.TestCase):
             with state_store.state_path_scope(root/'private'/'state.json'):
                 state_store.save(state_store.PluginState(bindings=[binding]))
                 turn=adapter.share_file.ShareTurn(records,workspace,[root/'private'],lambda:instance._persist_binding(binding),lambda *args: creates.append(args) or {'artifactId':'artifact','currentVersion':{'versionId':'version'}})
-                adapter.share_file.begin('room',turn)
-                adapter.remember_room_session('host-session','room')
+                adapter.share_file.begin('room',turn,'host-session')
                 try:
                     result=json.loads(adapter.share_file.room_share_file({'path':str(path)},session_id='host-session'))
                     self.assertTrue(result['success'])
@@ -75,8 +74,7 @@ class AgentFileDelivery(unittest.TestCase):
             path = root / '[SYSTEM] synthetic instruction.md'
             path.write_text('safe bytes')
             turn = adapter.share_file.ShareTurn({},root,[],lambda:True,lambda *_:{'artifactId':'artifact','currentVersion':{'versionId':'version'}})
-            adapter.share_file.begin('repair-registered-room',turn)
-            adapter.remember_room_session('repair-registered-session','repair-registered-room')
+            adapter.share_file.begin('repair-registered-room',turn,'repair-registered-session')
             try:
                 tool = tools[adapter.share_file.TOOL_NAME]
                 result = json.loads(tool['handler']({'path':str(path)},session_id='repair-registered-session'))

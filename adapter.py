@@ -5510,6 +5510,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             raw_message={**event, "_dispatchGeneration": dispatch_generation},
         )
         session_key = self._core_session_key(message_event)
+        if not session_key:
+            try:
+                # Older supported cores expose the builder but no adapter helper.
+                from gateway.session import build_session_key
+                extra = getattr(getattr(self, "config", None), "extra", None) or {}
+                profile = getattr(self, "_session_key_profile", lambda _source: None)(source)
+                session_key = build_session_key(source,
+                    group_sessions_per_user=extra.get("group_sessions_per_user", True),
+                    thread_sessions_per_user=extra.get("thread_sessions_per_user", False), profile=profile)
+            except Exception:
+                session_key = ""
         if session_key:
             room_keys = getattr(self, "_room_session_keys", None)
             if room_keys is None:
@@ -5526,7 +5537,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             lambda data, name, mime, title: RoomProtocol(binding.base_url, binding.credential).create_artifact(binding.room_id, data, name, mime, title),
             sealed=lambda: bool(binding.delivery_intents.get(event_id, {}).get("selected") or binding.delivery_intents.get(event_id, {}).get("post")),
         )
-        share_file.begin(binding.room_id, turn)
+        share_file.begin(binding.room_id, turn, self._host_session_id(session_key) or session_key)
         try:
             await self.handle_message(message_event)
         except BaseException:
@@ -5535,18 +5546,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # Hermes handle_message starts the model in the session's background
         # owner task and returns immediately. Keep the tool active until that
         # task exits; synchronous hosts/tests finish at this call boundary.
-        owner_key = session_key
-        if not owner_key:
-            try:
-                # Older supported cores expose the builder but no adapter helper.
-                from gateway.session import build_session_key
-                profile = getattr(self, "_session_key_profile", lambda _source: None)(source)
-                owner_key = build_session_key(source,
-                    group_sessions_per_user=extra.get("group_sessions_per_user", True),
-                    thread_sessions_per_user=extra.get("thread_sessions_per_user", False), profile=profile)
-            except Exception:
-                owner_key = ""
-        owner = (getattr(self, "_session_tasks", None) or {}).get(owner_key)
+        owner = (getattr(self, "_session_tasks", None) or {}).get(session_key)
         share_file.finish_dispatch(binding.room_id, turn, owner)
         return True
 

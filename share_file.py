@@ -185,13 +185,22 @@ class ShareTurn:
                 return record['result']
             return refused('upload-uncertain')
 
-# A host run registers its exact Room; the hook binds the host session to it.
+# Bind sessions to this active run, independently of host turn-id schemes.
 _ACTIVE = {}
 _ACTIVE_LOCK = threading.Lock()
 
-def begin(room_id, turn):
+def _bind_session(room_id, turn, session_id):
+    from .origin_context import remember_room_session
+    session_id = session_id.strip() if isinstance(session_id, str) else ''
+    if session_id:
+        remember_room_session(session_id, room_id)
+        turn.host_sessions.add(session_id)
+
+def begin(room_id, turn, session_id=''):
     with _ACTIVE_LOCK:
         if room_id in _ACTIVE: raise RuntimeError('Room share run already active')
+        turn.host_sessions = set()
+        _bind_session(room_id, turn, session_id)
         _ACTIVE[room_id] = turn
 
 def end(room_id, turn):
@@ -207,19 +216,23 @@ def finish_dispatch(room_id, turn, owner):
         end(room_id, turn)
 
 def note_host_turn(session_id, turn_id, room_id):
+    # Hooks can discover a newly created/rotated session. Their turn ids are
+    # not a portable authorization token: some executors omit or rename them.
     with _ACTIVE_LOCK:
         turn = _ACTIVE.get(room_id)
         if turn is not None:
-            turn.host_session = str(session_id or '')
-            turn.host_turn = str(turn_id or '')
+            _bind_session(room_id, turn, session_id)
 
 def room_share_file(args, **metadata):
     from .origin_context import room_for_session
     room = room_for_session(metadata.get('session_id'))
     with _ACTIVE_LOCK:
         turn = _ACTIVE.get(room)
-    if turn is not None and getattr(turn, 'host_turn', '') and str(metadata.get('turn_id') or '') != turn.host_turn:
-        turn = None
+        session_id = metadata.get('session_id')
+        session_id = session_id.strip() if isinstance(session_id, str) else ''
+        # A historical session->Room entry alone grants no new turn authority.
+        if turn is not None and session_id not in turn.host_sessions:
+            turn = None
     return json.dumps(turn.share(args) if turn else refused('no-room-turn'), ensure_ascii=False, separators=(',', ':'))
 
 

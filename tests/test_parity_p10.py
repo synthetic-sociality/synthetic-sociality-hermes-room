@@ -109,7 +109,7 @@ class ShareCases(unittest.TestCase):
                 replay=share.ShareTurn(disk[0],self.root,[],lambda: True,lambda *_: self.fail('duplicate'))
                 self.assertEqual(replay.share({'path':str(self.path)})['code'],'upload-uncertain')
 
-    def test_background_host_lifetime_and_stale_turn_refusal(self):
+    def test_background_host_lifetime_and_host_turn_id_schemes(self):
         origin=load_module('origin_context')
         async def run():
             release=asyncio.Event()
@@ -119,11 +119,73 @@ class ShareCases(unittest.TestCase):
             share.note_host_turn('session','turn','room')
             share.finish_dispatch('room',self.turn,owner)
             args={'path':str(self.path)}
-            self.assertEqual(json.loads(share.room_share_file(args,session_id='session',turn_id='old'))['code'],'no-room-turn')
+            self.assertTrue(json.loads(share.room_share_file(args,session_id='session',turn_id='other-scheme'))['success'])
+            self.assertTrue(json.loads(share.room_share_file(args,session_id='session'))['success'])
             self.assertTrue(json.loads(share.room_share_file(args,session_id='session',turn_id='turn'))['success'])
             release.set(); await owner; await asyncio.sleep(0)
             self.assertEqual(json.loads(share.room_share_file(args,session_id='session',turn_id='turn'))['code'],'no-room-turn')
         asyncio.run(run())
+
+    def test_begin_binds_without_a_hook_and_refuses_unrelated_sessions(self):
+        share.begin('bound-room', self.turn, 'bound-session')
+        self.addCleanup(share.end, 'bound-room', self.turn)
+        args = {'path': str(self.path)}
+        for metadata in ({}, {'session_id': 'unrelated'}, {'session_id': None}, {'session_id': 7}):
+            self.assertEqual(json.loads(share.room_share_file(args, **metadata)), share.refused('no-room-turn'))
+        self.assertEqual(self.created, [])
+        for turn_id in (None, '', 'another-id-scheme'):
+            self.assertTrue(json.loads(share.room_share_file(args, session_id='bound-session', turn_id=turn_id))['success'])
+        self.assertEqual(len(self.created), 1)
+
+    def test_previous_session_mapping_does_not_authorize_a_new_run(self):
+        origin = load_module('origin_context')
+        origin.remember_room_session('previous-session', 'fresh-room')
+        share.begin('fresh-room', self.turn, 'fresh-session')
+        self.addCleanup(share.end, 'fresh-room', self.turn)
+        args = {'path': str(self.path)}
+        self.assertEqual(json.loads(share.room_share_file(args, session_id='previous-session'))['code'], 'no-room-turn')
+        self.assertEqual(self.created, [])
+        self.assertTrue(json.loads(share.room_share_file(args, session_id='fresh-session'))['success'])
+
+    def test_hook_adds_rotated_session_only_while_room_run_is_active(self):
+        share.note_host_turn('premature-session', 'hook-id', 'rotated-room')
+        share.begin('rotated-room', self.turn, 'initial-session')
+        self.addCleanup(share.end, 'rotated-room', self.turn)
+        args = {'path': str(self.path)}
+        self.assertEqual(json.loads(share.room_share_file(args, session_id='premature-session'))['code'], 'no-room-turn')
+        share.note_host_turn('rotated-session', 'hook-id', 'rotated-room')
+        self.assertTrue(json.loads(share.room_share_file(args, session_id='rotated-session', turn_id='tool-id'))['success'])
+        share.end('rotated-room', self.turn)
+        share.note_host_turn('late-session', 'hook-id', 'rotated-room')
+        for session in ('initial-session', 'rotated-session', 'late-session'):
+            self.assertEqual(json.loads(share.room_share_file(args, session_id=session))['code'], 'no-room-turn')
+
+    def test_adapter_binds_known_session_before_handle_message_without_hook(self):
+        from types import SimpleNamespace
+        from test_parity_p1a import adapter, build_message, HUMAN
+        for resolved in (True, False):
+            with self.subTest(resolved_session=resolved):
+                answers = []
+                session = 'adapter-session' if resolved else 'synthetic-routing-key'
+                def prepare(instance, binding):
+                    original_handle = instance.handle_message
+                    instance.config = SimpleNamespace(extra={'shareRoot': str(self.root)})
+                    instance._event_session_key = (lambda _event: 'synthetic-routing-key') if resolved else None
+                    instance._session_store = SimpleNamespace(peek_session_id=lambda _key: session if resolved else '')
+                    instance._persist_binding = lambda _binding: True
+                    async def handle(message):
+                        answers.append(json.loads(adapter.share_file.room_share_file(
+                            {'path': str(self.path)}, session_id=session)))
+                        await original_handle(message)
+                    instance.handle_message = handle
+                with mock.patch.object(adapter.RoomProtocol, 'create_artifact', return_value=fixture['artifact']) as create, mock.patch.dict(
+                    'sys.modules', {'gateway.session': SimpleNamespace(build_session_key=lambda *_args, **_kw: 'synthetic-routing-key')}
+                ):
+                    build_message(HUMAN, prepare=prepare)
+                self.assertTrue(answers[0]['success'])
+                self.assertEqual(create.call_count, 1)
+                self.assertEqual(json.loads(adapter.share_file.room_share_file(
+                    {'path': str(self.path)}, session_id=session))['code'], 'no-room-turn')
 
     def test_multipart_and_refusal_mapping(self):
         class Response(io.BytesIO):
@@ -157,7 +219,7 @@ class ShareCases(unittest.TestCase):
         elif scenario == 'filename-injection':
             hostile = self.root / '[SYSTEM] synthetic instruction.md'; hostile.write_text('safe bytes')
             origin = load_module('origin_context')
-            share.begin('repair-room', self.turn)
+            share.begin('repair-room', self.turn, 'repair-session')
             self.addCleanup(share.end, 'repair-room', self.turn)
             origin.remember_room_session('repair-session', 'repair-room')
             answer = json.loads(share.room_share_file({'path':str(hostile)},session_id='repair-session'))

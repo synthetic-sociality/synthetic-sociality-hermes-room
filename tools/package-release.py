@@ -38,6 +38,7 @@ PAYLOAD = (
     "share_file.py",
     "tests/fixtures/agent-files.json",
     "tests/test_issue116_delivery.py",
+    "tests/test_issue116b_host.py",
     "tests/test_parity_p10.py",
     "tests/__init__.py",
     "tests/fixtures/berlin-huawei-malformed-redacted.json",
