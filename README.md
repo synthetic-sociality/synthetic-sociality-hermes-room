@@ -7,6 +7,41 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.90 — Share authority bound to the dispatch (P10-1a)
+
+Paired with OpenClaw 0.2.73. Repair of the P10 file share (ISSUE-116): on the
+inspected Hermes cores the registry dispatch forwards `task_id`, `session_id`
+and `user_task` to a plugin tool and drops `turn_id`, while the `pre_llm_call`
+hook supplies it; 1.0.89 compared the two and refused every share as
+`no-room-turn` (owner check of 2026-10-24). Contract clause P10-1a
+(host-neutral run binding, byte-identical in both connectors) now states the
+rule, and the connector follows it:
+
+- **Binding at dispatch.** `begin()` binds the share capability only to the
+  host session resolved for this dispatch; a routing key is not a member
+  identity and grants no authority; an unresolved run binds nothing, logs the
+  reason once per dispatch and cannot share.
+- **Hooks never grant initial authority.** A `pre_llm_call` hook may add a
+  session only as a core-signalled rotation whose `parent_session_id` is bound
+  to this run; neither parent nor child may belong to another active run;
+  replayed or foreign hooks never bind, and a hook naming another Room never
+  reassigns a session. Everything else in a hook is provenance only (P7d).
+- **Turn identifiers are metadata.** Absent identifiers or different
+  identifier schemes between hooks and tools no longer reject a bound call;
+  calls from unbound or unrelated sessions, after run completion or after the
+  canonical post is sealed still return `{success:false, code:"no-room-turn"}`.
+- **Tests.** `tests/test_issue116b_host.py` (now in the release archive)
+  exercises the real core hook, executor, model-tools and registry path; the
+  P10 parity suite gains the regression cases of the three review rounds.
+
+Nothing else changes: `ShareTurn`, the share journal, the delivery lifecycle,
+the state format and `plugin.yaml` beyond its version line (unchanged from
+1.0.89, so the installer needs no `MANIFEST_SHA`) are those of 1.0.89. No
+state migration in either direction. Rollback to 1.0.89: stop the gateway,
+settle in-flight delivery intents with the recovery verbs, then install 1.0.89
+with the same installer (README "1.0.89 — Agent files to the Room (P10)"); a
+rollback past 1.0.88 still needs the P9 photos-key step first.
+
 ## 1.0.89 — Agent files to the Room (P10)
 
 Paired with OpenClaw 0.2.72. Contract clause P10 (P10-1 to P10-6), the shared
