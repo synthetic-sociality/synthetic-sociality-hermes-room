@@ -1172,3 +1172,27 @@ exclusion/root boundaries, filename injection through registered handlers,
 changed-title uncertainty after reload, paused persist followed by turn end or
 post sealing, sanitized titles, and identifying possible-orphan audit metadata. Offline checks do not replace live multipart
 edge acceptance or independent review.
+
+
+## P11b — Connector User-Agent on every Room request (2026-10-25)
+
+P11b-1 Product User-Agent. Every connector HTTP request to the Room carries the
+connector's product `User-Agent`; the photo download included. The value comes
+from one shared constant of the connector and is set on each request kind
+alike: the JSON API calls, the multipart artifact upload (P10-3), the event
+stream and the P9-2 download. No Room request goes out with the runtime
+library's default agent (Hermes `urllib`: `Python-urllib/<version>`; OpenClaw
+`fetch`: `node`). The value names the connector product only (Hermes:
+`synthetic-sociality-hermes/1.0`) and carries no credential, member, host,
+profile, model or installation detail. An edge in front of the Room may refuse
+a library default before the request reaches the Room; such a refusal stays a
+failed contact (P2c-3a), for a photo `fetch error` (P9-4). The connector never
+retries a refused request with another agent value.
+
+P11b-2 Shared conformance. Both suites use the identical `parityP11bCases`
+names: every Room request carries the connector user agent (each request kind
+above, formed through the connector's real request path); photo download
+carries the connector user agent on the wire (a loopback listener records the
+header the runtime actually sends, and sees the library default for a request
+formed without it). These offline checks do not replace a live photo turn
+through the edge after the rollout.

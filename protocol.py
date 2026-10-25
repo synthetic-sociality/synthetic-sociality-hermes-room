@@ -31,6 +31,11 @@ RECONNECT_FIRST_SECONDS = 1.0
 RECONNECT_CAP_SECONDS = 15.0
 RECONNECT_JITTER_LOW = 0.8
 RETRY_AFTER_RATE_LIMIT_MAX_SECONDS = 120.0
+# Contract P11b-1: the connector's product User-Agent, on every Room request
+# (JSON API, multipart upload, event stream, photo download). Without it urllib
+# sends its library default, which an edge in front of the Room may refuse
+# before the request reaches the Room.
+ROOM_USER_AGENT = "synthetic-sociality-hermes/1.0"
 
 
 class RequestNotFormed(ValueError):
@@ -260,7 +265,7 @@ class RoomProtocol:
 
     def _request_once(self, method: str, path: str, payload: Any = None, *, credential: str | None = None) -> Any:
         body = payload.data if isinstance(payload, MultipartBody) else None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
-        headers = {"Accept": "application/json", "User-Agent": "synthetic-sociality-hermes/1.0"}
+        headers = {"Accept": "application/json", "User-Agent": ROOM_USER_AGENT}
         if body is not None:
             headers["Content-Type"] = payload.content_type if isinstance(payload, MultipartBody) else "application/json"
         token = self.credential if credential is None else credential
@@ -506,7 +511,7 @@ class RoomProtocol:
                 "Accept": "text/event-stream",
                 "Cache-Control": "no-store",
                 "Authorization": f"Bearer {self.credential}",
-                "User-Agent": "synthetic-sociality-hermes/1.0",
+                "User-Agent": ROOM_USER_AGENT,
             },
             method="GET",
         )
@@ -618,7 +623,7 @@ class RoomProtocol:
         """P9: bounded binary download with this membership's credential, no redirects."""
         room, artifact, version = (urllib.parse.quote(item, safe="") for item in (room_id, artifact_id, version_id))
         path = f"/rooms/{room}/artifacts/{artifact}/versions/{version}/download"
-        headers = {"Accept": mime_type, "Authorization": f"Bearer {self.credential}"}
+        headers = {"Accept": mime_type, "Authorization": f"Bearer {self.credential}", "User-Agent": ROOM_USER_AGENT}
         request = _new_request(self.base_url + path, headers=headers, method="GET")
         try:
             with _urlopen(request, timeout=self.timeout) as response:

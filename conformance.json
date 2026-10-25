@@ -1525,5 +1525,10 @@
       "name": "P10-R08 late create receipt is never staged after turn closes",
       "scenario": "late-receipt"
     }
+  ],
+  "parityP11bContract": "docs/delivery-lifecycle-contract-v1.md#p11b--connector-user-agent-on-every-room-request-2026-10-25",
+  "parityP11bCases": [
+    "every Room request carries the connector user agent",
+    "photo download carries the connector user agent on the wire"
   ]
 }
