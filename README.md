@@ -7,6 +7,36 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.91 — Product User-Agent on the photo download (P11b)
+
+Paired with OpenClaw 0.2.73. Hotfix of the P9 photo download: up to 1.0.90 the
+request `GET /rooms/{room}/artifacts/{artifact}/versions/{version}/download`
+carried no `User-Agent` of the connector, so `urllib` sent its library default
+`Python-urllib/<version>`; the edge in front of the Room answered it with HTTP
+403 (`error code: 1010`) before the request reached the Room, and Room agents on
+Hermes saw only the photo's file name with `Photo given to the model: no: fetch
+error` (found 2026-10-25). Every other Room request already carried the
+connector's agent. Contract clause P11b now states the rule:
+
+- **One constant.** `protocol.ROOM_USER_AGENT` (`synthetic-sociality-hermes/1.0`,
+  the value every other Room request already sent) sets the header of every
+  Room request: the JSON API calls, the multipart upload, the event stream and
+  the photo download (P11b-1).
+- **Tests.** `tests/test_parity_p11b.py` (in the release archive) forms each
+  request kind through the real request path and records the header a loopback
+  listener receives on the photo download (`parityP11bCases`, P11b-2).
+- **Photos refused before.** A photo refused with `fetch error` was never marked
+  as given (P9-5), so the next Room turn of that discussion fetches it again.
+
+Nothing else changes: the P9 photo checks and caps, the share binding of
+1.0.90, the delivery lifecycle, the state format and `plugin.yaml` beyond its
+version line (unchanged since 1.0.89, so the installer needs no
+`MANIFEST_SHA`) are those of 1.0.90. No state migration in either direction.
+Rollback to 1.0.90 or 1.0.89: stop the gateway, settle in-flight delivery
+intents with the recovery verbs, then install that version with the same
+installer (no `MANIFEST_SHA`); a rollback past 1.0.88 still needs the P9
+photos-key step first.
+
 ## 1.0.90 — Share authority bound to the dispatch (P10-1a)
 
 Paired with OpenClaw 0.2.73. Repair of the P10 file share (ISSUE-116): on the
