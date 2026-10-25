@@ -1,11 +1,14 @@
 """P11b: the connector's product User-Agent on every Room request (contract P11b-1, shared cases P11b-2).
 
 Offline: the real request path of ``protocol.RoomProtocol`` with ``_urlopen`` patched to capture the formed
-request, and one loopback listener that records the header ``urllib`` actually sends on the photo download.
-No Room, edge or provider contact."""
+request for each request kind P11b-1 names, and one loopback listener that records the header ``urllib`` actually
+sends on the photo download. The cases cover the request kinds the connector sends today; a new request kind is added
+here with its code (P11b-2), and future code is held to P11b-1 by review, not by a static scan. No Room, edge or
+provider contact."""
 
 from __future__ import annotations
 
+import ast
 import http.server
 import io
 import json
@@ -42,6 +45,27 @@ def _anchor(heading: str) -> str:
     return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
 
 
+def _dotted(expr) -> str:
+    parts = []
+    while isinstance(expr, ast.Attribute):
+        parts.append(expr.attr)
+        expr = expr.value
+    if not isinstance(expr, ast.Name):
+        return ""
+    parts.append(expr.id)
+    return ".".join(reversed(parts))
+
+
+def _product_literals() -> list[tuple[str, int]]:
+    """Every string constant equal to the product agent in the shipped modules, as (module, line)."""
+    found = []
+    for path in sorted(ROOT.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), path.name)):
+            if isinstance(node, ast.Constant) and node.value == PRODUCT:
+                found.append((path.name, node.lineno))
+    return found
+
+
 class ParityP11bConformanceTests(unittest.TestCase):
     def test_conformance_names_the_clause_and_the_shared_cases(self):
         self.assertEqual(CONFORMANCE["parityP11bCases"], CASES)
@@ -57,10 +81,13 @@ class ParityP11bConformanceTests(unittest.TestCase):
 class ParityP11bTests(unittest.TestCase):
     def test_every_room_request_carries_the_connector_user_agent(self):
         self.assertEqual(protocol.ROOM_USER_AGENT, PRODUCT)
-        source = (ROOT / "protocol.py").read_text(encoding="utf-8")
-        # One shared constant: the literal exists once, and every request the module forms sets it.
-        self.assertEqual(source.count(f'"{PRODUCT}"'), 1)
-        self.assertEqual(source.count("_new_request(") - 1, source.count('"User-Agent": ROOM_USER_AGENT'))
+        # One shared constant: the product string exists once in the shipped modules, as the value of ROOM_USER_AGENT.
+        literals = _product_literals()
+        self.assertEqual(len(literals), 1, literals)
+        assigned = [node for node in ast.walk(ast.parse((ROOT / "protocol.py").read_text(encoding="utf-8")))
+                    if isinstance(node, ast.Assign) and [_dotted(target) for target in node.targets] == ["ROOM_USER_AGENT"]]
+        self.assertEqual([(literal.lineno, literal.value.value) for literal in assigned], [(literals[0][1], PRODUCT)])
+        self.assertEqual(literals[0][0], "protocol.py")
         api = protocol.RoomProtocol("https://room.example.test/api", "synthetic-credential")
         stream = b'event: ready\ndata: {"ready": true}\n\n'
         kinds = {
