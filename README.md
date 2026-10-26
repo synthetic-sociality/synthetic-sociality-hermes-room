@@ -7,6 +7,24 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## Share continuation repair (unreleased)
+
+File sharing follows compression and gateway reset continuations during the
+active Room dispatch. The adapter pins the owning core session database through
+`SessionStore._db_for_key`; tools use their real `session_id`, without requiring
+parent or turn metadata. Each new session must have a core-recorded parent chain
+to a session already bound to this dispatch and a `started_at` within this
+dispatch. Compression also requires the core's `get_compression_tip` resolver to
+confirm the branch. Gateway resets require the predecessor's `session_reset` or
+`suspended` reason, the child's `_reset_from`, and matching dispatch session keys.
+
+Unknown or historical lineage, missing core APIs, foreign Room bindings, ended
+turns and sealed posts refuse sharing. Existing core `pre_llm_call` delegation
+lineage remains supported; its parent field describes delegation, not
+compression. Tool-supplied parent claims grant no authority. P7d continues to
+track the host session that actually ran, including an authorized continuation.
+No state migration or version change is included in this repair.
+
 ## 1.0.91 — Product User-Agent on the photo download (P11b)
 
 Paired with OpenClaw 0.2.73. Hotfix of the P9 photo download: up to 1.0.90 the

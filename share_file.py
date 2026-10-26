@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 from functools import wraps
 import stat
 import threading
+import time
 from pathlib import Path
 
 TOOL_NAME = 'synthetic_sociality_room_share_file'
@@ -196,10 +198,20 @@ def _bind_session(room_id, turn, session_id):
         remember_room_session(session_id, room_id)
         turn.host_sessions.add(session_id)
 
-def begin(room_id, turn, session_id=''):
+def core_session_db(store, session_key):
+    """Pin the owning core DB through its store; never open a guessed path."""
+    try:
+        db = store._db_for_key(session_key) if session_key else None
+        return db if callable(getattr(db, 'get_session', None)) else None
+    except Exception:
+        return None
+
+def begin(room_id, turn, session_id='', *, session_db=None, session_key=''):
     with _ACTIVE_LOCK:
         if room_id in _ACTIVE: raise RuntimeError('Room share run already active')
         turn.host_sessions = set()
+        turn.started_at = time.time()
+        turn.session_db, turn.session_key = session_db, session_key
         _bind_session(room_id, turn, session_id)
         _ACTIVE[room_id] = turn
 
@@ -224,6 +236,68 @@ def _session_conflicts(room_id, session_id, parent_session_id):
         for other_room, other in _ACTIVE.items() if other_room != room_id
     )
 
+def _continuation(room_id, turn, session_id):
+    """Prove each hop from core rows back to this active dispatch's authority.
+
+    Caller holds _ACTIVE_LOCK. Only newly created compression/reset children
+    qualify; delegation metadata and historical Room mappings are not evidence.
+    Missing APIs, rows, timestamps, cycles or unreadable records fail closed.
+    """
+    reader = getattr(turn.session_db, 'get_session', None)
+    compression_tip = getattr(turn.session_db, 'get_compression_tip', None)
+    if not callable(reader) or not turn.host_sessions:
+        return False
+    seen = set()
+    try:
+        child = reader(session_id)
+        if not isinstance(child, dict) or child.get('ended_at') is not None:
+            return False
+        for _ in range(64):
+            if session_id in seen or _session_conflicts(room_id, session_id, ''):
+                return False
+            seen.add(session_id)
+            if session_id in turn.host_sessions:
+                return True
+            if not isinstance(child, dict) or child.get('id') != session_id:
+                return False
+            started = child.get('started_at')
+            if (isinstance(started, bool) or not isinstance(started, (int, float))
+                    or not math.isfinite(started) or started < turn.started_at):
+                return False
+            parent_id = child.get('parent_session_id')
+            if not isinstance(parent_id, str) or not parent_id:
+                return False
+            parent = reader(parent_id)
+            if (not isinstance(parent, dict) or parent.get('id') != parent_id
+                    or parent.get('ended_at') is None):
+                return False
+            reason = parent.get('end_reason')
+            if reason == 'compression':
+                # A generic parent link is also used for forks/delegation.
+                # The core's canonical resolver must agree on the branch.
+                if not callable(compression_tip):
+                    return False
+                tip = compression_tip(parent_id)
+                if not tip or tip == parent_id or tip != compression_tip(session_id):
+                    return False
+            else:
+                # Gateway resets publish both parent and _reset_from in the
+                # child INSERT. Require the exact dispatch routing key too.
+                config = child.get('model_config')
+                if isinstance(config, str):
+                    config = json.loads(config)
+                if (reason not in ('session_reset', 'suspended')
+                        or not turn.session_key
+                        or child.get('session_key') != turn.session_key
+                        or parent.get('session_key') != turn.session_key
+                        or not isinstance(config, dict)
+                        or config.get('_reset_from') != parent_id):
+                    return False
+            session_id, child = parent_id, parent
+    except Exception:
+        return False
+    return False
+
 def note_host_turn(session_id, turn_id, room_id, parent_session_id=''):
     # Hooks never grant initial authority. Only core-reported lineage from
     # this run's bound sessions may extend its dispatch-time authority.
@@ -243,27 +317,27 @@ def note_host_turn(session_id, turn_id, room_id, parent_session_id=''):
         allowed = turn.active and (
             session_id in turn.host_sessions
             or parent_session_id in turn.host_sessions
+            or _continuation(room_id, turn, session_id)
         )
         if allowed:
             _bind_session(room_id, turn, session_id)
         return allowed
 
 def room_share_file(args, **metadata):
-    from .origin_context import room_for_session
     session_id = metadata.get('session_id')
     session_id = session_id.strip() if isinstance(session_id, str) else ''
-    parent_session_id = metadata.get('parent_session_id')
-    parent_session_id = parent_session_id.strip() if isinstance(parent_session_id, str) else ''
     with _ACTIVE_LOCK:
-        room = room_for_session(session_id) or room_for_session(parent_session_id)
-        turn = _ACTIVE.get(room)
-        # As in the hook, only this run's own session or core-reported parent
-        # grants authority; historical Room mappings alone are insufficient.
-        if (
-            turn is not None and session_id and turn.active
-            and not _session_conflicts(room, session_id, parent_session_id)
-            and (session_id in turn.host_sessions or parent_session_id in turn.host_sessions)
-        ):
+        # Real Hermes kwargs are task_id/session_id/user_task only. Never
+        # accept a claimed parent from tool arguments or handler metadata.
+        matches = [
+            (room, candidate) for room, candidate in _ACTIVE.items()
+            if session_id and candidate.active
+            and not _session_conflicts(room, session_id, '')
+            and (session_id in candidate.host_sessions
+                 or _continuation(room, candidate, session_id))
+        ]
+        if len(matches) == 1:
+            room, turn = matches[0]
             _bind_session(room, turn, session_id)
         else:
             turn = None

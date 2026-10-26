@@ -5545,7 +5545,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 "Room %s share session unresolved; routing keys are not authority; sharing disabled for this dispatch",
                 binding.room_id,
             )
-        share_file.begin(binding.room_id, turn, host_session)
+        share_file.begin(binding.room_id, turn, host_session,
+            session_db=share_file.core_session_db(getattr(self, "_session_store", None), session_key),
+            session_key=session_key)
         try:
             await self.handle_message(message_event)
         except BaseException:
