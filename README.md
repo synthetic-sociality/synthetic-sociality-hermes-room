@@ -7,7 +7,13 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
-## Share continuation repair (unreleased)
+## 1.0.92 — Room share keeps working after context compression (P12)
+
+Paired with OpenClaw 0.2.74. Contract P12 states the shared rule: initial
+authority comes only from dispatch; continuation follows the host's own
+records or reports from a session the live turn already holds. The shared
+`parityP12Cases` and contract anchor are pinned in the binding tests, which
+are included in the release archive.
 
 File sharing follows compression and gateway reset continuations during the
 active Room dispatch. The adapter pins the owning core session database through
@@ -23,7 +29,12 @@ turns and sealed posts refuse sharing. Existing core `pre_llm_call` delegation
 lineage remains supported; its parent field describes delegation, not
 compression. Tool-supplied parent claims grant no authority. P7d continues to
 track the host session that actually ran, including an authorized continuation.
-No state migration or version change is included in this repair.
+No change to the persisted state format or delivery lifecycle; no state
+migration in either direction. `plugin.yaml` beyond its version line is
+byte-identical to 1.0.91, so a rollback to 1.0.91 needs no `MANIFEST_SHA`.
+Rollback to 1.0.91: stop the gateway, settle in-flight delivery intents with
+the recovery verbs, then install 1.0.91 with the same installer. A rollback
+past 1.0.88 still needs the P9 photos-key step first.
 
 ## 1.0.91 — Product User-Agent on the photo download (P11b)
 
