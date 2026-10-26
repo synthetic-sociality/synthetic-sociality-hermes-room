@@ -1196,3 +1196,46 @@ carries the connector user agent on the wire (a loopback listener records the
 header the runtime actually sends, and sees the library default for a request
 formed without it). These offline checks do not replace a live photo turn
 through the edge after the rollout.
+
+
+## P12 — Share authority follows the host's own session continuation (2026-10-26)
+
+P12-1 Host-owned continuation authority. Initial share authority is granted
+only at dispatch start, to the host session resolved for that Room turn
+(P10-1a). It extends only through lineage the host itself records or reports,
+starting from a session the live turn already holds. A continuation cannot
+create initial authority for an unresolved dispatch. Hermes uses its own
+compression continuation records and canonical compression resolver, gateway
+reset/suspension records for the same dispatch session key, or the delegation
+parent reported by the core hook. OpenClaw uses its own `subagent_spawned`
+child and requester session keys. OpenClaw compaction keeps its session key,
+so that continuation already holds the dispatch binding.
+
+Tool-supplied lineage, lineage inferred from identifiers, historical lineage
+and foreign lineage grant no authority. Prior-turn continuations do not join
+a successor merely because an ancestor or Room mapping is known. Hermes
+record-based continuation requires the new session to have started during
+the dispatch; OpenClaw requires the host's spawn notification while the
+requester is bound to the open turn. An unknown OpenClaw child before that
+post-launch notification is refused. Missing or ambiguous host evidence fails
+closed. Sharing and new lineage are refused after turn end or canonical post
+sealing (including while the post is being sealed), with `no-room-turn`.
+All accepted descendants share that turn's upload, receipt and sealing gates;
+lineage never moves a session's authority to a foreign Room.
+
+P12-2 Shared conformance. Both suites pin `parityP12Contract` and the identical
+`parityP12Cases` names below. The cases use each host's actual evidence and
+call shape: Hermes compression/reset records and core-hook delegation;
+OpenClaw reported subagent lineage and its unchanged compaction session key.
+These local checks do not replace live host acceptance or independent review.
+
+- P12-01 own session shares without a hook or matching turn identifier
+- P12-02 host-reported continuation of a bound live session can share
+- P12-03 routing provenance or historical Room mapping grants no authority
+- P12-04 host-reported descendant chain shares and reuses the receipt
+- P12-05 turn end refuses bound sessions and late continuations
+- P12-06 historical continuations cannot join a successor turn
+- P12-07 missing identities and tool-supplied or unrecorded lineage are refused
+- P12-08 foreign lineage cannot move authority between Rooms
+- P12-09 unresolved dispatch and historical parent grant no authority
+- P12-10 canonical post sealing refuses sharing and new lineage

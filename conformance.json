@@ -1530,5 +1530,18 @@
   "parityP11bCases": [
     "every Room request carries the connector user agent",
     "photo download carries the connector user agent on the wire"
+  ],
+  "parityP12Contract": "docs/delivery-lifecycle-contract-v1.md#p12--share-authority-follows-the-hosts-own-session-continuation-2026-10-26",
+  "parityP12Cases": [
+    "P12-01 own session shares without a hook or matching turn identifier",
+    "P12-02 host-reported continuation of a bound live session can share",
+    "P12-03 routing provenance or historical Room mapping grants no authority",
+    "P12-04 host-reported descendant chain shares and reuses the receipt",
+    "P12-05 turn end refuses bound sessions and late continuations",
+    "P12-06 historical continuations cannot join a successor turn",
+    "P12-07 missing identities and tool-supplied or unrecorded lineage are refused",
+    "P12-08 foreign lineage cannot move authority between Rooms",
+    "P12-09 unresolved dispatch and historical parent grant no authority",
+    "P12-10 canonical post sealing refuses sharing and new lineage"
   ]
 }

@@ -10,6 +10,7 @@ import ast
 import copy
 from contextlib import nullcontext
 import json
+import re
 import tempfile
 import time
 import types
@@ -22,6 +23,38 @@ from support import ROOT, load_module
 share = load_module('share_file')
 origin = load_module('origin_context')
 CORE = ROOT.parent / 'hermes-core-7cadfaa6'
+
+CONFORMANCE = json.loads((ROOT / "conformance.json").read_text(encoding="utf-8"))
+CONTRACT = (ROOT / "docs/delivery-lifecycle-contract-v1.md").read_text(encoding="utf-8")
+CASES = [
+    'P12-01 own session shares without a hook or matching turn identifier',
+    'P12-02 host-reported continuation of a bound live session can share',
+    'P12-03 routing provenance or historical Room mapping grants no authority',
+    'P12-04 host-reported descendant chain shares and reuses the receipt',
+    'P12-05 turn end refuses bound sessions and late continuations',
+    'P12-06 historical continuations cannot join a successor turn',
+    'P12-07 missing identities and tool-supplied or unrecorded lineage are refused',
+    'P12-08 foreign lineage cannot move authority between Rooms',
+    'P12-09 unresolved dispatch and historical parent grant no authority',
+    'P12-10 canonical post sealing refuses sharing and new lineage',
+]
+
+
+class ParityP12ConformanceTests(unittest.TestCase):
+    def test_conformance_names_the_clause_and_the_shared_cases(self):
+        self.assertEqual(CONFORMANCE["parityP12Cases"], CASES)
+        document, anchor = CONFORMANCE["parityP12Contract"].split("#", 1)
+        self.assertEqual(document, "docs/delivery-lifecycle-contract-v1.md")
+        self.assertEqual(anchor, "p12--share-authority-follows-the-hosts-own-session-continuation-2026-10-26")
+        headings = [line[3:] for line in CONTRACT.split("\n") if line.startswith("## ")]
+        anchors = {re.sub(r"[^\w\- ]", "", title.strip().lower()).replace(" ", "-")
+                   for title in headings}
+        self.assertIn(anchor, anchors)
+        self.assertEqual(CONTRACT.count("## P12 — Share authority follows the host's own session continuation (2026-10-26)"), 1)
+        self.assertIn("\nP12-1 Host-owned continuation authority.", CONTRACT)
+        self.assertIn("\nP12-2 Shared conformance.", CONTRACT)
+        section = CONTRACT.split("## P12 — Share authority follows the host's own session continuation (2026-10-26)", 1)[1]
+        self.assertEqual([line[2:] for line in section.splitlines() if line.startswith("- ")], CASES)
 
 
 class CoreRecords:
