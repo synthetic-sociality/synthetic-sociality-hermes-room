@@ -215,21 +215,26 @@ def finish_dispatch(room_id, turn, owner):
     else:
         end(room_id, turn)
 
+def _session_conflicts(room_id, session_id, parent_session_id):
+    # Caller holds _ACTIVE_LOCK. Hooks and tools share the same Room fence.
+    from .origin_context import room_for_session
+    previous_room = room_for_session(session_id)
+    return bool(previous_room and previous_room != room_id) or any(
+        session_id in other.host_sessions or parent_session_id in other.host_sessions
+        for other_room, other in _ACTIVE.items() if other_room != room_id
+    )
+
 def note_host_turn(session_id, turn_id, room_id, parent_session_id=''):
     # Hooks never grant initial authority. Only core-reported lineage from
     # this run's bound sessions may extend its dispatch-time authority.
     # Hook/tool turn ids remain optional, nonportable metadata.
-    from .origin_context import remember_room_session, room_for_session
+    from .origin_context import remember_room_session
     session_id = session_id.strip() if isinstance(session_id, str) else ''
     parent_session_id = parent_session_id.strip() if isinstance(parent_session_id, str) else ''
     if not session_id or not room_id:
         return False
     with _ACTIVE_LOCK:
-        previous_room = room_for_session(session_id)
-        if (previous_room and previous_room != room_id) or any(
-            session_id in other.host_sessions or parent_session_id in other.host_sessions
-            for other_room, other in _ACTIVE.items() if other_room != room_id
-        ):
+        if _session_conflicts(room_id, session_id, parent_session_id):
             return False  # a hook cannot move another Room's session
         turn = _ACTIVE.get(room_id)
         if turn is None:
@@ -245,13 +250,22 @@ def note_host_turn(session_id, turn_id, room_id, parent_session_id=''):
 
 def room_share_file(args, **metadata):
     from .origin_context import room_for_session
-    room = room_for_session(metadata.get('session_id'))
+    session_id = metadata.get('session_id')
+    session_id = session_id.strip() if isinstance(session_id, str) else ''
+    parent_session_id = metadata.get('parent_session_id')
+    parent_session_id = parent_session_id.strip() if isinstance(parent_session_id, str) else ''
     with _ACTIVE_LOCK:
+        room = room_for_session(session_id) or room_for_session(parent_session_id)
         turn = _ACTIVE.get(room)
-        session_id = metadata.get('session_id')
-        session_id = session_id.strip() if isinstance(session_id, str) else ''
-        # A historical session->Room entry alone grants no new turn authority.
-        if turn is not None and session_id not in turn.host_sessions:
+        # As in the hook, only this run's own session or core-reported parent
+        # grants authority; historical Room mappings alone are insufficient.
+        if (
+            turn is not None and session_id and turn.active
+            and not _session_conflicts(room, session_id, parent_session_id)
+            and (session_id in turn.host_sessions or parent_session_id in turn.host_sessions)
+        ):
+            _bind_session(room, turn, session_id)
+        else:
             turn = None
     return json.dumps(turn.share(args) if turn else refused('no-room-turn'), ensure_ascii=False, separators=(',', ':'))
 
