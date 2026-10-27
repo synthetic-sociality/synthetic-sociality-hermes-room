@@ -858,7 +858,11 @@ only what that run was given; a run whose session the connector does not know ke
 session never overwrites a known one). A run that ended in the host's operational fallback (OpenClaw: the generic or the
 compaction fallback, settled as `fail`) is a run that failed. OpenClaw remembers the host session per agent and
 conversation.
-Hermes knows the session id from its core before the turn and from the turn's run; OpenClaw knows it only when the
+Hermes knows the session id from its core before the turn and from the turn's run. If no session exists at dispatch,
+P10-1a permits a single initial binding through a live, conflict-free core row with the exact dispatch key and a finite
+`started_at` at or after dispatch start; tools and hooks use the same proof. Routing keys alone remain insufficient.
+OpenClaw share authority already uses the host's resolved route session key, available before session creation; it does
+not wait for a session id. For document memory, OpenClaw knows the session id only when the
 host passes it to the connector (the document tool's context or a tool call of a Room session), so a session change
 there takes effect on the turn after the connector saw it. Each process keeps the texts it read in memory, at most 8
 versions and 4,000,000 characters, oldest first out; a version is read again when it was not `ready`. It also keeps the
@@ -1093,9 +1097,17 @@ P10-1a Host-neutral run binding. Before dispatching a Room turn, the connector
 binds the share capability only to a resolved host session for that run. A
 routing key is not a member identity and must never substitute for that session.
 If resolution is unavailable, bind nothing and log the reason once per dispatch.
-An unresolved run cannot share. Hooks never grant initial authority: a session
-is authorized only by the run that resolved it at dispatch or by a rotation the
-host signalled from a session bound to that run. A rotation's parent must be
+An unresolved run cannot share unless Hermes proves the following one-time
+initial binding from the owning core database: the turn has no bound host sessions
+and has a dispatch session key; `get_session(session_id)` returns the matching,
+not-ended core row; its `session_key` equals the dispatch key exactly; its
+`started_at` is finite and at or after dispatch start; and the session conflicts
+with no other Room provenance or active Room binding. Missing APIs, rows or
+timestamps fail closed. Both tools and hooks use this same proof. Once bound,
+the ordinary continuation rules apply; a second fresh same-key session alone
+cannot bind. Apart from this exception, hooks never grant initial authority: a
+session is authorized only by the run that resolved it at dispatch or by a
+rotation the host signalled from a session bound to that run. A rotation's parent must be
 bound to this run and never to another active run; its new session must not be
 bound to any other active run. Replayed or foreign hooks never bind, and a hook
 naming another Room must not reassign a session. All other hook metadata is
@@ -1201,15 +1213,19 @@ through the edge after the rollout.
 ## P12 — Share authority follows the host's own session continuation (2026-10-26)
 
 P12-1 Host-owned continuation authority. Initial share authority is granted
-only at dispatch start, to the host session resolved for that Room turn
-(P10-1a). It extends only through lineage the host itself records or reports,
-starting from a session the live turn already holds. A continuation cannot
-create initial authority for an unresolved dispatch. Hermes uses its own
+at dispatch start to the host session resolved for that Room turn (P10-1a),
+or through Hermes's one-time fresh core-row proof in P10-1a when dispatch
+started without a host session. Same-key historical rows and routing keys
+alone cannot bind. After the first binding, authority extends only through
+lineage the host itself records or reports, starting from a session the live
+turn already holds. Hermes uses its own
 compression continuation records and canonical compression resolver, gateway
 reset/suspension records for the same dispatch session key, or the delegation
 parent reported by the core hook. OpenClaw uses its own `subagent_spawned`
 child and requester session keys. OpenClaw compaction keeps its session key,
-so that continuation already holds the dispatch binding.
+so that continuation already holds the dispatch binding. OpenClaw binds the
+host-resolved route session key before the host creates a session, independently
+of its session id, so it has no equivalent missing-initial-session gap.
 
 Tool-supplied lineage, lineage inferred from identifiers, historical lineage
 and foreign lineage grant no authority. Prior-turn continuations do not join
@@ -1237,5 +1253,5 @@ These local checks do not replace live host acceptance or independent review.
 - P12-06 historical continuations cannot join a successor turn
 - P12-07 missing identities and tool-supplied or unrecorded lineage are refused
 - P12-08 foreign lineage cannot move authority between Rooms
-- P12-09 unresolved dispatch and historical parent grant no authority
+- P12-09 unresolved dispatch without fresh core evidence and historical parent grant no authority
 - P12-10 canonical post sealing refuses sharing and new lineage

@@ -97,7 +97,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.92"
+CONNECTOR_VERSION = "1.0.93"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -5542,7 +5542,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         host_session = self._host_session_id(session_key)
         if not host_session:
             logger.warning(
-                "Room %s share session unresolved; routing keys are not authority; sharing disabled for this dispatch",
+                "Room %s share session unresolved; routing keys are not authority; sharing will bind to the session the core creates for this routing key during this dispatch",
                 binding.room_id,
             )
         share_file.begin(binding.room_id, turn, host_session,

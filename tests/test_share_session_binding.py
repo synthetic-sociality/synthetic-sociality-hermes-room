@@ -35,7 +35,7 @@ CASES = [
     'P12-06 historical continuations cannot join a successor turn',
     'P12-07 missing identities and tool-supplied or unrecorded lineage are refused',
     'P12-08 foreign lineage cannot move authority between Rooms',
-    'P12-09 unresolved dispatch and historical parent grant no authority',
+    'P12-09 unresolved dispatch without fresh core evidence and historical parent grant no authority',
     'P12-10 canonical post sealing refuses sharing and new lineage',
 ]
 
@@ -283,8 +283,114 @@ class ShareSessionBindingTests(unittest.TestCase):
         origin.remember_room_session('lineage-unresolved-parent', 'lineage-unresolved-room')
         unresolved = self.begin('lineage-unresolved-room', '')
         self.db.rotate('lineage-unresolved-parent', 'lineage-unresolved-child')
+        self.db.rows['lineage-unresolved-child']['started_at'] = unresolved.started_at - 1
         self.refused('lineage-unresolved-child')
         self.assertEqual(unresolved.host_sessions, set())
+
+    def unresolved(self):
+        share.end('lineage-room', self.turn)
+        self.turn = self.begin('lineage-room', '')
+        return self.turn
+
+    def test_fresh_session_binds_at_first_tool_call_or_hook(self):
+        for entry in ('tool', 'hook'):
+            with self.subTest(entry=entry):
+                turn = self.unresolved()
+                session = 'lineage-fresh-' + entry
+                self.db.row(session)
+                # Equality is intentional: core timestamps can be identical.
+                self.db.rows[session]['started_at'] = turn.started_at
+                if entry == 'hook':
+                    self.assertTrue(share.note_host_turn(session, '', 'lineage-room'))
+                    self.assertEqual(turn.host_sessions, {session})
+                self.assertTrue(self.call(session)['success'])
+                self.assertEqual(turn.host_sessions, {session})
+                self.assertEqual(origin.host_session_for_room('lineage-room'), session)
+
+    def test_fresh_session_needs_no_compression_api(self):
+        turn = self.unresolved()
+        self.db.row('lineage-fresh-reader-only')
+        turn.session_db = types.SimpleNamespace(get_session=self.db.get_session)
+        self.assertTrue(self.call('lineage-fresh-reader-only')['success'])
+        self.assertEqual(turn.host_sessions, {'lineage-fresh-reader-only'})
+
+    def test_fresh_session_requires_live_exact_key_row_and_finite_dispatch_timestamp(self):
+        turn = self.unresolved()
+        self.db.row('lineage-fresh-invalid')
+        valid = copy.deepcopy(self.db.rows['lineage-fresh-invalid'])
+        for field, value in (
+            ('session_key', 'foreign-key'), ('session_key', 'lineage-key '),
+            ('session_key', None), ('id', 'another-session'),
+            ('ended_at', time.time()),
+            *[('started_at', value) for value in
+              (None, '', True, float('nan'), float('inf'), float('-inf'), turn.started_at - 1)],
+        ):
+            with self.subTest(field=field, value=value):
+                self.db.rows['lineage-fresh-invalid'] = {**valid, field: value}
+                self.assertFalse(share.note_host_turn('lineage-fresh-invalid', '', 'lineage-room'))
+                self.refused('lineage-fresh-invalid')
+                self.assertEqual(turn.host_sessions, set())
+        self.assertEqual(self.created, [])
+
+    def test_fresh_session_missing_evidence_fails_closed(self):
+        turn = self.unresolved()
+        self.db.row('lineage-fresh-missing')
+        for db in (None, types.SimpleNamespace(),
+                   types.SimpleNamespace(get_session=mock.Mock(side_effect=OSError('unreadable'))),
+                   types.SimpleNamespace(get_session=lambda _: None),
+                   types.SimpleNamespace(get_session=lambda _: {})):
+            with self.subTest(db=db):
+                turn.session_db = db
+                self.assertFalse(share.note_host_turn('lineage-fresh-missing', '', 'lineage-room'))
+                self.refused('lineage-fresh-missing')
+                self.assertEqual(turn.host_sessions, set())
+        turn.session_db, turn.session_key = self.db, ''
+        self.assertFalse(share.note_host_turn('lineage-fresh-missing', '', 'lineage-room'))
+        self.refused('lineage-fresh-missing')
+        self.assertEqual(turn.host_sessions, set())
+        self.assertEqual(self.created, [])
+
+    def test_second_fresh_session_requires_existing_continuation_rules(self):
+        turn = self.unresolved()
+        self.db.row('lineage-fresh-first')
+        self.assertTrue(self.call('lineage-fresh-first')['success'])
+        self.db.row('lineage-fresh-second')
+        self.assertFalse(share.note_host_turn('lineage-fresh-second', '', 'lineage-room'))
+        self.refused('lineage-fresh-second')
+        self.assertEqual(turn.host_sessions, {'lineage-fresh-first'})
+        self.db.rotate('lineage-fresh-first', 'lineage-fresh-compressed')
+        self.assertTrue(self.call('lineage-fresh-compressed')['success'])
+        self.db.rotate('lineage-fresh-compressed', 'lineage-fresh-reset', 'session_reset')
+        self.assertTrue(share.note_host_turn('lineage-fresh-reset', '', 'lineage-room'))
+        self.assertTrue(self.call('lineage-fresh-reset')['success'])
+        self.assertEqual(self.created, ['lineage-room'])  # one turn, one receipt
+
+    def test_fresh_session_conflicting_with_another_room_is_refused(self):
+        turn = self.unresolved()
+        self.db.row('lineage-fresh-conflict')
+        # The other active binding is sufficient even without historical mapping.
+        other = self.begin('lineage-other-room', 'lineage-fresh-conflict')
+        with mock.patch.object(origin, 'room_for_session', return_value=''):
+            self.assertFalse(share.note_host_turn('lineage-fresh-conflict', '', 'lineage-room'))
+            self.assertFalse(share._continuation('lineage-room', turn, 'lineage-fresh-conflict'))
+            other.sealed = lambda: True
+            self.refused('lineage-fresh-conflict')
+        self.assertEqual(turn.host_sessions, set())
+        self.assertEqual(other.host_sessions, {'lineage-fresh-conflict'})
+        # Also refuse foreign provenance when there is no competing active run.
+        share.end('lineage-other-room', other)
+        self.refused('lineage-fresh-conflict')
+        self.assertFalse(share.note_host_turn('lineage-fresh-conflict', '', 'lineage-room'))
+        self.assertEqual(turn.host_sessions, set())
+        self.assertEqual(self.created, [])
+
+    def test_fresh_session_with_ambiguous_dispatches_binds_neither(self):
+        turn = self.unresolved()
+        other = self.begin('lineage-other-room', '')
+        self.db.row('lineage-fresh-ambiguous')
+        self.refused('lineage-fresh-ambiguous')
+        self.assertEqual(turn.host_sessions, set())
+        self.assertEqual(other.host_sessions, set())
 
     def test_seal_still_refuses_upload(self):
         self.db.rotate('lineage-session', 'lineage-sealed')

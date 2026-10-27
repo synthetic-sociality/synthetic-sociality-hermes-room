@@ -239,13 +239,17 @@ def _session_conflicts(room_id, session_id, parent_session_id):
 def _continuation(room_id, turn, session_id):
     """Prove each hop from core rows back to this active dispatch's authority.
 
-    Caller holds _ACTIVE_LOCK. Only newly created compression/reset children
-    qualify; delegation metadata and historical Room mappings are not evidence.
+    Caller holds _ACTIVE_LOCK. Routing keys are not authority, except when a
+    dispatch has no bound host session: its first live, conflict-free core row
+    may bind once if its exact key matches and its finite started_at is at or
+    after dispatch start. Thereafter
+    only newly created compression/reset children qualify here; delegation
+    metadata and historical Room mappings are not evidence.
     Missing APIs, rows, timestamps, cycles or unreadable records fail closed.
     """
     reader = getattr(turn.session_db, 'get_session', None)
     compression_tip = getattr(turn.session_db, 'get_compression_tip', None)
-    if not callable(reader) or not turn.host_sessions:
+    if not callable(reader):
         return False
     seen = set()
     try:
@@ -264,6 +268,8 @@ def _continuation(room_id, turn, session_id):
             if (isinstance(started, bool) or not isinstance(started, (int, float))
                     or not math.isfinite(started) or started < turn.started_at):
                 return False
+            if not turn.host_sessions:
+                return bool(turn.session_key and child.get('session_key') == turn.session_key)
             parent_id = child.get('parent_session_id')
             if not isinstance(parent_id, str) or not parent_id:
                 return False
@@ -299,8 +305,9 @@ def _continuation(room_id, turn, session_id):
     return False
 
 def note_host_turn(session_id, turn_id, room_id, parent_session_id=''):
-    # Hooks never grant initial authority. Only core-reported lineage from
-    # this run's bound sessions may extend its dispatch-time authority.
+    # Hooks may bind the first fresh session only through the same core-row
+    # proof as tools. Otherwise only core-reported lineage from this run's
+    # bound sessions may extend its dispatch-time authority.
     # Hook/tool turn ids remain optional, nonportable metadata.
     from .origin_context import remember_room_session
     session_id = session_id.strip() if isinstance(session_id, str) else ''

@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.92",
+  "adapterVersion": "1.0.93",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -1329,7 +1329,7 @@
     "P2c": "bd376ce8350c3a3213b36a6770e357cbcf80e6bb3548eccbafa0b01ee839d940",
     "Appendix": "96da1c168697180290254b7fb108772bd1ce331120e2174d1457ec25b8761fc1",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
-    "P7d": "8b25457f29c6764dc4df48fb55e2883fd64d9083481848dffbe1b67075b2853f",
+    "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
     "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d"
   },
   "issue106Cases": {
@@ -1541,7 +1541,7 @@
     "P12-06 historical continuations cannot join a successor turn",
     "P12-07 missing identities and tool-supplied or unrecorded lineage are refused",
     "P12-08 foreign lineage cannot move authority between Rooms",
-    "P12-09 unresolved dispatch and historical parent grant no authority",
+    "P12-09 unresolved dispatch without fresh core evidence and historical parent grant no authority",
     "P12-10 canonical post sealing refuses sharing and new lineage"
   ]
 }

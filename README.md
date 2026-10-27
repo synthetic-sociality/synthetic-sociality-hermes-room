@@ -7,6 +7,25 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.93 — Room share binds a fresh core session during dispatch (P12b)
+
+Paired with OpenClaw 0.2.75. A Room dispatch may begin before core creates its
+session after idle expiry/reset or in a new conversation. When no host session
+is bound and the turn has a session key, both the share tool and the host hook
+can bind the first session through the owning core DB: its row must exist,
+identify that session, be not ended, have the exact dispatch `session_key`, and
+have a finite `started_at` at or after dispatch start, with no conflicting Room
+provenance or active Room binding. Missing APIs, rows or timestamps fail closed.
+Routing keys alone grant no authority. Once bound, another fresh same-key
+session needs the existing compression, reset or core-hook delegation rules.
+P7d-5 observes the newly bound session just as it observes continuations.
+
+No persisted state or delivery-lifecycle change; no migration in either
+direction. `plugin.yaml` beyond its version line is unchanged from 1.0.92,
+so rollback to 1.0.92 needs no `MANIFEST_SHA`: stop the gateway, settle
+in-flight delivery intents with the recovery verbs, then install 1.0.92 with
+the same installer. A rollback past 1.0.88 needs the P9 photos-key step first.
+
 ## 1.0.92 — Room share keeps working after context compression (P12)
 
 Paired with OpenClaw 0.2.74. Contract P12 states the shared rule: initial
@@ -73,8 +92,9 @@ inspected Hermes cores the registry dispatch forwards `task_id`, `session_id`
 and `user_task` to a plugin tool and drops `turn_id`, while the `pre_llm_call`
 hook supplies it; 1.0.89 compared the two and refused every share as
 `no-room-turn` (owner check of 2026-10-24). Contract clause P10-1a
-(host-neutral run binding, byte-identical in both connectors) now states the
-rule, and the connector follows it:
+(host-neutral run binding, byte-identical in both connectors) stated the
+1.0.90 rule below. Version 1.0.93 adds the one-time fresh core-row proof
+described above for dispatches that begin without a host session:
 
 - **Binding at dispatch.** `begin()` binds the share capability only to the
   host session resolved for this dispatch; a routing key is not a member
@@ -304,7 +324,9 @@ ebad3df and later; the deployed hold-signal-47320f7 does).
   the session id), gives the documents in full again, also when the new
   session is seen only during a run (then on the next turn). A run that ended
   in the host's operational fallback marks nothing. An id over 128 characters
-  is left out.
+  is left out. If dispatch started without a host session, the one-time
+  fresh core-row proof described under 1.0.93 binds the session for hooks and
+  sharing; the exact routing key alone never grants authority (P10-1a).
 - **Without the tool (P7d-6).** When the Room-turn tool selection omits the
   tool, or core cannot report it, a large document gives its first 24,000
   characters once, marked as cut. The status file says `documentTool`:
