@@ -71,7 +71,7 @@
     "external_channel_inline_recipient_open_v1": "test_external_channel_inline_mention_resolves_recipient_for_room_routing",
     "external_channel_inline_recipient_coordinated_v2_replay": "test_external_channel_coordinated_v2_mentions_freeze_and_replay",
     "external_channel_inline_recipient_eligibility": "test_inline_mention_routing_orders_multiple_agents_and_excludes_ineligible_members",
-    "external_channel_inline_recipient_ambiguity": "test_inline_mention_routing_rejects_ambiguous_active_display_name"
+    "external_channel_inline_recipient_ambiguity": "test_inline_mention_routing_ignores_ambiguous_active_display_name"
   },
   "receiptBoundaryFixtures": {
     "invalid_or_incomplete_receipt": "test_canonical_delivery_rejects_malformed_receipts_without_state_change",
