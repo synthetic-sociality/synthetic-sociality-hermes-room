@@ -193,8 +193,20 @@ class ShareTurn:
             return refused('upload-uncertain')
 
 # Bind sessions to this active run, independently of host turn-id schemes.
-_ACTIVE = {}
-_ACTIVE_LOCK = threading.Lock()
+
+def _process_state(name, factory):
+    """One state object per process, whatever module copy asks: a core that evicts and reloads
+    plugin modules would otherwise give the Room adapter and the share tool separate copies."""
+    import sys as _sys, types as _types
+    holder = _sys.modules.get('_synthetic_sociality_room_process_state')
+    if holder is None:
+        holder = _sys.modules.setdefault('_synthetic_sociality_room_process_state', _types.ModuleType('_synthetic_sociality_room_process_state'))
+    if not hasattr(holder, name):
+        setattr(holder, name, factory())
+    return getattr(holder, name)
+
+_ACTIVE = _process_state('share_active', dict)
+_ACTIVE_LOCK = _process_state('share_active_lock', threading.Lock)
 
 def _bind_session(room_id, turn, session_id):
     from .origin_context import remember_room_session
@@ -212,6 +224,7 @@ def core_session_db(store, session_key):
         return None
 
 def begin(room_id, turn, session_id='', *, session_db=None, session_key=''):
+    _DIAG.info('share turn begin: room=%s module=%x state=%x', room_id, id(globals()), id(_ACTIVE))
     with _ACTIVE_LOCK:
         if room_id in _ACTIVE: raise RuntimeError('Room share run already active')
         turn.host_sessions = set()
@@ -391,7 +404,8 @@ def _continuation_reason(room_id, turn, session_id):
 def _diagnose_refusal(session_id, metadata):
     """Caller holds _ACTIVE_LOCK. Logs why no active Room turn admitted this share."""
     from .origin_context import room_for_session
-    parts = ['session_id=%s' % ('present:' + session_id if session_id else 'MISSING'),
+    parts = ['module=%x state=%x' % (id(globals()), id(_ACTIVE)),
+             'session_id=%s' % ('present:' + session_id if session_id else 'MISSING'),
              'metadata=%s' % ','.join(sorted(metadata)), 'active_rooms=%d' % len(_ACTIVE),
              'session_room=%s' % (room_for_session(session_id) or '-')]
     for room, turn in _ACTIVE.items():

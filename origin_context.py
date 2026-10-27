@@ -7,9 +7,21 @@ from typing import Any
 
 ROOM_PLATFORM_NAME = "synthetic_sociality"
 
-_LOCK = threading.Lock()
-_SESSION_IDS: set[str] = set()
-_TURN_IDS: set[str] = set()
+
+def _process_state(name, factory):
+    """One state object per process, whatever module copy asks: a core that evicts and reloads
+    plugin modules would otherwise give the Room adapter and the share tool separate copies."""
+    import sys as _sys, types as _types
+    holder = _sys.modules.get('_synthetic_sociality_room_process_state')
+    if holder is None:
+        holder = _sys.modules.setdefault('_synthetic_sociality_room_process_state', _types.ModuleType('_synthetic_sociality_room_process_state'))
+    if not hasattr(holder, name):
+        setattr(holder, name, factory())
+    return getattr(holder, name)
+
+_LOCK = _process_state('origin_lock', threading.Lock)
+_SESSION_IDS: set[str] = _process_state('origin_session_ids', set)
+_TURN_IDS: set[str] = _process_state('origin_turn_ids', set)
 
 
 def _safe_id(value: Any) -> str:
@@ -60,8 +72,8 @@ def is_room_context(**metadata: Any) -> bool:
 # the pre_llm_call hook (``sender_id`` is the Room id the adapter sets as the
 # turn's user). Process memory only, at most ROOM_SESSION_LIMIT sessions.
 ROOM_SESSION_LIMIT = 256
-_ROOM_BY_SESSION: dict[str, str] = {}
-_SESSION_BY_ROOM: dict[str, str] = {}
+_ROOM_BY_SESSION: dict[str, str] = _process_state('origin_room_by_session', dict)
+_SESSION_BY_ROOM: dict[str, str] = _process_state('origin_session_by_room', dict)
 
 
 def remember_room_session(session_id: Any, room_id: Any) -> None:

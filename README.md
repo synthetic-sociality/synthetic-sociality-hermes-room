@@ -7,6 +7,10 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.96 — Room share state is one per process (P12e)
+
+The active Room share turns (`share_file._ACTIVE`) and the Room-origin session maps (`origin_context`) now live in one process-wide object (`sys.modules["_synthetic_sociality_room_process_state"]`). A Hermes core that evicts and reloads plugin modules gave the Room adapter (which opens the share window) and the share tool (which checks it) separate module copies, so every share was refused with `active_rooms=0` although the turn was live (seen on the VPS core of 2026-09-29; the older core loads the plugin once). The share diagnostics now also log the module and state identity at turn begin and on refusal. Authorization rules are unchanged. Rollback to 1.0.95 needs no `MANIFEST_SHA`.
+
 ## 1.0.95 — Room share window spans a debounced or queued host run (P12d)
 
 Newer Hermes cores buffer incoming text (debounce) or queue it behind a running turn, so `handle_message` returns before the run of this dispatch exists. The share window previously closed at that moment, and every share of the turn was refused with `no-room-turn` (seen live on the VPS core of 2026-09-29; the older core ran the turn immediately). When the core holds this routing key's message in its debounce buffer or pending queue, the dispatch now waits, bounded by `OWNER_WAIT_SECONDS`, for the new owner task and ends the window when that run ends, as the OpenClaw connector keeps its window until its awaited host run ends. Otherwise behaviour is unchanged. The 1.0.94 diagnostics stay. Rollback to 1.0.94 needs no `MANIFEST_SHA`.
