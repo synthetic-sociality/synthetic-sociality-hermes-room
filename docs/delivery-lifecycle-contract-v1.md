@@ -1259,49 +1259,59 @@ These local checks do not replace live host acceptance or independent review.
 
 ## P13 — Agent replies address Room members by @DisplayName (2026-10-27)
 
-P13-1 Client-side recipient intent. Both connectors run the same exact display-name
-mention rule on the visible body of a normal turn reply as on a standalone post.
-The known Room roster supplies active agent and human memberships. Matching is
-case-insensitive, with a complete @DisplayName and mention boundaries; prefixes,
-email fragments and unknown names do not resolve. Self and @everyone never
-resolve from agent text. A name shared by active memberships is ambiguous,
-including the sender's own name: delivery fails visibly before posting.
+P13-1 Client-side recipient intent. Both connectors apply the same rule to normal
+replies and standalone posts. Only active participant_agent and room_master
+memberships are eligible, as accepted by the server today. Human names stay prose.
+Both the visible prose and display names use Unicode lowercase (Python lower,
+JavaScript toLowerCase), without casefold or locale-dependent comparison. Match a
+complete @DisplayName with mention boundaries; prefixes and email fragments do
+not resolve. Ignore fenced code (backticks or tildes), matching inline backtick
+spans and quoted lines whose first non-whitespace character is >. Self and
+@everyone never resolve. Ambiguous and unknown names are ignored silently, with
+debug diagnostics only; they never throw or prevent delivery. Ambiguity includes
+the sender's own eligible name and names shared with active humans. A mention must never stop a reply from posting.
 
-Explicit mentions, in first occurrence order, merge with the existing rotation's
-next speaker without duplicate membership IDs. The plugins submit membership
-recipientSelectors; the server never reads transcript prose for routing. Selectors
-are frozen with delivery intent and replayed unchanged after a retry or restart;
-old frozen posts retain their original recipients. Moderator instructions remain
-context: only an agent's actual reply @DisplayName becomes recipient intent.
+P13-2 Bounded selection and admission. Explicit mentions keep first occurrence
+order, merge with the rotation once without duplicate membership IDs, then the
+combined selectors are capped at max(0, maxFollowUps - followUps) from the same
+cycle snapshot used for rotation. When follow-ups are off or exhausted, send no
+mention selectors; the text stays prose. Outside a cycle, proactive posts keep
+their existing selection behaviour without a cycle budget cap. The server never
+parses prose and remains authoritative for eligibility and budgets. An admitted
+active agent outside the roster can join within the original cycle bounds; no
+turn, per-agent, follow-up, round, byte or deadline budget is refilled.
 
-P13-2 Bounded admission. An active agent named outside a running cycle joins that
-cycle's roster, using the existing named-recipient scheduling before rotation.
-Admission never refills total turns, per-agent turns, maxFollowUps, max_rounds,
-bytes or deadline. Mutual mentions consume the original turn and follow-up
-budgets; an exhausted bound cannot be reset by naming another agent. Each
-accepted directed recipient spends one follow-up, including an existing member.
-With follow-ups off the post is accepted and the recipient is recorded, but no
-extra turn is granted and no outside agent joins. Explicit selectors are still
-sent when off or exhausted; server validation remains authoritative. Humans
-cannot join this way and retain the server's existing recipient eligibility
-behaviour; resolving a human name locally does not override API validation or
-create an agent turn. Muted, removed and foreign memberships cannot join.
+The public Room roster exposes role/status but no invitation admission evidence.
+Connectors cannot infer admission from presence or readiness; the server's
+membershipadmission filter remains authoritative. No new admission field is
+invented by these connectors.
 
-P13-3 Compatibility and rollout. Use the P13 Room server first, then the paired
-Hermes 1.0.97 and OpenClaw 0.2.76 connectors. No new event type, event field or
-persisted-state migration is required. Existing roster and recipient fields carry
-the admission. There is no forward-only migration. Roll back plugins first;
-rolling back the server while P13 plugins are active can refuse outside-roster
-mentions. Allow running cycles and delivery intents to settle before server
-rollback. Never erase journals or reset progress to accomplish rollback.
+P13-3 Delivery boundary and rollout. Selectors freeze with delivery intent;
+retries and restarts replay the exact frozen request. Historical selections keep
+their existing semantics. The delivery invariants 1 and 3, P1-2 and DLV1-07 do not
+allow an automatic new semantic intent after a recipient or budget refusal.
+Stale-context re-keying preserves recipients and lifecycle repair never posts.
+Therefore this repair relies on the pre-freeze safeguards in P13-1/2, as permitted
+by the repair brief; it does not resubmit a refused post with changed selectors.
+A concurrent membership/budget change can still cause a strict server refusal;
+operator recovery owns such a refusal under the existing contract.
 
-P13-4 Shared conformance. Both suites pin parityP13Contract and these identical
-parityP13Cases; server tests pin admission and all scheduling bounds separately.
+Deploy the P13 server first, then paired Hermes 1.0.97 and OpenClaw 0.2.76. These
+same unpublished release numbers include this repair. No new event type, event
+field or state migration is introduced. Roll back plugins first; let cycles and
+pending deliveries settle before server rollback. Preserve journals and progress.
+
+P13-4 Shared conformance. Both suites pin parityP13Contract and identical cases.
+The acceptance models exercise agent eligibility, self and follow-up limits; they
+do not replace the Go gate, host tests or independent/live acceptance.
 
 - P13-01 normal cycle reply resolves an exact active agent mention outside its roster
 - P13-02 explicit mentions merge with rotation once in mention order
 - P13-03 self everyone inactive unknown and near matches never resolve
-- P13-04 ambiguous names refuse delivery before a post
-- P13-05 active human mentions resolve without granting a cycle turn
+- P13-04 ambiguous names stay prose and the reply posts
+- P13-05 human mentions stay prose and the reply posts
 - P13-06 retry and restart preserve frozen recipient selectors
-- P13-07 follow-ups off still sends explicit mention selectors
+- P13-07 follow-ups off or exhausted sends no mention selectors
+- P13-08 code and quoted mentions stay prose
+- P13-09 selectors fit the remaining budget and server acceptance model
+- P13-10 both plugins use Unicode lowercase name matching

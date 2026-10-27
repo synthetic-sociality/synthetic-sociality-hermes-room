@@ -1823,18 +1823,17 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 "@Wu compare this with @Claude. Ask @Thorsten; @Paula, @Berlin and @Reader need no route.",
                 "self",
             ),
-            ["wu", "claude", "human"],
+            ["wu", "claude"],
         )
 
-    def test_inline_mention_routing_rejects_ambiguous_active_display_name(self):
+    def test_inline_mention_routing_ignores_ambiguous_active_display_name(self):
         state = {
             "roster": [
                 {"membershipId": "claude-a", "displayName": "Claude", "role": "participant_agent", "status": "active"},
                 {"membershipId": "claude-b", "displayName": "CLAUDE", "role": "room_master", "status": "active"},
             ],
         }
-        with self.assertRaisesRegex(ValueError, "@Claude is ambiguous"):
-            room_tools._inline_agent_recipients(state, "Please ask @Claude.", "paula")
+        self.assertEqual(room_tools._inline_agent_recipients(state, "Please ask @Claude.", "paula"), [])
 
     def test_external_channel_coordinated_v2_mentions_freeze_and_replay(self):
         binding = adapter.RoomBinding(

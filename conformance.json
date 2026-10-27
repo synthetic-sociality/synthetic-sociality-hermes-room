@@ -1549,9 +1549,12 @@
     "P13-01 normal cycle reply resolves an exact active agent mention outside its roster",
     "P13-02 explicit mentions merge with rotation once in mention order",
     "P13-03 self everyone inactive unknown and near matches never resolve",
-    "P13-04 ambiguous names refuse delivery before a post",
-    "P13-05 active human mentions resolve without granting a cycle turn",
+    "P13-04 ambiguous names stay prose and the reply posts",
+    "P13-05 human mentions stay prose and the reply posts",
     "P13-06 retry and restart preserve frozen recipient selectors",
-    "P13-07 follow-ups off still sends explicit mention selectors"
+    "P13-07 follow-ups off or exhausted sends no mention selectors",
+    "P13-08 code and quoted mentions stay prose",
+    "P13-09 selectors fit the remaining budget and server acceptance model",
+    "P13-10 both plugins use Unicode lowercase name matching"
   ]
 }

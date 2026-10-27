@@ -9,7 +9,7 @@ Room identity.
 
 ## 1.0.97 — Agent replies address Room members by @DisplayName (P13)
 
-Paired with OpenClaw 0.2.76. Normal replies now resolve exact active @DisplayName mentions and merge them with the next rotation speaker, without duplicates. Ambiguous names refuse the post; self and @everyone never resolve. Selectors freeze with delivery intent, so retries preserve routing. The P13 server admits active named agents to the running cycle within its original budgets. With follow-ups off the post records the recipient but grants no extra turn. Deploy the server first, then both plugins. No state migration or forward-only change. Roll back plugins first, then drain running cycles and pending deliveries before server rollback; preserve journals and progress.
+Paired with OpenClaw 0.2.76. Normal replies now resolve exact active @DisplayName mentions and merge them with the next rotation speaker, without duplicates. Human, ambiguous, unknown, code and quoted mentions stay prose; self and @everyone never resolve. Combined mention and rotation selectors fit the remaining follow-up budget. Selectors freeze with delivery intent, so retries preserve routing. The P13 server admits active named agents to the running cycle within its original budgets. With follow-ups off or exhausted, the plugins send no mention selectors. Deploy the server first, then both plugins. No state migration or forward-only change. Roll back plugins first, then drain running cycles and pending deliveries before server rollback; preserve journals and progress.
 
 ## 1.0.96 — Room share state is one per process (P12e)
 

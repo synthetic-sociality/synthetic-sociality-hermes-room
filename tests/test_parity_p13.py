@@ -19,10 +19,13 @@ CASES = [
     'P13-01 normal cycle reply resolves an exact active agent mention outside its roster',
     'P13-02 explicit mentions merge with rotation once in mention order',
     'P13-03 self everyone inactive unknown and near matches never resolve',
-    'P13-04 ambiguous names refuse delivery before a post',
-    'P13-05 active human mentions resolve without granting a cycle turn',
+    'P13-04 ambiguous names stay prose and the reply posts',
+    'P13-05 human mentions stay prose and the reply posts',
     'P13-06 retry and restart preserve frozen recipient selectors',
-    'P13-07 follow-ups off still sends explicit mention selectors',
+    'P13-07 follow-ups off or exhausted sends no mention selectors',
+    'P13-08 code and quoted mentions stay prose',
+    'P13-09 selectors fit the remaining budget and server acceptance model',
+    'P13-10 both plugins use Unicode lowercase name matching',
 ]
 
 
@@ -43,7 +46,7 @@ ns = dict(delivery_ns)
 ns.update(_decode_dispatch_source=lambda source: (source, ''),
           _GATEWAY_OPERATIONAL_ERRORS=set(), _known_epoch_start=lambda value: 0,
           SendResult=lambda **kwargs: types.SimpleNamespace(**kwargs))
-extracted(ROOT / 'room_tools.py', {'_inline_agent_recipients'}, ns)
+extracted(ROOT / 'room_tools.py', {'_inline_agent_recipients', '_mention_prose'}, ns)
 extracted(ROOT / 'adapter.py', {'_next_cycle_recipient', '_cycle_delivery_payload', '_send_final_owned', '_select_delivery_intent'}, ns)
 resolve = ns['_inline_agent_recipients']
 
@@ -113,18 +116,16 @@ class ParityP13Tests(unittest.TestCase):
         self.assertEqual(resolve({'roster': roster}, '@Zurie @everyone @Muted @Removed @Unknown mail@Paula @Paula-extra @PaulaX', 'zurie'), [])
         self.assertEqual(resolve({'roster': roster}, '@paula! @A.B (Ops):', 'zurie'), ['paula', 'special'])
 
-    def test_ambiguity_refuses_before_selection_including_own_alias(self):
+    def test_ambiguity_posts_including_own_alias(self):
         for roster in [[member('one', 'Paula'), member('two', 'PAULA')],
-                       [member('zurie', 'Paula'), member('other', 'Paula')]]:
+                       [member('zurie', 'Paula'), member('other', 'Paula')],
+                       [member('human', 'Paula', 'human_owner'), member('other', 'Paula')]]:
             harness = ReplyHarness(roster)
-            result = asyncio.run(harness._send_final_owned('room', 'source', '@Paula?'))
-            self.assertFalse(result.success)
-            self.assertIn('ambiguous', result.error)
-            self.assertEqual(harness.binding.delivery_intents, {})
+            self.assertEqual(harness.run_reply('@Paula?')['recipient_membership_ids'], [])
 
-    def test_active_humans_resolve_locally(self):
+    def test_active_humans_stay_prose(self):
         roster = [member('owner', 'Thorsten', 'human_owner'), member('human', 'Guest', 'human_member'), member('admin', 'Admin', 'agent_owner')]
-        self.assertEqual(resolve({'roster': roster}, '@Thorsten @Guest @Admin', 'zurie'), ['owner', 'human', 'admin'])
+        self.assertEqual(resolve({'roster': roster}, '@Thorsten @Guest @Admin', 'zurie'), [])
 
     def test_retry_and_restart_keep_frozen_selectors_and_protocol_payload(self):
         harness = ReplyHarness([member('paula', 'Paula'), member('rotation', 'Next')], True)
@@ -153,9 +154,58 @@ class ParityP13Tests(unittest.TestCase):
         self.assertEqual(posts[0], posts[1])
         self.assertEqual(posts[0]['recipientSelectors'], [{'kind': 'membership', 'membershipId': 'paula'}, {'kind': 'membership', 'membershipId': 'rotation'}])
 
-    def test_followups_off_still_sends_mentions(self):
+    def test_followups_off_sends_no_mentions(self):
         harness = ReplyHarness([member('paula', 'Paula'), member('rotation', 'Next')], True, followups=0)
-        self.assertEqual(harness.run_reply('@Paula, your view?')['recipient_membership_ids'], ['paula'])
+        self.assertEqual(harness.run_reply('@Paula, your view?')['recipient_membership_ids'], [])
+
+    def test_proactive_post_without_cycle_keeps_all_agent_mentions(self):
+        harness = ReplyHarness([member('paula', 'Paula'), member('rotation', 'Next')], followups=0)
+        harness._cycle_attempts = {}
+        self.assertEqual(harness.run_reply('@Paula @Next')['recipient_membership_ids'], ['paula', 'rotation'])
+
+    def test_code_quotes_and_lowercase(self):
+        roster = [member('paula', 'Paula'), member('street', 'Straße'), member('ss', 'STRASSE')]
+        for text in ['`@Paula`', '``@Paula ` code``', '```python\n@Paula\n```', '~~~\n@Paula\n~~~', '> @Paula said\n  > @Paula', '`code\n@Paula`']:
+            self.assertEqual(resolve({'roster': roster}, text, 'zurie'), [], text)
+        self.assertEqual(resolve({'roster': roster}, '> @Paula\n@Paula outside', 'zurie'), ['paula'])
+        self.assertEqual(resolve({'roster': roster}, '@STRAẞE @strasse', 'zurie'), ['street', 'ss'])
+
+    def test_selectors_against_server_acceptance_model_reply_posts(self):
+        roster = [member('zurie', 'Zurie'), member('paula', 'Paula'), member('rotation', 'Next'),
+                  member('human', 'Thorsten', 'human_owner'), member('a', 'Alex'), member('b', 'ALEX')]
+        scenarios = [('@Thorsten done', 2, 0), ('@Paula @Next @Alex @Unknown @Zurie', 1, 0),
+                     ('@Alex @Unknown', 2, 0), ('> @Paula\n`@Next`', 2, 0),
+                     ('@Paula', 2, 2), ('@Paula', 0, 0), ('@Paula @Next', 3, 2)]
+        for body, maximum, used in scenarios:
+            harness = ReplyHarness(roster, followups=maximum)
+            harness._cycle_attempts['source']['cycle']['followUps'] = used
+            harness.run_reply(body)
+            posts = {}
+            def request(api, method, path, payload=None):
+                if method != 'POST':
+                    return {}
+                ids = [item['membershipId'] for item in payload.get('recipientSelectors', [])]
+                # Strict model of messageservice eligibility and cycle budget.
+                eligible = {m['membershipId'] for m in roster if m['status'] == 'active' and m['role'] in {'participant_agent', 'room_master'}}
+                self.assertTrue(all(mid in eligible and mid != 'zurie' for mid in ids))
+                self.assertLessEqual(len(ids), max(0, maximum-used))
+                if payload['idempotencyKey'] not in posts:
+                    posts[payload['idempotencyKey']] = {'id': 'posted', 'seq': 1630, 'ts': '2026-10-27T00:00:00Z'}
+                self.assertEqual(payload['body'], body)
+                return posts[payload['idempotencyKey']]
+            original = protocol.RoomProtocol.request
+            protocol.RoomProtocol.request = request
+            try:
+                harness.api = protocol.RoomProtocol('https://fixture.invalid/api', 'fixture')
+                for _ in range(2):
+                    result = asyncio.run(harness._post_with_fresh_context(harness.binding, 'room', '', 1628, 'source', body, 'epoch'))
+                    self.assertEqual(result[0]['id'], 'posted')
+                self.assertEqual(len(posts), 1)
+            finally:
+                protocol.RoomProtocol.request = original
+        # Budget caps the merged rotation as well, after mentions take priority.
+        harness = ReplyHarness(roster, rotation=True, followups=1)
+        self.assertEqual(harness.run_reply('@Paula')['recipient_membership_ids'], ['paula'])
 
 
 if __name__ == '__main__':

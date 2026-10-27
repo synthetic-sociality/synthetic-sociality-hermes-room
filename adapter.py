@@ -2171,6 +2171,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             cycle_payload["recipients"] = list(dict.fromkeys([
                 *recipient_membership_ids, *(cycle_payload.get("recipients") or []),
             ]))
+        if cycle_attempt and not isinstance(persisted_post, dict):
+            cycle = cycle_attempt["cycle"]
+            remaining = max(0, int((cycle.get("budgets") or {}).get("maxFollowUps") or 0) - int(cycle.get("followUps") or 0))
+            cycle_payload["recipients"] = list(cycle_payload.get("recipients") or [])[:remaining]
         recipients = list(cycle_payload.get("recipients") or [])
         responds_to = str(cycle_payload.get("responds_to") or responds_to_id or source_id)
         if isinstance(persisted_post, dict):
@@ -2530,13 +2534,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # P13: resolve the final visible body once, before durable selection.
         # Recovered selections and frozen posts retain their exact selectors.
         if body is not None and recovered is None and not durably_posted:
-            try:
-                open_recipients = list(dict.fromkeys([
-                    *_inline_agent_recipients(current_state, body, binding.membership_id),
-                    *open_recipients,
-                ]))
-            except ValueError as error:
-                return SendResult(success=False, error=str(error), retryable=False)
+            open_recipients = list(dict.fromkeys([
+                *_inline_agent_recipients(current_state, body, binding.membership_id),
+                *open_recipients,
+            ]))
         try:
             selected = self._select_delivery_intent(
                 binding, source_id, body, responds_to_id, open_recipients,
