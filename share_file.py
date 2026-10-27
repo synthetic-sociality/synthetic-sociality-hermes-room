@@ -11,6 +11,9 @@ import stat
 import threading
 import time
 from pathlib import Path
+import logging
+
+_DIAG = logging.getLogger('hermes_plugins.synthetic_sociality_room.share_diag')
 
 TOOL_NAME = 'synthetic_sociality_room_share_file'
 SHARE_INSTRUCTION = 'Share a file you want the Room to see with synthetic_sociality_room_share_file, never by naming a local path or pasting its contents.'
@@ -103,7 +106,9 @@ class ShareTurn:
             return self._share(args)
 
     def _share(self, args):
-        if not self.active or self.sealed(): return refused('no-room-turn')
+        if not self.active or self.sealed():
+            _DIAG.warning('share refused in turn: active=%s sealed=%s', self.active, bool(self.sealed()))
+            return refused('no-room-turn')
         if not isinstance(args, dict) or set(args) - {'path', 'title'} or not isinstance(args.get('path'), str) or not args['path'].strip() or ('title' in args and not isinstance(args['title'], str)):
             return refused('invalid_arguments')
         try:
@@ -330,6 +335,51 @@ def note_host_turn(session_id, turn_id, room_id, parent_session_id=''):
             _bind_session(room_id, turn, session_id)
         return allowed
 
+def _h(value):
+    """Short digest for diagnostics; never the value itself."""
+    return hashlib.sha256(value.encode()).hexdigest()[:8] if isinstance(value, str) and value else '-'
+
+def _continuation_reason(room_id, turn, session_id):
+    """Diagnostic mirror of _continuation: the first failing step, read-only."""
+    reader = getattr(turn.session_db, 'get_session', None)
+    if not callable(reader):
+        return 'no-session-db'
+    try:
+        child = reader(session_id)
+    except Exception as error:
+        return 'reader-error:%s' % type(error).__name__
+    if not isinstance(child, dict):
+        return 'no-row'
+    if child.get('ended_at') is not None:
+        return 'row-ended'
+    if _session_conflicts(room_id, session_id, ''):
+        return 'conflict'
+    if child.get('id') != session_id:
+        return 'row-id-mismatch'
+    started = child.get('started_at')
+    if isinstance(started, bool) or not isinstance(started, (int, float)) or not math.isfinite(started):
+        return 'row-started-invalid'
+    if started < turn.started_at:
+        return 'row-started-before-dispatch:%.3fs' % (turn.started_at - started)
+    if not turn.host_sessions:
+        return 'fresh-key-%s:row=%s turn=%s' % ('match' if turn.session_key and child.get('session_key') == turn.session_key else 'MISMATCH',
+                                              _h(child.get('session_key')), _h(turn.session_key))
+    return 'lineage-check parent=%s' % ('yes' if child.get('parent_session_id') else 'none')
+
+def _diagnose_refusal(session_id, metadata):
+    """Caller holds _ACTIVE_LOCK. Logs why no active Room turn admitted this share."""
+    from .origin_context import room_for_session
+    parts = ['session_id=%s' % ('present:' + session_id if session_id else 'MISSING'),
+             'metadata=%s' % ','.join(sorted(metadata)), 'active_rooms=%d' % len(_ACTIVE),
+             'session_room=%s' % (room_for_session(session_id) or '-')]
+    for room, turn in _ACTIVE.items():
+        parts.append('[room=%s active=%s bound=%d in_bound=%s conflict=%s db=%s key=%s cont=%s]' % (
+            room, turn.active, len(turn.host_sessions), session_id in turn.host_sessions,
+            _session_conflicts(room, session_id, '') if session_id else '-',
+            callable(getattr(getattr(turn, 'session_db', None), 'get_session', None)), _h(getattr(turn, 'session_key', '')),
+            _continuation_reason(room, turn, session_id) if session_id else '-'))
+    _DIAG.warning('share refused: %s', ' '.join(parts))
+
 def room_share_file(args, **metadata):
     session_id = metadata.get('session_id')
     session_id = session_id.strip() if isinstance(session_id, str) else ''
@@ -348,6 +398,10 @@ def room_share_file(args, **metadata):
             _bind_session(room, turn, session_id)
         else:
             turn = None
+            try:
+                _diagnose_refusal(session_id, metadata)
+            except Exception as error:  # diagnostics never change the refusal
+                _DIAG.warning('share refused: diagnostic failed: %s', type(error).__name__)
     return json.dumps(turn.share(args) if turn else refused('no-room-turn'), ensure_ascii=False, separators=(',', ':'))
 
 

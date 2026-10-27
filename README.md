@@ -7,6 +7,10 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.94 — Room share refusals name the failing check (P12c diagnostic)
+
+Diagnostic only: when a Room share is refused with `no-room-turn`, the logger `hermes_plugins.synthetic_sociality_room.share_diag` records which check failed (session id passed, active turns, bound sessions, conflicts, the fresh/continuation proof step, sealed or inactive turn). Keys appear only as 8-character digests. Authorization behaviour is identical to 1.0.93; rollback to 1.0.93 needs no `MANIFEST_SHA`.
+
 ## 1.0.93 — Room share binds a fresh core session during dispatch (P12b)
 
 Paired with OpenClaw 0.2.75. A Room dispatch may begin before core creates its
