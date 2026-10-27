@@ -1820,10 +1820,10 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(
             room_tools._inline_agent_recipients(
                 state,
-                "@Wu compare this with @Claude. @Paula, @Thorsten, @Berlin and @Reader need no route.",
+                "@Wu compare this with @Claude. Ask @Thorsten; @Paula, @Berlin and @Reader need no route.",
                 "self",
             ),
-            ["wu", "claude"],
+            ["wu", "claude", "human"],
         )
 
     def test_inline_mention_routing_rejects_ambiguous_active_display_name(self):
@@ -2012,11 +2012,11 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.96")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.97")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Room share state is one per process (P12e)",
+            f"## {adapter.CONNECTOR_VERSION} — Agent replies address Room members by @DisplayName (P13)",
             (ROOT / "README.md").read_text(),
         )
 
@@ -2072,7 +2072,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.96"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.97"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())

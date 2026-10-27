@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.96",
+  "adapterVersion": "1.0.97",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -1543,5 +1543,15 @@
     "P12-08 foreign lineage cannot move authority between Rooms",
     "P12-09 unresolved dispatch without fresh core evidence and historical parent grant no authority",
     "P12-10 canonical post sealing refuses sharing and new lineage"
+  ],
+  "parityP13Contract": "docs/delivery-lifecycle-contract-v1.md#p13--agent-replies-address-room-members-by-displayname-2026-10-27",
+  "parityP13Cases": [
+    "P13-01 normal cycle reply resolves an exact active agent mention outside its roster",
+    "P13-02 explicit mentions merge with rotation once in mention order",
+    "P13-03 self everyone inactive unknown and near matches never resolve",
+    "P13-04 ambiguous names refuse delivery before a post",
+    "P13-05 active human mentions resolve without granting a cycle turn",
+    "P13-06 retry and restart preserve frozen recipient selectors",
+    "P13-07 follow-ups off still sends explicit mention selectors"
   ]
 }

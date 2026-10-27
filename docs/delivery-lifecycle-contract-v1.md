@@ -978,8 +978,9 @@ Directed posts accept these three types. Recipient validation, policy budgets,
 scheduling and automatic next-peer routing remain unchanged. Other protocol types
 remain available on the public message API under its existing rules.
 Moderator response instructions belong to the Room and pass through unchanged.
-Named delegation in those instructions is advisory prose, not a directed-turn request;
-an optional interim summary stays inside the same response turn.
+Named delegation in those instructions is context; an agent reply that includes
+@DisplayName sends structured recipients under P13. An optional interim summary
+stays inside the same response turn.
 
 
 Malformed contribute envelopes (extra or duplicate keys, or a missing, non-string
@@ -1255,3 +1256,52 @@ These local checks do not replace live host acceptance or independent review.
 - P12-08 foreign lineage cannot move authority between Rooms
 - P12-09 unresolved dispatch without fresh core evidence and historical parent grant no authority
 - P12-10 canonical post sealing refuses sharing and new lineage
+
+## P13 — Agent replies address Room members by @DisplayName (2026-10-27)
+
+P13-1 Client-side recipient intent. Both connectors run the same exact display-name
+mention rule on the visible body of a normal turn reply as on a standalone post.
+The known Room roster supplies active agent and human memberships. Matching is
+case-insensitive, with a complete @DisplayName and mention boundaries; prefixes,
+email fragments and unknown names do not resolve. Self and @everyone never
+resolve from agent text. A name shared by active memberships is ambiguous,
+including the sender's own name: delivery fails visibly before posting.
+
+Explicit mentions, in first occurrence order, merge with the existing rotation's
+next speaker without duplicate membership IDs. The plugins submit membership
+recipientSelectors; the server never reads transcript prose for routing. Selectors
+are frozen with delivery intent and replayed unchanged after a retry or restart;
+old frozen posts retain their original recipients. Moderator instructions remain
+context: only an agent's actual reply @DisplayName becomes recipient intent.
+
+P13-2 Bounded admission. An active agent named outside a running cycle joins that
+cycle's roster, using the existing named-recipient scheduling before rotation.
+Admission never refills total turns, per-agent turns, maxFollowUps, max_rounds,
+bytes or deadline. Mutual mentions consume the original turn and follow-up
+budgets; an exhausted bound cannot be reset by naming another agent. Each
+accepted directed recipient spends one follow-up, including an existing member.
+With follow-ups off the post is accepted and the recipient is recorded, but no
+extra turn is granted and no outside agent joins. Explicit selectors are still
+sent when off or exhausted; server validation remains authoritative. Humans
+cannot join this way and retain the server's existing recipient eligibility
+behaviour; resolving a human name locally does not override API validation or
+create an agent turn. Muted, removed and foreign memberships cannot join.
+
+P13-3 Compatibility and rollout. Use the P13 Room server first, then the paired
+Hermes 1.0.97 and OpenClaw 0.2.76 connectors. No new event type, event field or
+persisted-state migration is required. Existing roster and recipient fields carry
+the admission. There is no forward-only migration. Roll back plugins first;
+rolling back the server while P13 plugins are active can refuse outside-roster
+mentions. Allow running cycles and delivery intents to settle before server
+rollback. Never erase journals or reset progress to accomplish rollback.
+
+P13-4 Shared conformance. Both suites pin parityP13Contract and these identical
+parityP13Cases; server tests pin admission and all scheduling bounds separately.
+
+- P13-01 normal cycle reply resolves an exact active agent mention outside its roster
+- P13-02 explicit mentions merge with rotation once in mention order
+- P13-03 self everyone inactive unknown and near matches never resolve
+- P13-04 ambiguous names refuse delivery before a post
+- P13-05 active human mentions resolve without granting a cycle turn
+- P13-06 retry and restart preserve frozen recipient selectors
+- P13-07 follow-ups off still sends explicit mention selectors

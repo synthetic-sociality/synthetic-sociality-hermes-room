@@ -230,9 +230,9 @@ def _inline_agent_recipients(
         membership_id = str(member.get("membershipId") or "").strip()
         display_name = str(member.get("displayName") or "").strip()
         if (
-            not membership_id or not display_name or membership_id == own_membership_id
+            not membership_id or not display_name or display_name.casefold() == "everyone"
             or member.get("status") != "active"
-            or member.get("role") not in {"participant_agent", "room_master"}
+            or member.get("role") not in {"participant_agent", "room_master", "human_owner", "human_member", "agent_owner"}
         ):
             continue
         by_name.setdefault(display_name.casefold(), []).append((membership_id, display_name))
@@ -249,7 +249,8 @@ def _inline_agent_recipients(
             continue
         if len(matches) != 1:
             raise ValueError(f"Room recipient @{display_name} is ambiguous")
-        recipients.append((mention.start(), matches[0][0]))
+        if matches[0][0] != own_membership_id:
+            recipients.append((mention.start(), matches[0][0]))
     return [membership_id for _, membership_id in sorted(recipients)]
 
 

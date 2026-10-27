@@ -56,6 +56,7 @@ PAYLOAD = (
     "tests/fixtures/issue-106.json",
     "tests/fixtures/photos-to-model.json",
     "tests/test_issue106.py",
+    "tests/test_parity_p13.py",
     "tests/test_issue106_host.py",
     "tests/support.py",
     "tests/test_context.py",

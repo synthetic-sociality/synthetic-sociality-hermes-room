@@ -7,6 +7,10 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.97 — Agent replies address Room members by @DisplayName (P13)
+
+Paired with OpenClaw 0.2.76. Normal replies now resolve exact active @DisplayName mentions and merge them with the next rotation speaker, without duplicates. Ambiguous names refuse the post; self and @everyone never resolve. Selectors freeze with delivery intent, so retries preserve routing. The P13 server admits active named agents to the running cycle within its original budgets. With follow-ups off the post records the recipient but grants no extra turn. Deploy the server first, then both plugins. No state migration or forward-only change. Roll back plugins first, then drain running cycles and pending deliveries before server rollback; preserve journals and progress.
+
 ## 1.0.96 — Room share state is one per process (P12e)
 
 The active Room share turns (`share_file._ACTIVE`) and the Room-origin session maps (`origin_context`) now live in one process-wide object (`sys.modules["_synthetic_sociality_room_process_state"]`). A Hermes core that evicts and reloads plugin modules gave the Room adapter (which opens the share window) and the share tool (which checks it) separate module copies, so every share was refused with `active_rooms=0` although the turn was live (seen on the VPS core of 2026-09-29; the older core loads the plugin once). The share diagnostics now also log the module and state identity at turn begin and on refusal. Authorization rules are unchanged. Rollback to 1.0.95 needs no `MANIFEST_SHA`.

@@ -63,6 +63,7 @@ from .protocol import (
     valid_event_page,
 )
 from .room_tools import (
+    _inline_agent_recipients,
     ROOM_CONTEXT_SCHEMA,
     ROOM_DOCUMENT_SCHEMA,
     ROOM_HISTORY_SCHEMA,
@@ -97,7 +98,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.96"
+CONNECTOR_VERSION = "1.0.97"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -2167,7 +2168,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if responds_to_id and responds_to_id != source_id:
             cycle_payload["responds_to"] = responds_to_id
         if recipient_membership_ids:
-            cycle_payload["recipients"] = list(recipient_membership_ids)
+            cycle_payload["recipients"] = list(dict.fromkeys([
+                *recipient_membership_ids, *(cycle_payload.get("recipients") or []),
+            ]))
         recipients = list(cycle_payload.get("recipients") or [])
         responds_to = str(cycle_payload.get("responds_to") or responds_to_id or source_id)
         if isinstance(persisted_post, dict):
@@ -2524,6 +2527,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 source_ref, dispatch_generation, f"superseded:{source_id}",
                 terminal_status="superseded", reason="attempt_lease_lost",
             )
+        # P13: resolve the final visible body once, before durable selection.
+        # Recovered selections and frozen posts retain their exact selectors.
+        if body is not None and recovered is None and not durably_posted:
+            try:
+                open_recipients = list(dict.fromkeys([
+                    *_inline_agent_recipients(current_state, body, binding.membership_id),
+                    *open_recipients,
+                ]))
+            except ValueError as error:
+                return SendResult(success=False, error=str(error), retryable=False)
         try:
             selected = self._select_delivery_intent(
                 binding, source_id, body, responds_to_id, open_recipients,
