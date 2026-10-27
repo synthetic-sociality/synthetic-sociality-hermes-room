@@ -226,9 +226,31 @@ def end(room_id, turn):
         with _ACTIVE_LOCK:
             if _ACTIVE.get(room_id) is turn: _ACTIVE.pop(room_id)
 
-def finish_dispatch(room_id, turn, owner):
+# How long a dispatch waits for the host to start its run when handle_message returned before the
+# owner task existed (newer cores debounce text before spawning it). Bounded; then the turn ends.
+OWNER_WAIT_SECONDS = 30.0
+
+def finish_dispatch(room_id, turn, owner, owner_getter=None):
+    """End the share window when the host run of this dispatch ends (as OpenClaw does in its
+    finally after the awaited run). A run not yet started is awaited, bounded, via owner_getter."""
     if isinstance(owner, asyncio.Future) and not owner.done():
         owner.add_done_callback(lambda _task: end(room_id, turn))
+    elif owner is None and owner_getter is not None:
+        async def await_owner():
+            deadline = time.monotonic() + OWNER_WAIT_SECONDS
+            while turn.active and time.monotonic() < deadline:
+                found = owner_getter()
+                if isinstance(found, asyncio.Future):
+                    if found.done():
+                        break
+                    found.add_done_callback(lambda _task: end(room_id, turn))
+                    return
+                await asyncio.sleep(0.2)
+            end(room_id, turn)
+        try:
+            asyncio.get_running_loop().create_task(await_owner())
+        except RuntimeError:  # no running loop (synchronous hosts/tests): end at the call boundary
+            end(room_id, turn)
     else:
         end(room_id, turn)
 

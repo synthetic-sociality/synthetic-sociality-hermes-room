@@ -109,6 +109,25 @@ class ShareCases(unittest.TestCase):
                 replay=share.ShareTurn(disk[0],self.root,[],lambda: True,lambda *_: self.fail('duplicate'))
                 self.assertEqual(replay.share({'path':str(self.path)})['code'],'upload-uncertain')
 
+    def test_debounced_host_run_keeps_the_share_window_until_it_ends(self):
+        # Newer cores debounce text: handle_message returns before the owner task exists.
+        origin=load_module('origin_context')
+        async def run():
+            release=asyncio.Event(); holder={}
+            share.begin('room',self.turn,'session')
+            origin.remember_room_session('session','room')
+            share.finish_dispatch('room',self.turn,None,owner_getter=lambda: holder.get('owner'))
+            await asyncio.sleep(0.3)
+            self.assertTrue(self.turn.active)
+            holder['owner']=asyncio.create_task(release.wait())
+            await asyncio.sleep(0.3)
+            args={'path':str(self.path)}
+            self.assertTrue(json.loads(share.room_share_file(args,session_id='session'))['success'])
+            release.set(); await holder['owner']; await asyncio.sleep(0)
+            self.assertFalse(self.turn.active)
+            self.assertEqual(json.loads(share.room_share_file(args,session_id='session'))['code'],'no-room-turn')
+        asyncio.run(run())
+
     def test_background_host_lifetime_and_host_turn_id_schemes(self):
         origin=load_module('origin_context')
         async def run():

@@ -97,7 +97,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.94"
+CONNECTOR_VERSION = "1.0.95"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -5557,7 +5557,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # owner task and returns immediately. Keep the tool active until that
         # task exits; synchronous hosts/tests finish at this call boundary.
         owner = (getattr(self, "_session_tasks", None) or {}).get(session_key)
-        share_file.finish_dispatch(binding.room_id, turn, owner)
+        if self._host_run_queued(session_key):
+            # Newer cores buffer the text (debounce) or queue it behind a running turn: the run of
+            # this dispatch has not started. Keep the share window until that new run ends, as
+            # OpenClaw keeps it until its awaited host run ends.
+            current = owner
+            def next_owner():
+                found = (getattr(self, "_session_tasks", None) or {}).get(session_key)
+                return found if found is not None and found is not current else None
+            share_file.finish_dispatch(binding.room_id, turn, None, owner_getter=next_owner)
+        else:
+            share_file.finish_dispatch(binding.room_id, turn, owner)
         return True
 
     async def _photo_context(self, binding, event_id, entries, epoch_id, session_key):
@@ -5591,6 +5601,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if selection is None:
             return "unknown"
         return "available" if DOCUMENT_TOOL_NAME in selection else "unavailable"
+
+    def _host_run_queued(self, session_key: str) -> bool:
+        """Whether core holds this key's message in its text debounce buffer or behind a running turn."""
+        if not session_key:
+            return False
+        store = getattr(self, "_text_debounce_store", None)
+        try:
+            debounce = store() if callable(store) else (getattr(self, "_text_debounce", None) or {})
+        except Exception:  # noqa: BLE001 - an unreadable buffer means no queued run is known
+            debounce = {}
+        pending = getattr(self, "_pending_messages", None) or {}
+        return session_key in debounce or session_key in pending
 
     def _host_session_id(self, session_key: str) -> str:
         """Contract P7d-5: the core session id the key maps to now, if core says."""

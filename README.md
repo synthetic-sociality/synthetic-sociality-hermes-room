@@ -7,6 +7,10 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.95 — Room share window spans a debounced or queued host run (P12d)
+
+Newer Hermes cores buffer incoming text (debounce) or queue it behind a running turn, so `handle_message` returns before the run of this dispatch exists. The share window previously closed at that moment, and every share of the turn was refused with `no-room-turn` (seen live on the VPS core of 2026-09-29; the older core ran the turn immediately). When the core holds this routing key's message in its debounce buffer or pending queue, the dispatch now waits, bounded by `OWNER_WAIT_SECONDS`, for the new owner task and ends the window when that run ends, as the OpenClaw connector keeps its window until its awaited host run ends. Otherwise behaviour is unchanged. The 1.0.94 diagnostics stay. Rollback to 1.0.94 needs no `MANIFEST_SHA`.
+
 ## 1.0.94 — Room share refusals name the failing check (P12c diagnostic)
 
 Diagnostic only: when a Room share is refused with `no-room-turn`, the logger `hermes_plugins.synthetic_sociality_room.share_diag` records which check failed (session id passed, active turns, bound sessions, conflicts, the fresh/continuation proof step, sealed or inactive turn). Keys appear only as 8-character digests. Authorization behaviour is identical to 1.0.93; rollback to 1.0.93 needs no `MANIFEST_SHA`.
