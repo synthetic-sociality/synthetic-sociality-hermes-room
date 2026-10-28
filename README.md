@@ -18,6 +18,15 @@ name in the same Room; jobs poll for at most 20 seconds. Credentials and host
 paths never appear in results. If ArtCraft is unavailable, tell the user;
 never download or run a program. No native app or helper is invoked here.
 
+ISSUE-138/139 (P15): attempt-ready turns now resolve a human `/ask` source
+from the loaded context or bounded epoch scan and carry its instruction to the
+model. Resolved membership IDs control addressing. Muted memberships pause all
+Room watchers, including event reads, heartbeat, document and acknowledgement
+work. A Room permission refusal also pauses participation until the membership
+changes; watchers share at most one roster recheck per 60 seconds and resume on
+unmute. Journals and cursors stay intact. These fixes remain in this unreleased
+version; no state migration.
+
 Deploy the agent API and P13 server support first. Existing sessions require
 the host to load the updated tool registration: this offline source corpus
 contains no verified host hot-reload facility. Hermes `/reload-skills` alone

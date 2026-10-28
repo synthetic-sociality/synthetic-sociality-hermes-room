@@ -1405,3 +1405,42 @@ Shared cases:
 - P14-11 run resolves app and file name and rechecks turn authority
 - P14-12 registration on a fresh host includes tools for existing sessions
 - P14-13 transport failures return a fixed upstream error
+
+## P15 — Ask sources and membership watcher pause
+
+P15-1 A cycle attempt promotes its exact canonical `sourceEventId` from either
+`message.posted` or `human.command`, in the loaded page or the existing bounded
+epoch scan. An ask presents `command.arguments.instruction` as current human
+input with the source author. Addressing uses `command.resolvedTargetMembershipIds`,
+never display names or selector prose. Existing epoch floors, scan deadlines,
+missing-source fallback and server attempt admission still apply.
+
+P15-2 Every Room watcher shares one participation gate per authenticated
+membership: event stream/long poll, connector registration/heartbeat, enrollment,
+activity/status relay, document/photo reads, acknowledgement retries, attempt
+renewal/settlement, recovery and credential discovery. An observed muted roster
+entry, a Room JSON 403 or a Room refusal containing "not allowed" pauses contacts.
+Credential revocation/expiry remain terminal for participation; ArtCraft's typed
+application errors retain P14 behavior. Non-JSON edge failures retain P7a backoff.
+Already in-flight contacts may finish; no further watcher contact starts while
+paused except a coalesced own-roster probe, at most once per 60 seconds.
+Local diagnostic writes may continue and preserve inactive status.
+
+P15-3 Only an observed transition to active reopens the gate. Missing/unread
+state, a different membership, or a non-active status keeps it paused. A denial
+whose first readable roster already says active also requires a membership
+transition before retry. Unmute resumes the pending work through its existing
+server authority and lease checks, without resetting cursors, journals or
+receipts. Stop/abort cancels waiting work; sibling memberships keep running.
+No version bump or persisted state migration: paired Hermes 1.0.98/OpenClaw 0.2.77.
+
+Both conformance files pin `parityP15Contract` and these identical case names:
+
+- P15-01 loaded ask source reaches the model with resolved target addressing
+- P15-02 older ask source resolves within the bounded epoch scan
+- P15-03 all watcher contacts pause together and resume on active
+- P15-04 forbidden watcher pauses all contacts until membership changes
+- P15-05 unread missing and other memberships cannot resume participation
+- P15-06 credential failures stay terminal and shutdown cancels paused work
+- P15-07 sibling memberships continue while one pauses
+- P15-08 inactive enrollment pauses heartbeat and event watchers

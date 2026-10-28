@@ -525,7 +525,7 @@ class ParityP6Round2Tests(unittest.TestCase):
         real = adapter._cycle_source_message
 
         def counting(*args, **kwargs):
-            if kwargs.get("types") == ("message.posted",):
+            if kwargs.get("types") == adapter.MISSED_SOURCE_EVENT_TYPES:
                 scans.append(args[1])
                 if hang:
                     time.sleep(1.5)

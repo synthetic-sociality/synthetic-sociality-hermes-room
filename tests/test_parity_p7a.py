@@ -179,6 +179,7 @@ def watched(room, status_path=None):
     instance._mark_connected = lambda: None
     instance._mark_disconnected = lambda: None
     instance._call = lambda _binding, operation: asyncio.to_thread(operation, room)
+    instance._raw_call = instance._call  # the roster probe bypasses the participation gate
     instance._stream_call = lambda _binding, operation: asyncio.to_thread(operation, room)
     instance.connects = []
     instance.connect = lambda **_kwargs: instance.connects.append(True)
@@ -349,7 +350,7 @@ class P7aTests(unittest.TestCase):
             self.assertTrue(outcome["reached"])
             registrations, enrollments, state_reads, heartbeats = observed["muted"]
             self.assertEqual(registrations, 1)  # no registration again
-            self.assertGreater(heartbeats, 5)  # the session and heartbeat continue
+            self.assertEqual(heartbeats, 0)  # P15: every watcher pauses, including heartbeat
             self.assertEqual(enrollments, 1)  # no listing while muted
             self.assertLessEqual(state_reads, 1 + 1.0 / 0.4 + 1)  # one read, then the slow re-check
             self.assertEqual((observed["status_muted"]["connection"], observed["status_muted"]["lastErrorCode"]),
