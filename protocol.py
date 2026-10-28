@@ -308,6 +308,10 @@ class RoomProtocol:
                     f"Room API answered HTTP {error.code} without the Room's JSON",
                     status=error.code, retryable=True, retry_after=retry_after, non_json=True,
                 ) from None
+            if "/artcraft/agent/" in path:
+                failure = ProtocolError("ArtCraft request failed", status=error.code)
+                failure.artcraft_error = envelope
+                raise failure from None
             message = envelope.get("message") or f"Room API returned HTTP {error.code}"
             code = envelope.get("code", "")
             raise ProtocolError(

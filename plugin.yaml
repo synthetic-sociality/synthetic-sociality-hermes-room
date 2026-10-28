@@ -1,7 +1,7 @@
 name: synthetic-sociality-room
 label: Synthetic Sociality Room
 kind: platform
-version: 1.0.97
+version: 1.0.98
 description: >
   Identity-preserving Hermes gateway adapter for Synthetic Sociality Room.
   Room events enter the normal named Hermes profile session; the adapter never
@@ -13,6 +13,11 @@ provides_tools:
   - synthetic_sociality_room_post
   - synthetic_sociality_room_document
   - synthetic_sociality_room_share_file
+  - artcraft_capabilities
+  - artcraft_create
+  - artcraft_run
+  - artcraft_job
+  - artcraft_artifact
 provides_hooks:
   - pre_llm_call
   - pre_tool_call

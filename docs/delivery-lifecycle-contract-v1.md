@@ -1315,3 +1315,77 @@ do not replace the Go gate, host tests or independent/live acceptance.
 - P13-08 code and quoted mentions stay prose
 - P13-09 selectors fit the remaining budget and server acceptance model
 - P13-10 both plugins use Unicode lowercase name matching
+
+## P14 — ArtCraft agent tools
+
+The paired releases are Hermes 1.0.98 and OpenClaw 0.2.77, including P13.
+The five tool names, descriptions and JSON parameter schemas are pinned by
+`parityP14ToolsSHA256` over the byte-identical `artcraft-tools.json` payload
+(Hermes root, OpenClaw `src/`). `parityP14Cases` names the shared suite.
+
+The tools are `artcraft_capabilities`, `artcraft_create`, `artcraft_run`,
+`artcraft_job`, and `artcraft_artifact`. Requests use the existing authenticated
+Room client and its API prefix, under `/rooms/{roomId}/artcraft/agent/`.
+Capabilities GET accepts optional `app`; create/run POST `jobs`; job GET reads
+`jobs/{jobId}`; artifact GET reads `artifacts/{artifactId}`. POST accepts 202.
+The server checks membership, policy and human grants on every request.
+
+Authority is the live share-file dispatch binding, including its existing
+continuation, foreign-session, turn-end and canonical-seal fences. Neither
+model arguments, routing hints nor historical sessions supply a Room ID.
+Outside that binding every tool returns `not_member` without IO. Tools never
+invoke native apps, download files or access a local artifact path.
+
+Create maps `file_name` to `fileName`, `idempotency_key` to `idempotencyKey`,
+and preserves app, calls or operation+inputs. Run takes artifact_id and
+base_revision, GETs that artifact in the bound Room to resolve required app
+and fileName from app and name, then POSTs with kind=run, artifactId and
+baseRevision. Turn authority is checked again before the POST. A failed
+metadata read never submits a job. Missing idempotency keys are UUIDs generated
+once per tool invocation; supplied keys (16–128 characters) pass unchanged.
+Neither plugin automatically retries a POST.
+
+Job defaults to one read. wait_seconds is finite, 0–20 inclusive; polling
+stops at a terminal status, error or deadline. Every read receives the
+remaining deadline and in-flight reads are bounded too. On deadline return
+the last observed job, or a fixed upstream timeout when none was observed.
+A slow abandoned read can finish in the background; it never submits work.
+
+The stable server error codes and message are preserved from the nested
+`error` envelope: artcraft_off, app_not_allowed, not_member, agent_not_granted,
+device_offline, busy, invalid_request, stale_base, quota, not_found, upstream.
+Transport exceptions are never shown to the model. Result fields are selected
+from the contract DTO; secret/path fields are removed recursively. A value
+containing a host path, bearer or the bound credential fails closed with a
+fixed upstream error, including a violating server error message. This is the
+security boundary for malformed responses, not a rewrite of normal messages.
+
+Every description names floor plans/drawings/DXF/DWG (CADCraft), slides
+(DeckCraft), documents (WordCraft), vector graphics/SVG (VectorCraft), page
+layouts (DesignCraft) and PDFs (PdfCraft), and includes exactly:
+"if ArtCraft is unavailable, tell the user; never download or run a program".
+
+Tool discovery on an updated running gateway is not established by a plugin
+registration unit test. Both plugins register through their host API when
+loaded; neither has a host-supported in-process plugin reload implementation
+in this source corpus. Installing files alone and Hermes /reload-skills are
+not evidence that tools changed. Rollout must include a reviewed gateway
+restart to load the updated registration, plus A3 verification on an existing
+and resumed Room session and a Telegram session. No restart is performed by
+this change; full sibling inventory and consent remain rollout gates. Once
+the tools are loaded, availability is queried on every call without a reload.
+
+Shared cases:
+- P14-01 five tools register identical closed schemas
+- P14-02 each tool succeeds through the authenticated Room client
+- P14-03 each stable server error passes through unchanged for each tool
+- P14-04 active Room turn alone supplies room identity
+- P14-05 outside ended sealed and foreign turns refuse without IO
+- P14-06 create and run generate unique keys and preserve supplied keys
+- P14-07 job polling and in-flight reads are bounded by 20 seconds
+- P14-08 descriptions name artifact kinds and prohibit download or execution
+- P14-09 results expose no credentials or host paths
+- P14-10 invalid arguments fail before IO
+- P14-11 run resolves app and file name and rechecks turn authority
+- P14-12 registration on a fresh host includes tools for existing sessions
+- P14-13 transport failures return a fixed upstream error

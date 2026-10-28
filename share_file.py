@@ -416,7 +416,7 @@ def _diagnose_refusal(session_id, metadata):
             _continuation_reason(room, turn, session_id) if session_id else '-'))
     _DIAG.warning('share refused: %s', ' '.join(parts))
 
-def room_share_file(args, **metadata):
+def active_turn(**metadata):
     session_id = metadata.get('session_id')
     session_id = session_id.strip() if isinstance(session_id, str) else ''
     with _ACTIVE_LOCK:
@@ -438,6 +438,10 @@ def room_share_file(args, **metadata):
                 _diagnose_refusal(session_id, metadata)
             except Exception as error:  # diagnostics never change the refusal
                 _DIAG.warning('share refused: diagnostic failed: %s', type(error).__name__)
+    return (room, turn) if turn else (None, None)
+
+def room_share_file(args, **metadata):
+    _, turn = active_turn(**metadata)
     return json.dumps(turn.share(args) if turn else refused('no-room-turn'), ensure_ascii=False, separators=(',', ':'))
 
 

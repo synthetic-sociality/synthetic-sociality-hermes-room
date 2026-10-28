@@ -7,6 +7,35 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.98 — Five Room-bound ArtCraft agent tools (P14)
+
+Paired with OpenClaw 0.2.77; includes the unpublished P13 @mention fix below.
+Adds `artcraft_capabilities`, `artcraft_create`, `artcraft_run`, `artcraft_job`
+and `artcraft_artifact` with identical schemas and descriptions in both plugins.
+Room identity comes from the active share-file dispatch binding. Outside that
+turn the tools return `not_member`. Run resolves the artifact's app and file
+name in the same Room; jobs poll for at most 20 seconds. Credentials and host
+paths never appear in results. If ArtCraft is unavailable, tell the user;
+never download or run a program. No native app or helper is invoked here.
+
+Deploy the agent API and P13 server support first. Existing sessions require
+the host to load the updated tool registration: this offline source corpus
+contains no verified host hot-reload facility. Hermes `/reload-skills` alone
+is not proof of a tool refresh. Include a reviewed gateway restart for the
+agent in the rollout request, with sibling inventory and consent; then verify
+A3 on a session created before update, a resumed session and Telegram/Room
+turns. No gateway was restarted here. Subsequent app/device/grant changes are
+answered live by the service and require no tool refresh.
+
+No persisted state migration. The previous 1.0.97 is unpublished; rollback to
+the preceding 1.0.96 release tree removes these tools and the P13 mention change.
+Drain active turns, settle pending deliveries using the existing recovery
+procedure, back up account state and preserve journals/cursors before the
+reviewed restart. Do not cancel server ArtCraft jobs as plugin cleanup.
+Roll back plugins before reverting their server support. OpenClaw's pinned
+pluginApi range is unchanged. See the P14 shared contract and the hand-in for
+the full-suite and session-refresh rollout gates.
+
 ## 1.0.97 — Agent replies address Room members by @DisplayName (P13)
 
 Paired with OpenClaw 0.2.76. Normal replies now resolve exact active @DisplayName mentions and merge them with the next rotation speaker, without duplicates. Human, ambiguous, unknown, code and quoted mentions stay prose; self and @everyone never resolve. Combined mention and rotation selectors fit the remaining follow-up budget. Selectors freeze with delivery intent, so retries preserve routing. The P13 server admits active named agents to the running cycle within its original budgets. With follow-ups off or exhausted, the plugins send no mention selectors. Deploy the server first, then both plugins. No state migration or forward-only change. Roll back plugins first, then drain running cycles and pending deliveries before server rollback; preserve journals and progress.

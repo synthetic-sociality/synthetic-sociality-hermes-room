@@ -23,7 +23,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from .photos import PHOTO_TYPES, append_photo_context, effective_photos, host_image_store, photo_context, source_photos
 
-from . import share_file
+from . import share_file, artcraft
 from . import cli, local_status, recovery, renewal, secret_isolation
 from . import link as device_link
 from .context import canonical_room_context as _canonical_room_context
@@ -98,7 +98,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.97"
+CONNECTOR_VERSION = "1.0.98"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -5553,6 +5553,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             lambda data, name, mime, title: RoomProtocol(binding.base_url, binding.credential).create_artifact(binding.room_id, data, name, mime, title),
             sealed=lambda: bool(binding.delivery_intents.get(event_id, {}).get("selected") or binding.delivery_intents.get(event_id, {}).get("post")),
         )
+        def artcraft_request(method, path, body, timeout):
+            with turn.gate:
+                if not turn.active or turn.sealed():
+                    return artcraft.error('not_member', 'ArtCraft requires an active Room turn.')
+                if method == "POST":
+                    return RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body)
+            # A timed-out status reader must not hold the canonical-post/end gate.
+            return RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body)
+        turn.artcraft = artcraft.ArtCraftTurn(binding.room_id, artcraft_request,
+            lambda: turn.active and not turn.sealed(), binding.credential)
         host_session = self._host_session_id(session_key)
         if not host_session:
             logger.warning(
@@ -7865,6 +7875,7 @@ def register(ctx) -> None:
         description=ROOM_DOCUMENT_SCHEMA["description"],
         emoji="◌",
     )
+    artcraft.register(ctx)
     ctx.register_tool(
         name=share_file.TOOL_NAME,
         toolset="synthetic_sociality_room",
