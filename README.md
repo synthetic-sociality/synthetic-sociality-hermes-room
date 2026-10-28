@@ -29,6 +29,10 @@ answered live by the service and require no tool refresh.
 
 No persisted state migration. The previous 1.0.97 is unpublished; rollback to
 the preceding 1.0.96 release tree removes these tools and the P13 mention change.
+`plugin.yaml` now differs beyond its version line. For that rollback, supply
+`MANIFEST_SHA=ae4a89770792aa1863c49aaf058473aeb326494058dae3ffbbc41e1c41c16a66`
+to the installer: this is SHA-256 of the new manifest with its `version:` line
+removed, retaining all other bytes and newlines.
 Drain active turns, settle pending deliveries using the existing recovery
 procedure, back up account state and preserve journals/cursors before the
 reviewed restart. Do not cancel server ArtCraft jobs as plugin cleanup.

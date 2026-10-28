@@ -35,7 +35,8 @@
           "minItems": 1,
           "items": {
             "type": "object"
-          }
+          },
+          "maxItems": 64
         },
         "operation": {
           "type": "string",
@@ -110,7 +111,8 @@
           "minItems": 1,
           "items": {
             "type": "object"
-          }
+          },
+          "maxItems": 64
         },
         "operation": {
           "type": "string",

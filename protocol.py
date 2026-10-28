@@ -264,7 +264,7 @@ class RoomProtocol:
         return result
 
     def _request_once(self, method: str, path: str, payload: Any = None, *, credential: str | None = None) -> Any:
-        body = payload.data if isinstance(payload, MultipartBody) else None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+        body = payload.data if isinstance(payload, MultipartBody) else None if payload is None else json.dumps(payload, ensure_ascii='/artcraft/agent/' not in path, separators=(",", ":")).encode()
         headers = {"Accept": "application/json", "User-Agent": ROOM_USER_AGENT}
         if body is not None:
             headers["Content-Type"] = payload.content_type if isinstance(payload, MultipartBody) else "application/json"

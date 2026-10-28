@@ -1343,7 +1343,11 @@ and fileName from app and name, then POSTs with kind=run, artifactId and
 baseRevision. Turn authority is checked again before the POST. A failed
 metadata read never submits a job. Missing idempotency keys are UUIDs generated
 once per tool invocation; supplied keys (16–128 characters) pass unchanged.
-Neither plugin automatically retries a POST.
+Neither plugin automatically retries a POST. `calls` accepts at most 64 items.
+The complete serialized POST body (compact UTF-8 JSON, including resolved
+metadata and the idempotency key) is at most 256 KiB (262144 bytes). Larger
+requests return `invalid_request` locally before any POST; run may first read
+artifact metadata. These limits cover both calls and operation+inputs.
 
 Job defaults to one read. wait_seconds is finite, 0–20 inclusive; polling
 stops at a terminal status, error or deadline. Every read receives the
@@ -1359,6 +1363,18 @@ from the contract DTO; secret/path fields are removed recursively. A value
 containing a host path, bearer or the bound credential fails closed with a
 fixed upstream error, including a violating server error message. This is the
 security boundary for malformed responses, not a rewrite of normal messages.
+
+P14-09 accepts the server's relative card link only for the `cardUrl` key,
+including a done job's nested artifact. Its exact shared regex is
+`^/\?roomId=[a-z0-9]{15}#artcraft-[a-z0-9]{15}-[a-z0-9]{15}$`, matched against
+the entire string (no trailing newline). Each Room, artifact and version ID
+is a 15-character PocketBase ID in `[a-z0-9]`. Existing absolute HTTP(S) card
+URLs remain supported; every other relative card path is refused.
+Host-path values mean absolute paths under /root, /home, /Users, /var, /etc,
+/opt, /tmp, /private, /srv, /usr or /run (including the directory itself),
+and file:// URLs. Benign operation schemas containing " /layer" or "(?:/"
+and error messages containing "a/b" pass through unchanged. Bearer and bound
+credential checks still apply to every value, including card links.
 
 Every description names floor plans/drawings/DXF/DWG (CADCraft), slides
 (DeckCraft), documents (WordCraft), vector graphics/SVG (VectorCraft), page

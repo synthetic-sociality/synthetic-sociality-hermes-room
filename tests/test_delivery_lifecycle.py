@@ -2015,8 +2015,13 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Agent replies address Room members by @DisplayName (P13)",
+            f"## {adapter.CONNECTOR_VERSION} — Five Room-bound ArtCraft agent tools (P14)",
             (ROOT / "README.md").read_text(),
+        )
+        readme = (ROOT / "README.md").read_text()
+        self.assertLess(
+            readme.index("## 1.0.98 — Five Room-bound ArtCraft agent tools (P14)"),
+            readme.index("## 1.0.97 — Agent replies address Room members by @DisplayName (P13)"),
         )
 
     def test_conformance_fixture_references_resolve_to_tests(self):

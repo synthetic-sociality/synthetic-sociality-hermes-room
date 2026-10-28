@@ -1573,5 +1573,5 @@
     "P14-12 registration on a fresh host includes tools for existing sessions",
     "P14-13 transport failures return a fixed upstream error"
   ],
-  "parityP14ToolsSHA256": "b0be00e3bab76b6cb16ff73c354954844e31b01b893998e48365f9c5fe42ac1c"
+  "parityP14ToolsSHA256": "b1a7e5a1445399b60c5c31949bf4db6feec2c17ebd495b1e7b06df74495c3c29"
 }

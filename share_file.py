@@ -401,8 +401,8 @@ def _continuation_reason(room_id, turn, session_id):
                                               _h(child.get('session_key')), _h(turn.session_key))
     return 'lineage-check parent=%s' % ('yes' if child.get('parent_session_id') else 'none')
 
-def _diagnose_refusal(session_id, metadata):
-    """Caller holds _ACTIVE_LOCK. Logs why no active Room turn admitted this share."""
+def _diagnose_refusal(session_id, metadata, refusal_message):
+    """Caller holds _ACTIVE_LOCK. Logs why no active Room turn admitted this tool."""
     from .origin_context import room_for_session
     parts = ['module=%x state=%x' % (id(globals()), id(_ACTIVE)),
              'session_id=%s' % ('present:' + session_id if session_id else 'MISSING'),
@@ -414,9 +414,9 @@ def _diagnose_refusal(session_id, metadata):
             _session_conflicts(room, session_id, '') if session_id else '-',
             callable(getattr(getattr(turn, 'session_db', None), 'get_session', None)), _h(getattr(turn, 'session_key', '')),
             _continuation_reason(room, turn, session_id) if session_id else '-'))
-    _DIAG.warning('share refused: %s', ' '.join(parts))
+    _DIAG.warning('%s: %s', refusal_message, ' '.join(parts))
 
-def active_turn(**metadata):
+def active_turn(*, refusal_message='share refused', **metadata):
     session_id = metadata.get('session_id')
     session_id = session_id.strip() if isinstance(session_id, str) else ''
     with _ACTIVE_LOCK:
@@ -435,9 +435,9 @@ def active_turn(**metadata):
         else:
             turn = None
             try:
-                _diagnose_refusal(session_id, metadata)
+                _diagnose_refusal(session_id, metadata, refusal_message)
             except Exception as error:  # diagnostics never change the refusal
-                _DIAG.warning('share refused: diagnostic failed: %s', type(error).__name__)
+                _DIAG.warning('%s: diagnostic failed: %s', refusal_message, type(error).__name__)
     return (room, turn) if turn else (None, None)
 
 def room_share_file(args, **metadata):

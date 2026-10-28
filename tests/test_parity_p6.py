@@ -346,13 +346,18 @@ class PluginManifestTests(unittest.TestCase):
         # installer decision by the owner first: P7d (owner, 2026-10-05T00:30:41Z,
         # "installers accept reviewed manifest changes") adds exactly the
         # document tool and the transform_tool_result hook; the installers admit
-        # the hash pinned as parityP7dHermesManifestSha256.
+        # the hash pinned as parityP7dHermesManifestSha256. P14 adds the five
+        # ArtCraft tools; the README rollback note records the new manifest hash.
         def without_version(path):
             return [line for line in path.read_text().splitlines() if not line.startswith("version:")]
 
         fixture = without_version(ROOT / "tests" / "fixtures" / "plugin-1.0.79.yaml")
         fixture.insert(fixture.index("  - synthetic_sociality_room_post") + 1, "  - synthetic_sociality_room_document")
         fixture.insert(fixture.index("  - synthetic_sociality_room_document") + 1, "  - synthetic_sociality_room_share_file")
+        offset = fixture.index("  - synthetic_sociality_room_share_file") + 1
+        fixture[offset:offset] = ["  - " + name for name in (
+            "artcraft_capabilities", "artcraft_create", "artcraft_run", "artcraft_job", "artcraft_artifact",
+        )]
         fixture.insert(fixture.index("  - pre_tool_call") + 1, "  - transform_tool_result")
         self.assertEqual(without_version(ROOT / "plugin.yaml"), fixture)
         self.assertIn(f"version: {adapter.CONNECTOR_VERSION}", (ROOT / "plugin.yaml").read_text().splitlines())

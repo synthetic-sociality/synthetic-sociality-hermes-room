@@ -19,7 +19,9 @@ FIELDS = {
     'artcraft_job': ('jobId', 'status', 'error', 'artifact'),
     'artcraft_artifact': ('artifactId', 'app', 'name', 'revisions', 'cardUrl'),
 }
-UNSAFE = re.compile(r'(?:^|[\s\x22\x27(:=])(?:/[^/\s]|~[/\\]|[A-Za-z]:[/\\])|\bfile://|\bBearer\s+\S+', re.I)
+MAX_REQUEST_BYTES = 256 * 1024
+CARD_URL = re.compile(r'^/\?roomId=[a-z0-9]{15}#artcraft-[a-z0-9]{15}-[a-z0-9]{15}$')
+UNSAFE = re.compile(r'(?:^|[\s\x22\x27(:=])/(?:root|home|Users|var|etc|opt|tmp|private|srv|usr|run)(?=[/\s\x22\x27():,;=\]}]|$)|\bfile://|\bBearer\s+\S+', re.I)
 PRIVATE = re.compile(r'^(?:credentials?|(?:access|refresh|membership|auth)?[_-]?token|secret(?:[_-]?key)?|password|authorization|bearer|(?:host|local)[_-]?paths?)$', re.I)
 
 
@@ -27,7 +29,10 @@ def error(code, message):
     return {'error': {'code': code, 'message': message}}
 
 
-def clean(value, credential=''):
+def clean(value, credential='', key=''):
+    if key == 'cardUrl' and (not isinstance(value, str) or not (
+            CARD_URL.fullmatch(value) or re.fullmatch(r'https?://[^\s]+', value))):
+        raise ValueError('Invalid card URL')
     if isinstance(value, str):
         if UNSAFE.search(value) or (credential and credential in value):
             raise ValueError('Unsafe result')
@@ -35,7 +40,7 @@ def clean(value, credential=''):
     if isinstance(value, list):
         return [clean(v, credential) for v in value]
     if isinstance(value, dict):
-        return {k: clean(v, credential) for k, v in value.items() if not PRIVATE.search(k)}
+        return {k: clean(v, credential, k) for k, v in value.items() if not PRIVATE.search(k)}
     if value is None or isinstance(value, (bool, int, float)):
         return value
     raise ValueError('Invalid result')
@@ -50,7 +55,7 @@ def valid(args, spec):
             if not isinstance(v, str) or not rule.get('minLength', 0) <= len(v) <= rule.get('maxLength', math.inf): return False
             if 'pattern' in rule and not re.fullmatch(rule['pattern'], v): return False
         elif rule['type'] == 'array':
-            if not isinstance(v, list) or len(v) < rule.get('minItems', 0): return False
+            if not isinstance(v, list) or not rule.get('minItems', 0) <= len(v) <= rule.get('maxItems', math.inf): return False
             if k == 'calls' and not all(isinstance(c, dict) for c in v): return False
         elif rule['type'] == 'number':
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not rule['minimum'] <= v <= rule['maximum']: return False
@@ -74,6 +79,12 @@ class ArtCraftTurn:
 
     def call(self, method, suffix, body=None, timeout=20):
         if not self.active(): return error('not_member', 'ArtCraft requires an active Room turn.')
+        if method == 'POST':
+            try:
+                if len(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > MAX_REQUEST_BYTES:
+                    return error('invalid_request', 'ArtCraft request exceeds 256 KiB.')
+            except (TypeError, ValueError, UnicodeError):
+                return error('invalid_request', 'Invalid ArtCraft request body.')
         try:
             value = self.request(method, self.prefix + suffix, body, timeout)
         except Exception as exc:
@@ -141,7 +152,7 @@ class ArtCraftTurn:
 
 
 def room_tool(name, args, **metadata):
-    _, turn = share_file.active_turn(**metadata)
+    _, turn = share_file.active_turn(refusal_message='ArtCraft request refused: not in a Room turn', **metadata)
     bound = getattr(turn, 'artcraft', None)
     result = bound.execute(name, args) if bound else error('not_member', 'ArtCraft requires an active Room turn.')
     return json.dumps(result, ensure_ascii=False, separators=(',', ':'))

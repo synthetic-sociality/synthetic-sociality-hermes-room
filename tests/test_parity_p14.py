@@ -35,16 +35,18 @@ ARGS = {
     'artcraft_job': {'job_id': 'job'},
     'artcraft_artifact': {'artifact_id': 'artifact'},
 }
-ARTIFACT = {'artifactId': 'artifact', 'app': 'cadcraft', 'name': 'plan.dxf', 'revisions': [{'revision': 'r1', 'createdAt': '2026-10-28T00:00:00Z', 'by': 'agent'}], 'cardUrl': 'https://room.invalid/card/artifact'}
+ARTIFACT = {'artifactId': 'artifact', 'app': 'cadcraft', 'name': 'plan.dxf', 'revisions': [{'revision': 'r1', 'createdAt': '2026-10-28T00:00:00Z', 'by': 'agent'}], 'cardUrl': '/?roomId=room01234567890#artcraft-art012345678901-ver012345678901'}
 
 class FakeServer:
     def __init__(self):
         self.calls = []
+        self.body_sizes = []
         self.failure = None
         self.answer = None
         self.hook = lambda: None
     def open(self, request, timeout):
         body = json.loads(request.data) if request.data else None
+        self.body_sizes.append(len(request.data) if request.data else 0)
         self.calls.append((request.get_method(), request.full_url, body, timeout))
         assert request.get_header('Authorization') == 'Bearer private-credential'
         if self.failure:
@@ -107,6 +109,9 @@ class P14Tests(unittest.TestCase):
         self.assertEqual(run['operation'],'draw'); self.assertEqual(run['inputs'],[])
         self.assertNotIn('error',self.call('artcraft_capabilities',{}))
         self.assertTrue(self.server.calls[-1][1].endswith('/capabilities'))
+        self.server.answer={'jobId':'job','status':'done','artifact':ARTIFACT}
+        self.assertEqual(self.call('artcraft_job'), self.server.answer)
+        self.assertEqual(self.call('artcraft_job')['artifact']['cardUrl'], ARTIFACT['cardUrl'])
         # Failed job DTO retains status, id and its server error.
         self.server.answer={'jobId':'job','status':'failed','error':{'code':'upstream','message':'App failed'}}
         self.assertEqual(self.call('artcraft_job'), self.server.answer)
@@ -123,6 +128,16 @@ class P14Tests(unittest.TestCase):
             self.assertNotIn('error', self.call(name))
         self.assertTrue(all('/rooms/bound-room/' in c[1] for c in self.server.calls))
     def test_05(self):
+        with self.assertLogs(share._DIAG.name, level='WARNING') as logs:
+            self.assertEqual(self.call('artcraft_job',session='foreign')['error']['code'],'not_member')
+        self.assertIn('ArtCraft request refused: not in a Room turn', logs.output[0])
+        self.assertNotIn('share refused', logs.output[0])
+        with patch.object(share, '_diagnose_refusal', side_effect=RuntimeError), self.assertLogs(share._DIAG.name, level='WARNING') as logs:
+            self.call('artcraft_job',session='foreign')
+        self.assertIn('ArtCraft request refused: not in a Room turn: diagnostic failed', logs.output[0])
+        with self.assertLogs(share._DIAG.name, level='WARNING') as logs:
+            share.room_share_file({},session_id='foreign')
+        self.assertIn('share refused', logs.output[0])
         for name in ARGS: self.assertEqual(self.call(name,session='foreign')['error']['code'],'not_member')
         self.turn.sealed=lambda: True
         for name in ARGS: self.assertEqual(self.call(name)['error']['code'],'not_member')
@@ -164,15 +179,60 @@ class P14Tests(unittest.TestCase):
             self.server.answer={**ARTIFACT,field:value}
             result=self.call('artcraft_artifact')
             self.assertEqual(result['error']['code'],'upstream'); self.assertNotIn(value,json.dumps(result))
-        schema={'operations': {'stroke_path': {'properties': {'path': {'type': 'array'}}}}}
+        for directory in ('root','home','Users','var','etc','opt','tmp','private','srv','usr','run'):
+            for value in ('/'+directory, 'Read /'+directory+'/private/file failed'):
+                self.server.answer={**ARTIFACT,'name':value}
+                self.assertEqual(self.call('artcraft_artifact')['error']['code'],'upstream')
+        card=ARTIFACT['cardUrl']
+        for value in ('/layer','relative/card','//room.invalid/card',card.replace('roomId=','roomId=x'),card.replace('art012345678901','ART012345678901'),card.replace('ver012345678901','ver01234567890'),card+'\n',card+'&extra=1',card.replace('#artcraft-','#other-')):
+            for name in ('artcraft_artifact','artcraft_job'):
+                artifact={**ARTIFACT,'cardUrl':value}
+                self.server.answer=artifact if name=='artcraft_artifact' else {'jobId':'job','status':'done','artifact':artifact}
+                self.assertEqual(self.call(name)['error']['code'],'upstream')
+        self.server.answer={**ARTIFACT,'cardUrl':'https://room.invalid/card/artifact'}
+        self.assertEqual(self.call('artcraft_artifact'),self.server.answer)
+        schema={'operations': {'stroke_path': {'description':'Use /layer or (?:/ syntax', 'properties': {'path': {'type': 'array'}}}}}
         self.server.answer={'available':True,'apps':[],'device':'ready','schema':schema}
         self.assertEqual(self.call('artcraft_capabilities')['schema'],schema)
+        self.server.answer={'error':{'code':'invalid_request','message':'Cannot resolve a/b in /layer'}}
+        self.assertEqual(self.call('artcraft_job'),self.server.answer)
         self.server.answer={'error':{'code':'upstream','message':'Read /root/private/file failed'}}
         self.assertEqual(self.call('artcraft_job'),art.error('upstream','ArtCraft request failed.'))
     def test_10(self):
         bad=[('artcraft_create',{'app':'cadcraft','file_name':'../secret','calls':[{}]}),('artcraft_create',{'app':'cadcraft','file_name':'a.dxf'}),('artcraft_run',{'artifact_id':'a','base_revision':'r','calls':[]}),('artcraft_job',{'job_id':'job','wait_seconds':21}),('artcraft_job',{'job_id':'job','wait_seconds':True}),('artcraft_job',{'job_id':'job','wait_seconds':float('nan')}),('artcraft_job',{'job_id':'..'}),('artcraft_create',{'app':'cadcraft','file_name':'name.dxf\n','calls':[{}]}),('artcraft_create',{**ARGS['artcraft_create'],'operation':'draw','inputs':[]}),('artcraft_run',{**ARGS['artcraft_run'],'idempotency_key':'short'})]
         for name,args in bad: self.assertEqual(self.call(name,args)['error']['code'],'invalid_request')
         self.assertEqual(self.server.calls,[])
+    def test_10_request_bounds(self):
+        key='supplied-idempotency-key'
+        for name in ('artcraft_create','artcraft_run'):
+            with self.subTest(tool=name):
+                base={k:v for k,v in ARGS[name].items() if k not in ('calls','operation','inputs')}
+                base['idempotency_key']=key
+                for count in (64,65):
+                    before=len(self.server.calls)
+                    result=self.call(name,{**base,'calls':[{} for _ in range(count)]})
+                    if count==64:
+                        self.assertNotIn('error',result)
+                        self.assertEqual(len(self.server.calls[-1][2]['calls']),64)
+                    else:
+                        self.assertEqual(result['error']['code'],'invalid_request')
+                        self.assertEqual(len(self.server.calls),before)
+                for mode in ('calls','inputs'):
+                    payload={'calls':[{'text':''}]} if mode=='calls' else {'operation':'draw','inputs':['']}
+                    self.assertNotIn('error',self.call(name,{**base,**payload}))
+                    overhead=self.server.body_sizes[-1]
+                    available=256*1024-overhead
+                    text='é'*(available//2)+'x'*(available%2)
+                    for extra in ('','x'):
+                        payload={'calls':[{'text':text+extra}]} if mode=='calls' else {'operation':'draw','inputs':[text+extra]}
+                        before=len([c for c in self.server.calls if c[0]=='POST'])
+                        result=self.call(name,{**base,**payload})
+                        if not extra:
+                            self.assertNotIn('error',result)
+                            self.assertEqual(self.server.body_sizes[-1],256*1024)
+                        else:
+                            self.assertEqual(result['error']['code'],'invalid_request')
+                            self.assertEqual(len([c for c in self.server.calls if c[0]=='POST']),before)
     def test_11(self):
         self.server.hook=lambda: setattr(self.turn,'active',False)
         self.assertEqual(self.call('artcraft_run')['error']['code'],'not_member')
