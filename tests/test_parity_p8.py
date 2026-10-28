@@ -209,7 +209,8 @@ def idle_instance(room: IdleRoom, bindings, *, status=None, real_state: bool = F
         instance._persist_binding = lambda _binding: True
     instance._mark_connected = lambda: None
     instance._mark_disconnected = lambda: None
-    instance._call = lambda binding, operation: REAL_SLEEP(0, result=operation(room.api(binding)))
+    instance._call = lambda binding, operation, **_request_options: REAL_SLEEP(0, result=operation(room.api(binding)))
+    instance._raw_call = instance._call  # own-roster probes bypass the participation gate
     instance.connect = lambda **_kwargs: None
     return instance
 

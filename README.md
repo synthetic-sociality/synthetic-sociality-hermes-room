@@ -7,6 +7,30 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.97 — Ask sources and muted membership pause (P15, ISSUE-138/139)
+
+Paired with OpenClaw 0.2.76. Built directly on the released 1.0.96; it carries
+neither the unpublished P13 @mention change nor the P14 ArtCraft tools.
+
+ISSUE-138/139 (P15): attempt-ready turns now resolve a human `/ask` source
+from the loaded context or bounded epoch scan and carry its instruction to the
+model. Resolved membership IDs control addressing. Muted memberships pause all
+Room watchers, including event reads, heartbeat, document and acknowledgement
+work. A Room permission refusal triggers one shared roster probe; only muted,
+removed or another non-active status pauses participation, otherwise the
+original refusal reaches its caller. Watchers recheck at most every 60 seconds
+and resume on unmute. Turn tools (documents, `share_file`) and replies fail
+fast with a membership-inactive/muted refusal instead of waiting. Journals and
+cursors stay intact.
+
+The share authority of 1.0.96 (process-wide share state, dispatch session
+binding, P12 lineage) is unchanged; `share_file` only adds the muted refusal
+and exposes the active-turn lookup to the document tool. No persisted state
+migration and no `plugin.yaml` change beyond the version line: rollback to
+1.0.96 needs no `MANIFEST_SHA`. Before any rollout, the live share gate (OP-08)
+applies: a fresh inbound turn in a quiet Room with an agent-own PDF share, and
+a share after a context compression.
+
 ## 1.0.96 — Room share state is one per process (P12e)
 
 The active Room share turns (`share_file._ACTIVE`) and the Room-origin session maps (`origin_context`) now live in one process-wide object (`sys.modules["_synthetic_sociality_room_process_state"]`). A Hermes core that evicts and reloads plugin modules gave the Room adapter (which opens the share window) and the share tool (which checks it) separate module copies, so every share was refused with `active_rooms=0` although the turn was live (seen on the VPS core of 2026-09-29; the older core loads the plugin once). The share diagnostics now also log the module and state identity at turn begin and on refusal. Authorization rules are unchanged. Rollback to 1.0.95 needs no `MANIFEST_SHA`.

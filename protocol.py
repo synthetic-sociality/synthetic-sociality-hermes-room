@@ -634,7 +634,16 @@ class RoomProtocol:
                     raise ProtocolError("Photo exceeds size cap", code="photo_size_cap")
                 content_type = response.headers.get("Content-Type", "")
         except urllib.error.HTTPError as error:
-            raise ProtocolError("Photo fetch failed", status=error.code) from None
+            try:
+                envelope = json.loads(error.read(MAX_JSON_RESPONSE_BYTES + 1))
+            except (ValueError, OSError):
+                envelope = None
+            room_json = isinstance(envelope, dict)
+            raise ProtocolError(
+                str(envelope.get("message") or "Photo fetch failed") if room_json else "Photo fetch failed",
+                status=error.code, code=str(envelope.get("code") or "") if room_json else "",
+                non_json=not room_json,
+            ) from None
         except (OSError, http.client.HTTPException):
             raise ProtocolError("Photo fetch failed", retryable=True) from None
         _contact_succeeded(room_contact(self.base_url, "GET", path))

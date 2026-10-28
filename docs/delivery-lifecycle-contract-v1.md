@@ -1255,3 +1255,56 @@ These local checks do not replace live host acceptance or independent review.
 - P12-08 foreign lineage cannot move authority between Rooms
 - P12-09 unresolved dispatch without fresh core evidence and historical parent grant no authority
 - P12-10 canonical post sealing refuses sharing and new lineage
+
+## P15 — Ask sources and membership watcher pause
+
+P15-1 A cycle attempt promotes its exact canonical `sourceEventId` from either
+`message.posted` or `human.command`, in the loaded page or the existing bounded
+epoch scan. An ask presents `command.arguments.instruction` as current human
+input with the source author. Addressing uses `command.resolvedTargetMembershipIds`,
+never display names or selector prose. Existing epoch floors, scan deadlines,
+missing-source fallback and server attempt admission still apply.
+
+P15-2 Background Room watchers share one participation gate per authenticated
+membership: event stream/long poll, registration/heartbeat, enrollment,
+activity/status writers, document/photo context, acknowledgement retries,
+attempt maintenance, recovery and credential discovery. Only background
+requests explicitly opt into waiting (`background=true`). Model-turn tools
+(documents and share_file) and reply/posting calls fail fast with a
+clear membership inactive/muted error; they never wait for an unmute.
+A Room JSON 403 or "not allowed" refusal triggers one shared, rate-limited
+own-roster probe. Only evidence of muted, removed or another non-active status
+pauses participation. If the roster says active, or cannot establish inactivity,
+the original refusal reaches its caller unchanged, through existing per-path
+handling and bounded contact backoff. This includes inaccessible artifacts,
+document workflows, summary/admin refusals and photo-download 403s.
+Credential revocation/expiry stay terminal. Non-JSON edge failures retain P7a
+backoff. Already in-flight
+contacts may finish; local diagnostics preserve inactive status.
+
+P15-3 Initialise the gate from the first readable own-membership probe. Active
+always opens it, including after a denial; no artificial status transition is
+required. Missing/unread or other-member state cannot reopen a paused gate.
+Paused background watchers coalesce roster probes and recheck no more than
+60 seconds apart; ordinary denial probes are rate-limited to that cadence.
+Also probe once when a turn is offered or an attempt-ready arrives, even inside
+the periodic interval, coalescing concurrent offers. Unmute resumes background
+work through existing authority and lease checks, preserving cursors, journals
+and receipts. Stop/abort cancels waits; sibling memberships keep running.
+Released as Hermes 1.0.97/OpenClaw 0.2.76 on top of Hermes 1.0.96/OpenClaw
+0.2.75; no persisted state migration.
+
+Both conformance files pin `parityP15Contract` and these identical case names:
+
+- P15-01 loaded ask source reaches the model with resolved target addressing
+- P15-02 older ask source resolves within the bounded epoch scan
+- P15-03 all watcher contacts pause together and resume on active
+- P15-04 active member post refusals surface without pausing
+- P15-05 unread missing and other memberships cannot resume participation
+- P15-06 credential failures stay terminal and shutdown cancels paused work
+- P15-07 sibling memberships continue while one pauses
+- P15-08 inactive enrollment pauses heartbeat and event watchers
+- P15-09 muted turn tools and replies fail fast
+- P15-10 active member photo download refusal surfaces
+- P15-11 a turn offer probes promptly and coalesces concurrent offers
+- P15-12 denied background contacts probe before pausing

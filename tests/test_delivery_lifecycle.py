@@ -227,7 +227,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 def activity(self, *_args):
                     return {"accepted": True}
 
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
             instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
             dispatched = []
             instance.handle_message = lambda *args: asyncio.sleep(0, result=dispatched.append(args))
@@ -315,7 +315,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             def configure(cycle_attempt):
                 instance = configured_instance(binding, cycle_attempt, snapshots)
-                instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+                instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
                 instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
                 instance._inflight_events = set()
                 instance._complete_event = lambda *_args, **_kwargs: asyncio.sleep(0)
@@ -379,7 +379,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                 def activity(self, *_args):
                     return {"accepted": True}
 
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
             instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
             instance.handle_message = lambda *_args: self.fail("retry source must wait for canonical ready event")
             event = {"id": "retry-source", "seq": 6 if quarantine else 5, "type": "human.command", "actorId": "human-owner", "actorRole": "human_owner", "payload": {"command": {
@@ -619,7 +619,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             activity = []
             instance._publish = lambda *_args, **kwargs: asyncio.sleep(
                 0, result=activity.append(kwargs)
@@ -673,7 +673,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance.send(
                 binding.room_id,
@@ -719,7 +719,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance.send(
                 binding.room_id,
@@ -764,7 +764,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             metadata = {
                 "notify": True,
@@ -821,7 +821,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             model_text = json.dumps({
                 "error_surface": {
@@ -868,7 +868,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             model_text = "Provider unavailable; this exact sentence could also be model-authored."
             result = await instance.send(
@@ -1219,7 +1219,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             with self.assertRaises(adapter.ProtocolError) as raised:
                 await instance._post_with_fresh_context(
                     restored, restored.room_id, "", 5, "evt-5", "Regenerated bytes",
@@ -1262,7 +1262,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             with self.assertRaises(adapter.ProtocolError) as raised:
                 await instance._post_with_fresh_context(
                     binding, binding.room_id, "", 5, "evt-5", "Regenerated bytes",
@@ -1326,7 +1326,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             with self.assertRaises(adapter.ProtocolError) as raised:
                 await instance._post_with_fresh_context(
                     restored, restored.room_id, "", 5, "evt-5", "Frozen answer",
@@ -1393,7 +1393,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             with self.assertRaises(adapter.ProtocolError) as raised:
                 await instance._post_with_fresh_context(
                     restored, restored.room_id, "", 5, "evt-5", "Frozen answer",
@@ -1443,7 +1443,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"id": "must-not-post", "seq": 6, "ts": "2026-08-29T00:00:00Z"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             task = asyncio.create_task(instance._post_with_fresh_context(
                 binding, binding.room_id, "", 5, "evt-5", "late bytes", "epoch-1",
                 attempt, "evt-human", coordination_mode="coordinated",
@@ -2012,11 +2012,11 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.96")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.97")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Room share state is one per process (P12e)",
+            f"## {adapter.CONNECTOR_VERSION} — Ask sources and muted membership pause (P15, ISSUE-138/139)",
             (ROOT / "README.md").read_text(),
         )
 
@@ -2072,7 +2072,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.96"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.97"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -2205,7 +2205,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("wrapped envelope reached canonical post")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             activity = []
             instance._publish = lambda *_args, **kwargs: asyncio.sleep(
                 0, result=activity.append(kwargs)
@@ -2248,7 +2248,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("ambiguous envelope reached canonical post")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 binding.room_id,
@@ -2357,7 +2357,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             source = adapter._dispatch_source_ref("evt-5", "generation-error")
             first = await instance._send_final(binding.room_id, source, output)
@@ -2400,7 +2400,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             malformed = (
                 '{"action":"contribute","body":"First line.\n\n'
@@ -2461,7 +2461,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("gateway operational fallback reached canonical Room post")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             activity = []
             instance._publish = lambda *_args, **kwargs: asyncio.sleep(
                 0, result=activity.append(kwargs)
@@ -2525,7 +2525,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("connection error reached canonical Room post")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **kwargs: asyncio.sleep(
                 0, result=activity.append(kwargs)
             )
@@ -2574,7 +2574,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("provider retry fallback reached canonical Room post")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
 
             result = await instance._send_final(
@@ -2634,7 +2634,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("authentication fallback reached canonical Room post")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             fallback = (
                 "⚠️ Provider authentication failed. Check the configured credentials; "
@@ -2705,7 +2705,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 binding.room_id,
@@ -2758,7 +2758,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 binding.room_id,
@@ -2888,7 +2888,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             api = API()
 
-            async def call(_binding, operation):
+            async def call(_binding, operation, **_request_options):
                 result = operation(api)
                 result = await result if hasattr(result, "__await__") else result
                 if phases["context"].is_set() and not releases["context"].is_set():
@@ -2998,7 +2998,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             api = API()
 
-            async def call(_binding, operation):
+            async def call(_binding, operation, **_request_options):
                 result = operation(api)
                 return await result if hasattr(result, "__await__") else result
 
@@ -3118,7 +3118,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     }
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(api),
             )
             completed = []
@@ -3183,7 +3183,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"accepted": True}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(
                 0, result=completed.append(kwargs)
             )
@@ -3237,7 +3237,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"acknowledgedSeq": seq}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda _binding, source_id, kind, **kwargs: asyncio.sleep(
                 0, result=published.append((source_id, kind, kwargs))
             )
@@ -3262,7 +3262,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             instance._latest_source = {}
             instance._run_for_event = {}
             instance._cycle_attempts = {}
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(
                     room_state=lambda _room_id: {
                         "headSeq": 9,
@@ -3315,7 +3315,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             instance = object.__new__(adapter.SyntheticSocialityAdapter)
             instance._inflight_events = set()
             instance._event_seq = {}
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
                     "activeEpoch": {"id": "new", "startsAtSeq": 5},
                 })),
@@ -3339,7 +3339,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             instance._cycle_attempts.clear()
             instance._superseded_sources.add("evt-5")
             published = []
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
                     "headSeq": 15, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1},
                 })),
@@ -3388,7 +3388,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"acknowledgedSeq": seq}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             terminal = {
                 "status": "posted", "canonical_event_id": "posted-6",
                 "reason": "", "generation": "generation-1", "message_id": "posted-6",
@@ -3497,7 +3497,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"status": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **kwargs: asyncio.sleep(
                 0, result=published.append(kwargs),
             )
@@ -3526,7 +3526,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             instance = configured_instance(binding, None, [])
             instance._event_seq = {"room-1": {"evt-5": 5}}
             instance._event_epoch = {"evt-5": "old"}
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
                     "headSeq": 8, "activeEpoch": {"id": "new", "startsAtSeq": 6},
                 })),
@@ -3550,7 +3550,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
     def test_epoch_routing_initialization_preserves_existing_context_unless_rotation_is_authorized(self):
         async def initialize(binding):
             instance = object.__new__(adapter.SyntheticSocialityAdapter)
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(
                     room_state=lambda _room_id: {"activeEpoch": {"id": "epoch-current"}},
                 )),
@@ -3596,7 +3596,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             binding.legacy_session_epoch_id = ""
             state_store.save(state_store.PluginState(bindings=[binding]), path)
             instance, original_update = persisted_instance(path)
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
                     "activeEpoch": {"id": " epoch-current "},
                 })),
@@ -3619,7 +3619,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             binding = lifecycle_binding()
             binding.rotate_current_epoch_session = True
             instance = object.__new__(adapter.SyntheticSocialityAdapter)
-            instance._call = lambda _binding, operation: asyncio.sleep(
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
                     "activeEpoch": {"id": "current"},
                 })),
@@ -3665,7 +3665,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             self.assertTrue(still_authorized.rotate_current_epoch_session)
 
             restarted_instance, original_adapter_update = persisted_instance(path)
-            restarted_instance._call = lambda _binding, operation: asyncio.sleep(
+            restarted_instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {
                     "activeEpoch": {"id": "current"},
                 })),
@@ -3758,7 +3758,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"acknowledgedSeq": seq}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             try:
                 await instance._complete_event(
                     binding, 5, terminal_status="posted", source_id="evt-5",
@@ -3825,7 +3825,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError(f"restart must not invoke {name}")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             try:
                 await instance._repair_pending_lifecycles(reloaded)
             finally:
@@ -4146,7 +4146,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise error
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             try:
                 await instance._repair_pending_lifecycles(reloaded)
                 await instance._repair_pending_lifecycles(reloaded)
@@ -4263,7 +4263,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("post must not run after persistence failure")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             result = await instance._send_final(
                 "room-1", adapter._dispatch_source_ref("evt-5", "generation-persist"),
                 "Frozen answer",
@@ -4381,7 +4381,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     )
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 "room-1", adapter._dispatch_source_ref("evt-5", "generation-5"),
@@ -4452,7 +4452,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("lifecycle I/O must not start before its attempt is durable")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 "room-1", adapter._dispatch_source_ref("evt-5", "generation-5"),
@@ -4554,7 +4554,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise adapter.ProtocolError("busy", code="busy", retryable=True)
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 "room-1", adapter._dispatch_source_ref("evt-5", "generation-6"),
@@ -4592,7 +4592,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise adapter.ProtocolError("temporarily unavailable", code="busy", retryable=True)
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 "room-1", adapter._dispatch_source_ref("evt-5", "generation-7"),
@@ -4631,7 +4631,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     )
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             source_ref = adapter._dispatch_source_ref("evt-5", "generation-quarantine")
             first = await instance._send_final("room-1", source_ref, "Frozen answer")
@@ -4683,7 +4683,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     raise AssertionError("lifecycle repair must never post")
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance.handle_message = lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("lifecycle repair must never invoke the model")
             )
@@ -4733,7 +4733,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"acknowledgedSeq": seq}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             await instance._complete_event(
                 binding, 120, terminal_status="posted", source_id="event-120",
                 canonical_event_id="posted-120",
@@ -4776,7 +4776,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"acknowledgedSeq": 99}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             with self.assertRaisesRegex(adapter.ProtocolError, "locally proven contiguous frontier"):
                 await instance._complete_event(
                     binding, 5, terminal_status="posted", source_id="event-5",
@@ -4834,7 +4834,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
                     return {"state": "completed"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
             result = await instance._send_final(
                 "room-1", adapter._dispatch_source_ref("evt-5", "generation-receipt"),
@@ -5045,7 +5045,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             api = API()
 
-            async def invoke(_binding, operation):
+            async def invoke(_binding, operation, **_request_options):
                 return operation(api)
 
             instance._call = invoke
@@ -5355,7 +5355,7 @@ class ConnectorEnrollmentTests(unittest.TestCase):
             instance = object.__new__(adapter.SyntheticSocialityAdapter)
             instance._enrollment_lock = asyncio.Lock()
 
-            async def call(_binding, _operation):
+            async def call(_binding, _operation, **_request_options):
                 raise failure
 
             instance._call = call
@@ -5389,7 +5389,7 @@ class ConnectorEnrollmentTests(unittest.TestCase):
             instance._enrollment_lock = asyncio.Lock()
             persist_calls = []
 
-            async def call(_binding, operation):
+            async def call(_binding, operation, **_request_options):
                 class Protocol:
                     def connector_enrollments(self, _installation_id):
                         return list_result
@@ -5463,7 +5463,7 @@ class ConnectorEnrollmentTests(unittest.TestCase):
                 calls = []
                 watcher_observations = []
 
-                async def call(_binding, operation):
+                async def call(_binding, operation, **_request_options):
                     class Protocol:
                         def connector_enrollments(self, installation_id):
                             calls.append(("list", installation_id))
@@ -5559,7 +5559,7 @@ class ExploreOpenBaselineTests(unittest.TestCase):
             def acknowledge_peer_contribution(self, *_args):
                 return {"accepted": True}
 
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
         instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
         instance._dispatch_next_queued = lambda _binding: asyncio.sleep(0)
         asyncio.run(instance._consume(binding, event))
@@ -5639,7 +5639,7 @@ class ExploreOpenBaselineTests(unittest.TestCase):
             def activity(self, *_args):
                 return {"accepted": True}
 
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
         instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
         instance._dispatch_next_queued = lambda _binding: asyncio.sleep(0)
 
@@ -5691,7 +5691,7 @@ class ExploreOpenBaselineTests(unittest.TestCase):
                     raise adapter.ProtocolError("cap", status=409, code="reply_cap_reached", retryable=False)
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **kwargs: asyncio.sleep(0, result=published.append(kwargs))
             instance._stop_attempt_renewal = lambda _source_id: asyncio.sleep(0)
             source_ref = adapter._dispatch_source_ref("evt-5", "generation-1")
@@ -5728,7 +5728,7 @@ class ExploreOpenBaselineTests(unittest.TestCase):
                     return {"id": "canonical-1", "seq": 6, "ts": "2026-09-22T10:00:00Z"}
 
             api = API()
-            instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+            instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
             instance._publish = lambda *_args, **kwargs: asyncio.sleep(0, result=published.append(kwargs))
             instance._stop_attempt_renewal = lambda _source_id: asyncio.sleep(0)
             source_ref = adapter._dispatch_source_ref("evt-5", "generation-1")

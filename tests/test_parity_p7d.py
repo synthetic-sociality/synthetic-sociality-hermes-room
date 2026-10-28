@@ -138,7 +138,7 @@ def dispatch_turn(room, event, *, memory=None, attempt=None, context=(START, HUM
         artifacts=room.artifacts,
         artifact=room.artifact,
     )
-    instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+    instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
     instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
     instance.build_source = types.MethodType(
         lambda self, **kwargs: types.SimpleNamespace(platform=self.platform, **kwargs), instance,
@@ -1034,7 +1034,7 @@ class ParityP7dTests(unittest.TestCase):
                         return {"state": "completed"}
 
                 api = API()
-                instance._call = lambda _binding, operation, api=api: asyncio.sleep(0, result=operation(api))
+                instance._call = lambda _binding, operation, api=api, **_request_options: asyncio.sleep(0, result=operation(api))
                 instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
                 if metadata is not None:
                     result = asyncio.run(instance.send(binding.room_id, content,

@@ -65,7 +65,7 @@ class EpochHandoverDispatchTests(unittest.TestCase):
             events=events, artifacts=artifacts,
             artifact=lambda _room_id, _artifact_id: self.fail("catalog listing must not fetch artifacts"),
         )
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
         instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
         instance.build_source = types.MethodType(
             lambda self, **kwargs: types.SimpleNamespace(platform=self.platform, **kwargs), instance,

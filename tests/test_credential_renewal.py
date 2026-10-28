@@ -317,7 +317,7 @@ class MaintenanceTests(unittest.IsolatedAsyncioTestCase):
             def events(self, room, cursor, wait, **kwargs):
                 reads.append(cursor)
                 return {"events": []}
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
         await instance._long_poll_once(binding)
         self.assertEqual(reads, [209])
         self.assertEqual(binding, before)

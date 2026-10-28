@@ -114,7 +114,7 @@ class FrozenDeliveryTests(unittest.TestCase):
         return API()
 
     def _post(self, instance, binding, body, api):
-        async def invoke(_binding, operation):
+        async def invoke(_binding, operation, **_request_options):
             return operation(api)
 
         instance._call = invoke

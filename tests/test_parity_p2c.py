@@ -565,7 +565,7 @@ class P2cTests(unittest.TestCase):
         instance._consume = consume
         instance._mark_connected = lambda: None
         instance._mark_disconnected = lambda: None
-        instance._call = lambda _binding, operation: asyncio.to_thread(operation, api)
+        instance._call = lambda _binding, operation, **_request_options: asyncio.to_thread(operation, api)
         instance._stream_call = lambda _binding, operation: asyncio.to_thread(operation, api)
         connects = []
         instance.connect = lambda **_kwargs: connects.append(True)
@@ -680,7 +680,7 @@ class P2cTests(unittest.TestCase):
         instance._lease_deadline = {}
         instance._mark_connected = lambda: None
         instance._persist_binding = lambda _binding: True
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
 
         clock = [1000.0]
 

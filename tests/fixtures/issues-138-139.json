@@ -1,0 +1,43 @@
+{
+  "note": "Synthetic instruction; event types, reported source/target IDs and ask sequence mirror ISSUE-138. No live Room contact.",
+  "source": {
+    "id": "ny32hlul7g2v3i0",
+    "seq": 1312,
+    "type": "human.command",
+    "actorRole": "human_owner",
+    "actorId": "owner-1",
+    "ts": "2026-10-26T00:15:00Z",
+    "payload": {
+      "epochId": "epoch-2",
+      "visibleText": "/ask @Paula What is your view on the climate proposal?",
+      "command": {
+        "command": "ask",
+        "arguments": {
+          "instruction": "What is your view on the climate proposal?"
+        },
+        "targetSelectors": [
+          {
+            "kind": "display_name",
+            "displayName": "A misleading name"
+          }
+        ],
+        "resolvedTargetMembershipIds": [
+          "oz4hxxig9zrj4ku"
+        ]
+      }
+    }
+  },
+  "ready": {
+    "id": "ready-paula",
+    "seq": 1313,
+    "type": "discussion.cycle_attempt_ready",
+    "actorRole": "system",
+    "actorId": "room_coordinator",
+    "payload": {
+      "epochId": "epoch-2",
+      "cycleId": "cy458da6295ba4a",
+      "membershipId": "oz4hxxig9zrj4ku",
+      "sourceEventId": "ny32hlul7g2v3i0"
+    }
+  }
+}

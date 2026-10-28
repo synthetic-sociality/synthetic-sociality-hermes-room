@@ -80,7 +80,7 @@ def consume_instance(*, mode="coordinated", start=None):
         def acknowledge_peer_contribution(self, *_args):
             return {"accepted": True}
 
-    instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+    instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
     instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=completed.append(kwargs))
     instance._dispatch_next_queued = lambda _binding: asyncio.sleep(0)
     return instance, binding, starts, completed, persisted
