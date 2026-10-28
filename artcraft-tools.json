@@ -1,0 +1,209 @@
+{
+  "artcraft_capabilities": {
+    "description": "Discover available apps, operations, device state and an optional app operation schema. Floor plans, drawings, DXF and DWG: CADCraft; slides: DeckCraft; documents: WordCraft; vector graphics and SVG: VectorCraft; page layouts: DesignCraft; PDFs: PdfCraft. if ArtCraft is unavailable, tell the user; never download or run a program.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "app": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  "artcraft_create": {
+    "description": "Create a new artifact using app calls or an operation and inputs. Floor plans, drawings, DXF and DWG: CADCraft; slides: DeckCraft; documents: WordCraft; vector graphics and SVG: VectorCraft; page layouts: DesignCraft; PDFs: PdfCraft. if ArtCraft is unavailable, tell the user; never download or run a program.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "app": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "file_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\\\x00-\\x1f]+$"
+        },
+        "calls": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 64
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "inputs": {
+          "type": "array"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "app",
+        "file_name"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "calls"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "operation"
+                ]
+              },
+              {
+                "required": [
+                  "inputs"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "operation",
+            "inputs"
+          ],
+          "not": {
+            "required": [
+              "calls"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "artcraft_run": {
+    "description": "Operate on an existing artifact at its base revision using calls or an operation and inputs. Floor plans, drawings, DXF and DWG: CADCraft; slides: DeckCraft; documents: WordCraft; vector graphics and SVG: VectorCraft; page layouts: DesignCraft; PDFs: PdfCraft. if ArtCraft is unavailable, tell the user; never download or run a program.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "base_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "calls": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 64
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "inputs": {
+          "type": "array"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "artifact_id",
+        "base_revision"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "calls"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "operation"
+                ]
+              },
+              {
+                "required": [
+                  "inputs"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "operation",
+            "inputs"
+          ],
+          "not": {
+            "required": [
+              "calls"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "artcraft_job": {
+    "description": "Read job status and result; optionally poll for at most 20 seconds. Floor plans, drawings, DXF and DWG: CADCraft; slides: DeckCraft; documents: WordCraft; vector graphics and SVG: VectorCraft; page layouts: DesignCraft; PDFs: PdfCraft. if ArtCraft is unavailable, tell the user; never download or run a program.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "wait_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "artcraft_artifact": {
+    "description": "Describe an artifact, its revisions and its card link. Floor plans, drawings, DXF and DWG: CADCraft; slides: DeckCraft; documents: WordCraft; vector graphics and SVG: VectorCraft; page layouts: DesignCraft; PDFs: PdfCraft. if ArtCraft is unavailable, tell the user; never download or run a program.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

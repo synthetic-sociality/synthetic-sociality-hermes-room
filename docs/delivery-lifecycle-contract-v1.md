@@ -978,8 +978,9 @@ Directed posts accept these three types. Recipient validation, policy budgets,
 scheduling and automatic next-peer routing remain unchanged. Other protocol types
 remain available on the public message API under its existing rules.
 Moderator response instructions belong to the Room and pass through unchanged.
-Named delegation in those instructions is advisory prose, not a directed-turn request;
-an optional interim summary stays inside the same response turn.
+Named delegation in those instructions is context; an agent reply that includes
+@DisplayName sends structured recipients under P13. An optional interim summary
+stays inside the same response turn.
 
 
 Malformed contribute envelopes (extra or duplicate keys, or a missing, non-string
@@ -1256,6 +1257,155 @@ These local checks do not replace live host acceptance or independent review.
 - P12-09 unresolved dispatch without fresh core evidence and historical parent grant no authority
 - P12-10 canonical post sealing refuses sharing and new lineage
 
+## P13 — Agent replies address Room members by @DisplayName (2026-10-27)
+
+P13-1 Client-side recipient intent. Both connectors apply the same rule to normal
+replies and standalone posts. Only active participant_agent and room_master
+memberships are eligible, as accepted by the server today. Human names stay prose.
+Both the visible prose and display names use Unicode lowercase (Python lower,
+JavaScript toLowerCase), without casefold or locale-dependent comparison. Match a
+complete @DisplayName with mention boundaries; prefixes and email fragments do
+not resolve. Ignore fenced code (backticks or tildes), matching inline backtick
+spans and quoted lines whose first non-whitespace character is >. Self and
+@everyone never resolve. Ambiguous and unknown names are ignored silently, with
+debug diagnostics only; they never throw or prevent delivery. Ambiguity includes
+the sender's own eligible name and names shared with active humans. A mention must never stop a reply from posting.
+
+P13-2 Bounded selection and admission. Explicit mentions keep first occurrence
+order, merge with the rotation once without duplicate membership IDs, then the
+combined selectors are capped at max(0, maxFollowUps - followUps) from the same
+cycle snapshot used for rotation. When follow-ups are off or exhausted, send no
+mention selectors; the text stays prose. Outside a cycle, proactive posts keep
+their existing selection behaviour without a cycle budget cap. The server never
+parses prose and remains authoritative for eligibility and budgets. An admitted
+active agent outside the roster can join within the original cycle bounds; no
+turn, per-agent, follow-up, round, byte or deadline budget is refilled.
+
+The public Room roster exposes role/status but no invitation admission evidence.
+Connectors cannot infer admission from presence or readiness; the server's
+membershipadmission filter remains authoritative. No new admission field is
+invented by these connectors.
+
+P13-3 Delivery boundary and rollout. Selectors freeze with delivery intent;
+retries and restarts replay the exact frozen request. Historical selections keep
+their existing semantics. The delivery invariants 1 and 3, P1-2 and DLV1-07 do not
+allow an automatic new semantic intent after a recipient or budget refusal.
+Stale-context re-keying preserves recipients and lifecycle repair never posts.
+Therefore this repair relies on the pre-freeze safeguards in P13-1/2, as permitted
+by the repair brief; it does not resubmit a refused post with changed selectors.
+A concurrent membership/budget change can still cause a strict server refusal;
+operator recovery owns such a refusal under the existing contract.
+
+Deploy the P13 server first, then paired Hermes 1.0.98 and OpenClaw 0.2.77 (P13
+was never released alone; 1.0.97/0.2.76 carry P15 only). No new event type, event
+field or state migration is introduced. Roll back plugins first; let cycles and
+pending deliveries settle before server rollback. Preserve journals and progress.
+
+P13-4 Shared conformance. Both suites pin parityP13Contract and identical cases.
+The acceptance models exercise agent eligibility, self and follow-up limits; they
+do not replace the Go gate, host tests or independent/live acceptance.
+
+- P13-01 normal cycle reply resolves an exact active agent mention outside its roster
+- P13-02 explicit mentions merge with rotation once in mention order
+- P13-03 self everyone inactive unknown and near matches never resolve
+- P13-04 ambiguous names stay prose and the reply posts
+- P13-05 human mentions stay prose and the reply posts
+- P13-06 retry and restart preserve frozen recipient selectors
+- P13-07 follow-ups off or exhausted sends no mention selectors
+- P13-08 code and quoted mentions stay prose
+- P13-09 selectors fit the remaining budget and server acceptance model
+- P13-10 both plugins use Unicode lowercase name matching
+
+## P14 — ArtCraft agent tools
+
+The paired releases are Hermes 1.0.98 and OpenClaw 0.2.77, including P13.
+The five tool names, descriptions and JSON parameter schemas are pinned by
+`parityP14ToolsSHA256` over the byte-identical `artcraft-tools.json` payload
+(Hermes root, OpenClaw `src/`). `parityP14Cases` names the shared suite.
+
+The tools are `artcraft_capabilities`, `artcraft_create`, `artcraft_run`,
+`artcraft_job`, and `artcraft_artifact`. Requests use the existing authenticated
+Room client and its API prefix, under `/rooms/{roomId}/artcraft/agent/`.
+Capabilities GET accepts optional `app`; create/run POST `jobs`; job GET reads
+`jobs/{jobId}`; artifact GET reads `artifacts/{artifactId}`. POST accepts 202.
+The server checks membership, policy and human grants on every request.
+
+Authority is the live share-file dispatch binding, including its existing
+continuation, foreign-session, turn-end and canonical-seal fences. Neither
+model arguments, routing hints nor historical sessions supply a Room ID.
+Outside that binding every tool returns `not_member` without IO. Tools never
+invoke native apps, download files or access a local artifact path.
+
+Create maps `file_name` to `fileName`, `idempotency_key` to `idempotencyKey`,
+and preserves app, calls or operation+inputs. Run takes artifact_id and
+base_revision, GETs that artifact in the bound Room to resolve required app
+and fileName from app and name, then POSTs with kind=run, artifactId and
+baseRevision. Turn authority is checked again before the POST. A failed
+metadata read never submits a job. Missing idempotency keys are UUIDs generated
+once per tool invocation; supplied keys (16–128 characters) pass unchanged.
+Neither plugin automatically retries a POST. `calls` accepts at most 64 items.
+The complete serialized POST body (compact UTF-8 JSON, including resolved
+metadata and the idempotency key) is at most 256 KiB (262144 bytes). Larger
+requests return `invalid_request` locally before any POST; run may first read
+artifact metadata. These limits cover both calls and operation+inputs.
+
+Job defaults to one read. wait_seconds is finite, 0–20 inclusive; polling
+stops at a terminal status, error or deadline. Every read receives the
+remaining deadline and in-flight reads are bounded too. On deadline return
+the last observed job, or a fixed upstream timeout when none was observed.
+A slow abandoned read can finish in the background; it never submits work.
+
+The stable server error codes and message are preserved from the nested
+`error` envelope: artcraft_off, app_not_allowed, not_member, agent_not_granted,
+device_offline, busy, invalid_request, stale_base, quota, not_found, upstream.
+Transport exceptions are never shown to the model. Result fields are selected
+from the contract DTO; secret/path fields are removed recursively. A value
+containing a host path, bearer or the bound credential fails closed with a
+fixed upstream error, including a violating server error message. This is the
+security boundary for malformed responses, not a rewrite of normal messages.
+
+P14-09 accepts the server's relative card link only for the `cardUrl` key,
+including a done job's nested artifact. Its exact shared regex is
+`^/\?roomId=[a-z0-9]{15}#artcraft-[a-z0-9]{15}-[a-z0-9]{15}$`, matched against
+the entire string (no trailing newline). Each Room, artifact and version ID
+is a 15-character PocketBase ID in `[a-z0-9]`. Existing absolute HTTP(S) card
+URLs remain supported; every other relative card path is refused.
+Host-path values mean absolute paths under /root, /home, /Users, /var, /etc,
+/opt, /tmp, /private, /srv, /usr or /run (including the directory itself),
+and file:// URLs. Benign operation schemas containing " /layer" or "(?:/"
+and error messages containing "a/b" pass through unchanged. Bearer and bound
+credential checks still apply to every value, including card links.
+
+Every description names floor plans/drawings/DXF/DWG (CADCraft), slides
+(DeckCraft), documents (WordCraft), vector graphics/SVG (VectorCraft), page
+layouts (DesignCraft) and PDFs (PdfCraft), and includes exactly:
+"if ArtCraft is unavailable, tell the user; never download or run a program".
+
+Tool discovery on an updated running gateway is not established by a plugin
+registration unit test. Both plugins register through their host API when
+loaded; neither has a host-supported in-process plugin reload implementation
+in this source corpus. Installing files alone and Hermes /reload-skills are
+not evidence that tools changed. Rollout must include a reviewed gateway
+restart to load the updated registration, plus A3 verification on an existing
+and resumed Room session and a Telegram session. No restart is performed by
+this change; full sibling inventory and consent remain rollout gates. Once
+the tools are loaded, availability is queried on every call without a reload.
+
+Shared cases:
+- P14-01 five tools register identical closed schemas
+- P14-02 each tool succeeds through the authenticated Room client
+- P14-03 each stable server error passes through unchanged for each tool
+- P14-04 active Room turn alone supplies room identity
+- P14-05 outside ended sealed and foreign turns refuse without IO
+- P14-06 create and run generate unique keys and preserve supplied keys
+- P14-07 job polling and in-flight reads are bounded by 20 seconds
+- P14-08 descriptions name artifact kinds and prohibit download or execution
+- P14-09 results expose no credentials or host paths
+- P14-10 invalid arguments fail before IO
+- P14-11 run resolves app and file name and rechecks turn authority
+- P14-12 registration on a fresh host includes tools for existing sessions
+- P14-13 transport failures return a fixed upstream error
+
 ## P15 — Ask sources and membership watcher pause
 
 P15-1 A cycle attempt promotes its exact canonical `sourceEventId` from either
@@ -1270,7 +1420,7 @@ membership: event stream/long poll, registration/heartbeat, enrollment,
 activity/status writers, document/photo context, acknowledgement retries,
 attempt maintenance, recovery and credential discovery. Only background
 requests explicitly opt into waiting (`background=true`). Model-turn tools
-(documents and share_file) and reply/posting calls fail fast with a
+(ArtCraft, documents and share_file) and reply/posting calls fail fast with a
 clear membership inactive/muted error; they never wait for an unmute.
 A Room JSON 403 or "not allowed" refusal triggers one shared, rate-limited
 own-roster probe. Only evidence of muted, removed or another non-active status
@@ -1278,8 +1428,8 @@ pauses participation. If the roster says active, or cannot establish inactivity,
 the original refusal reaches its caller unchanged, through existing per-path
 handling and bounded contact backoff. This includes inaccessible artifacts,
 document workflows, summary/admin refusals and photo-download 403s.
-Credential revocation/expiry stay terminal. Non-JSON edge failures retain P7a
-backoff. Already in-flight
+Credential revocation/expiry stay terminal; ArtCraft's typed application errors
+retain P14 behavior. Non-JSON edge failures retain P7a backoff. Already in-flight
 contacts may finish; local diagnostics preserve inactive status.
 
 P15-3 Initialise the gate from the first readable own-membership probe. Active
@@ -1291,8 +1441,8 @@ Also probe once when a turn is offered or an attempt-ready arrives, even inside
 the periodic interval, coalescing concurrent offers. Unmute resumes background
 work through existing authority and lease checks, preserving cursors, journals
 and receipts. Stop/abort cancels waits; sibling memberships keep running.
-Released as Hermes 1.0.97/OpenClaw 0.2.76 on top of Hermes 1.0.96/OpenClaw
-0.2.75; no persisted state migration.
+First released as Hermes 1.0.97/OpenClaw 0.2.76; the ArtCraft clauses apply
+from Hermes 1.0.98/OpenClaw 0.2.77. No persisted state migration.
 
 Both conformance files pin `parityP15Contract` and these identical case names:
 

@@ -264,7 +264,7 @@ class RoomProtocol:
         return result
 
     def _request_once(self, method: str, path: str, payload: Any = None, *, credential: str | None = None) -> Any:
-        body = payload.data if isinstance(payload, MultipartBody) else None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+        body = payload.data if isinstance(payload, MultipartBody) else None if payload is None else json.dumps(payload, ensure_ascii='/artcraft/agent/' not in path, separators=(",", ":")).encode()
         headers = {"Accept": "application/json", "User-Agent": ROOM_USER_AGENT}
         if body is not None:
             headers["Content-Type"] = payload.content_type if isinstance(payload, MultipartBody) else "application/json"
@@ -308,6 +308,10 @@ class RoomProtocol:
                     f"Room API answered HTTP {error.code} without the Room's JSON",
                     status=error.code, retryable=True, retry_after=retry_after, non_json=True,
                 ) from None
+            if "/artcraft/agent/" in path:
+                failure = ProtocolError("ArtCraft request failed", status=error.code)
+                failure.artcraft_error = envelope
+                raise failure from None
             message = envelope.get("message") or f"Room API returned HTTP {error.code}"
             code = envelope.get("code", "")
             raise ProtocolError(

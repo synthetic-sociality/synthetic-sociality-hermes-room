@@ -23,7 +23,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from .photos import PHOTO_TYPES, append_photo_context, effective_photos, host_image_store, photo_context, source_photos
 
-from . import share_file
+from . import share_file, artcraft
 from . import cli, local_status, recovery, renewal, secret_isolation
 from . import link as device_link
 from .membership import MembershipGate, TURN_CONTACT, turn_contacts
@@ -64,6 +64,7 @@ from .protocol import (
     valid_event_page,
 )
 from .room_tools import (
+    _inline_agent_recipients,
     ROOM_CONTEXT_SCHEMA,
     ROOM_DOCUMENT_SCHEMA,
     ROOM_HISTORY_SCHEMA,
@@ -98,7 +99,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.97"
+CONNECTOR_VERSION = "1.0.98"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -2213,7 +2214,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if responds_to_id and responds_to_id != source_id:
             cycle_payload["responds_to"] = responds_to_id
         if recipient_membership_ids:
-            cycle_payload["recipients"] = list(recipient_membership_ids)
+            cycle_payload["recipients"] = list(dict.fromkeys([
+                *recipient_membership_ids, *(cycle_payload.get("recipients") or []),
+            ]))
+        if cycle_attempt and not isinstance(persisted_post, dict):
+            cycle = cycle_attempt["cycle"]
+            remaining = max(0, int((cycle.get("budgets") or {}).get("maxFollowUps") or 0) - int(cycle.get("followUps") or 0))
+            cycle_payload["recipients"] = list(cycle_payload.get("recipients") or [])[:remaining]
         recipients = list(cycle_payload.get("recipients") or [])
         responds_to = str(cycle_payload.get("responds_to") or responds_to_id or source_id)
         if isinstance(persisted_post, dict):
@@ -2570,6 +2577,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 source_ref, dispatch_generation, f"superseded:{source_id}",
                 terminal_status="superseded", reason="attempt_lease_lost",
             )
+        # P13: resolve the final visible body once, before durable selection.
+        # Recovered selections and frozen posts retain their exact selectors.
+        if body is not None and recovered is None and not durably_posted:
+            open_recipients = list(dict.fromkeys([
+                *_inline_agent_recipients(current_state, body, binding.membership_id),
+                *open_recipients,
+            ]))
         try:
             selected = self._select_delivery_intent(
                 binding, source_id, body, responds_to_id, open_recipients,
@@ -5681,6 +5695,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         )
         turn.membership_error = membership_error
         turn.contact = tool_contact
+        def artcraft_request(method, path, body, timeout):
+            if membership_error():
+                return artcraft.error('not_member', membership_error())
+            with turn.gate:
+                if not turn.active or turn.sealed():
+                    return artcraft.error('not_member', 'ArtCraft requires an active Room turn.')
+                if method == "POST":
+                    return tool_contact(lambda: RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body))
+            # A timed-out status reader must not hold the canonical-post/end gate.
+            return tool_contact(lambda: RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body))
+        turn.artcraft = artcraft.ArtCraftTurn(binding.room_id, artcraft_request,
+            lambda: turn.active and not turn.sealed(), binding.credential)
         host_session = self._host_session_id(session_key)
         if not host_session:
             logger.warning(
@@ -8036,6 +8062,7 @@ def register(ctx) -> None:
         description=ROOM_DOCUMENT_SCHEMA["description"],
         emoji="◌",
     )
+    artcraft.register(ctx)
     ctx.register_tool(
         name=share_file.TOOL_NAME,
         toolset="synthetic_sociality_room",

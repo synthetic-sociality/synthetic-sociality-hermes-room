@@ -240,36 +240,72 @@ def _select_call_room(
     return binding, state, choices, None
 
 
+def _mention_prose(body: str) -> str:
+    """Ignore quoted lines, fenced blocks and matching backtick code spans."""
+    lines = []
+    fence = None
+    for line in body.splitlines(keepends=True):
+        if line.lstrip().startswith(">"):
+            lines.append("\n")
+            continue
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                fence = None
+            lines.append("\n")
+        elif marker:
+            fence = marker[1]
+            lines.append("\n")
+        else:
+            lines.append(line)
+    prose = "".join(lines)
+    # A code span closes only at a backtick run of the same length.
+    runs = list(re.finditer(r"`+", prose))
+    masked = list(prose)
+    i = 0
+    while i < len(runs):
+        end = next((j for j in range(i + 1, len(runs)) if runs[j][0] == runs[i][0]), None)
+        if end is None:
+            i += 1
+            continue
+        masked[runs[i].start():runs[end].end()] = " " * (runs[end].end() - runs[i].start())
+        i = end + 1
+    return "".join(masked)
+
+
 def _inline_agent_recipients(
     state: dict[str, Any], body: str, own_membership_id: str,
 ) -> list[str]:
-    by_name: dict[str, list[tuple[str, str]]] = {}
+    body = _mention_prose(body).lower()
+    if "@" in body:
+        logger.debug("Resolving Room prose mentions; unknown names are ignored")
+    by_name: dict[str, list[tuple[str, str, str]]] = {}
     for member in state.get("roster") or []:
         if not isinstance(member, dict):
             continue
         membership_id = str(member.get("membershipId") or "").strip()
         display_name = str(member.get("displayName") or "").strip()
         if (
-            not membership_id or not display_name or membership_id == own_membership_id
+            not membership_id or not display_name or display_name.lower() == "everyone"
             or member.get("status") != "active"
-            or member.get("role") not in {"participant_agent", "room_master"}
         ):
             continue
-        by_name.setdefault(display_name.casefold(), []).append((membership_id, display_name))
+        by_name.setdefault(display_name.lower(), []).append((membership_id, display_name, str(member.get("role") or "")))
 
     recipients: list[tuple[int, str]] = []
     for matches in by_name.values():
         display_name = matches[0][1]
         mention = re.search(
-            rf"(?<![\w@])@{re.escape(display_name)}(?![\w-])",
+            rf"(?<![\w@])@{re.escape(display_name.lower())}(?![\w-])",
             body,
-            flags=re.IGNORECASE,
         )
         if mention is None:
             continue
         if len(matches) != 1:
-            raise ValueError(f"Room recipient @{display_name} is ambiguous")
-        recipients.append((mention.start(), matches[0][0]))
+            logger.debug("Ignoring ambiguous Room recipient mention")
+            continue
+        if matches[0][0] != own_membership_id and matches[0][2] in {"participant_agent", "room_master"}:
+            recipients.append((mention.start(), matches[0][0]))
     return [membership_id for _, membership_id in sorted(recipients)]
 
 

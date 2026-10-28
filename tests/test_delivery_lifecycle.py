@@ -1820,21 +1820,20 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(
             room_tools._inline_agent_recipients(
                 state,
-                "@Wu compare this with @Claude. @Paula, @Thorsten, @Berlin and @Reader need no route.",
+                "@Wu compare this with @Claude. Ask @Thorsten; @Paula, @Berlin and @Reader need no route.",
                 "self",
             ),
             ["wu", "claude"],
         )
 
-    def test_inline_mention_routing_rejects_ambiguous_active_display_name(self):
+    def test_inline_mention_routing_ignores_ambiguous_active_display_name(self):
         state = {
             "roster": [
                 {"membershipId": "claude-a", "displayName": "Claude", "role": "participant_agent", "status": "active"},
                 {"membershipId": "claude-b", "displayName": "CLAUDE", "role": "room_master", "status": "active"},
             ],
         }
-        with self.assertRaisesRegex(ValueError, "@Claude is ambiguous"):
-            room_tools._inline_agent_recipients(state, "Please ask @Claude.", "paula")
+        self.assertEqual(room_tools._inline_agent_recipients(state, "Please ask @Claude.", "paula"), [])
 
     def test_external_channel_coordinated_v2_mentions_freeze_and_replay(self):
         binding = adapter.RoomBinding(
@@ -2012,12 +2011,21 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.97")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.98")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Ask sources and muted membership pause (P15, ISSUE-138/139)",
+            f"## {adapter.CONNECTOR_VERSION} — Five Room-bound ArtCraft agent tools (P14)",
             (ROOT / "README.md").read_text(),
+        )
+        readme = (ROOT / "README.md").read_text()
+        self.assertLess(
+            readme.index("## 1.0.98 — Five Room-bound ArtCraft agent tools (P14)"),
+            readme.index("### P13 in 1.0.98 — Agent replies address Room members by @DisplayName"),
+        )
+        self.assertLess(
+            readme.index("### P13 in 1.0.98 — Agent replies address Room members by @DisplayName"),
+            readme.index("## 1.0.97 — Ask sources and muted membership pause (P15, ISSUE-138/139)"),
         )
 
     def test_conformance_fixture_references_resolve_to_tests(self):
@@ -2072,7 +2080,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.97"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.98"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())

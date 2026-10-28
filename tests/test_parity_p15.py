@@ -207,7 +207,7 @@ class P15Tests(unittest.TestCase):
         async def run():
             instance,binding,gate,clock,state,api=setup()
             instance._pause_membership(binding,'muted')
-            for label in ['document','share_file','post']:
+            for label in ['ArtCraft','document','share_file','post']:
                 with self.assertRaisesRegex(adapter.ProtocolError,'muted') as caught:
                     await asyncio.wait_for(instance._call(binding,lambda _:api.contact(label)),0.1)
                 self.assertEqual(caught.exception.code,'membership_inactive')
@@ -224,6 +224,9 @@ class P15Tests(unittest.TestCase):
             async def handle(_message):
                 instance._pause_membership(binding,'muted')
                 turn=adapter.share_file._ACTIVE[binding.room_id]
+                result=turn.artcraft.execute('artcraft_capabilities',{})
+                self.assertEqual(result['error']['code'],'not_member')
+                self.assertIn('muted',result['error']['message'])
                 self.assertEqual(turn.share({'path':'never-opened.pdf'})['code'],'muted')
                 from importlib import import_module
                 tools=import_module(adapter.__package__+'.room_tools')
