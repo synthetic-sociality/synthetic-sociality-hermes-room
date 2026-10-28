@@ -159,7 +159,7 @@ class P14Tests(unittest.TestCase):
         self.server.answer={'jobId':'job','status':'running'}
         result=self.call('artcraft_job',{'job_id':'job','wait_seconds':20})
         self.assertEqual(result,self.server.answer); self.assertEqual(clock[0],20)
-        self.assertEqual(len(self.server.calls),80)
+        self.assertEqual(len(self.server.calls),20)  # one read per second for 20 s
         self.assertTrue(all(0 < c[3] <= 20 for c in self.server.calls))
         release=threading.Event()
         self.addCleanup(release.set)

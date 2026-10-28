@@ -147,7 +147,7 @@ class ArtCraftTurn:
             if 'error' in last or last.get('status') not in ('queued', 'running') or not budget: return last
             remaining = deadline - self.clock()
             if remaining <= 0: return last
-            self.sleep(min(0.25, remaining))
+            self.sleep(min(1.0, remaining))  # one status read per second per waiting call (server limiter)
         return error('not_member', 'ArtCraft requires an active Room turn.')
 
 
