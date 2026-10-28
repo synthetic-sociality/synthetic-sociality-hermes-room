@@ -21,7 +21,7 @@ FIELDS = {
 }
 MAX_REQUEST_BYTES = 256 * 1024
 CARD_URL = re.compile(r'^/\?roomId=[a-z0-9]{15}#artcraft-[a-z0-9]{15}-[a-z0-9]{15}$')
-UNSAFE = re.compile(r'(?:^|[\s\x22\x27(:=])/(?:root|home|Users|var|etc|opt|tmp|private|srv|usr|run)(?=[/\s\x22\x27():,;=\]}]|$)|\bfile://|\bBearer\s+\S+', re.I)
+UNSAFE = re.compile(r'(?:^|[\s\x22\x27(:=\[,;{])/(?:root|home|Users|var|etc|opt|tmp|private|srv|usr|run)(?=[/\s\x22\x27():,;=\]}]|$)|\bfile://|\bBearer\s+\S+', re.I)
 PRIVATE = re.compile(r'^(?:credentials?|(?:access|refresh|membership|auth)?[_-]?token|secret(?:[_-]?key)?|password|authorization|bearer|(?:host|local)[_-]?paths?)$', re.I)
 
 
