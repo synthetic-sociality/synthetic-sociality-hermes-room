@@ -105,7 +105,7 @@ def ledger_instance(binding, api, state_file):
     instance.persisted = []
     instance._persist_binding = lambda current: instance.persisted.append(json.loads(json.dumps(
         {"inbox": current.inbox, "ack": current.acknowledged_cursor, "intents": sorted(current.delivery_intents)}))) or True
-    instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+    instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
     return instance
 
 
@@ -207,7 +207,7 @@ class P3Tests(unittest.TestCase):
         instance._persist_binding = lambda current: order.append(("persist", dict(current.inbox))) or True
         original_call = instance._call
 
-        def call(current, operation):
+        def call(current, operation, **_request_options):
             order.append(("room", dict(current.inbox)))
             return original_call(current, operation)
 

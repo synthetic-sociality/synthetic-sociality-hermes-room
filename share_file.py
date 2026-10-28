@@ -106,6 +106,8 @@ class ShareTurn:
             return self._share(args)
 
     def _share(self, args):
+        if getattr(self, 'membership_error', lambda: '')():
+            return refused('muted')
         if not self.active or self.sealed():
             _DIAG.warning('share refused in turn: active=%s sealed=%s', self.active, bool(self.sealed()))
             return refused('no-room-turn')
@@ -178,6 +180,10 @@ class ShareTurn:
                 self.save()  # Before returning to the model and before the canonical post.
                 return dict(record['result'])
         except Exception as error:
+            if getattr(error, 'code', '') == 'membership_inactive':
+                self.records.pop(key, None)
+                self.save()
+                return refused('muted')
             request_id = getattr(error, 'request_id', None)
             if isinstance(request_id, str):
                 record['requestId'] = request_id

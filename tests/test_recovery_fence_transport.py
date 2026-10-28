@@ -42,7 +42,7 @@ class FenceTransportTests(unittest.IsolatedAsyncioTestCase):
                 for event in self.events(room, after, 0)['events']:
                     receive(event)
         self.api = API()
-        async def call(binding, operation):
+        async def call(binding, operation, **_request_options):
             return operation(self.api)
         self.adapter._call = call
         self.adapter._stream_call = call

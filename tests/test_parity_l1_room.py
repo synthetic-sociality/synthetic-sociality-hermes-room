@@ -149,7 +149,7 @@ class L1RoomServerTests(unittest.TestCase):
         direct = object.__new__(adapter.SyntheticSocialityAdapter)
         binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential")
 
-        async def unavailable(_binding, _operation):
+        async def unavailable(_binding, _operation, **_request_options):
             raise adapter.ProtocolError("unavailable", code="network", retryable=True)
 
         direct._call = unavailable
@@ -176,7 +176,7 @@ class L1RoomServerTests(unittest.TestCase):
         instance = object.__new__(adapter.SyntheticSocialityAdapter)
         instance._persist_binding = lambda _binding: True
 
-        async def unavailable(_binding, _operation):
+        async def unavailable(_binding, _operation, **_request_options):
             raise adapter.ProtocolError("unavailable", code="network", retryable=True)
 
         instance._call = unavailable
@@ -189,7 +189,7 @@ class L1RoomServerTests(unittest.TestCase):
         # The next turn, with the Room still naming it: offered, then marked.
         api = types.SimpleNamespace(events=lambda _room, after, _wait: {
             "events": [item for item in (named, *newer) if item["seq"] > after]})
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
         facts, offered, mark = asyncio.run(instance._missed_source_facts(
             binding, {"roster": ROSTER}, 2970, [named], 2900, set(), server_missed=named["id"]))
         self.assertEqual(len(facts), 1)
@@ -360,7 +360,7 @@ class L1RoomServerTests(unittest.TestCase):
         import types
         api = types.SimpleNamespace(events=lambda _room, after, _wait: {
             "events": [item for item in (ask, *newer) if item["seq"] > after]})
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
         facts, offered, _mark = asyncio.run(instance._missed_source_facts(
             binding, {"roster": ROSTER}, 2968, [ask, *newer], 2900, set()))
         self.assertEqual(offered, ["cmd-2965"])
@@ -540,7 +540,7 @@ class L1R3Tests(unittest.TestCase):
         binding.missed_sources = [{"source_event_id": "cmd-2965", "source_seq": 2965}]
         api = types.SimpleNamespace(events=lambda _room, after, _wait: {
             "events": [item for item in (ask, *newer) if item["seq"] > after]})
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
         facts, offered, _mark = asyncio.run(instance._missed_source_facts(
             binding, {"roster": ROSTER}, 2968, list(newer), 2900, set()))
         self.assertEqual(offered, ["cmd-2965"])

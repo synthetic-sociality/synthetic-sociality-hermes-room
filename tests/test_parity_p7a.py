@@ -178,7 +178,7 @@ def watched(room, status_path=None):
     instance._consume = consume
     instance._mark_connected = lambda: None
     instance._mark_disconnected = lambda: None
-    instance._call = lambda _binding, operation: asyncio.to_thread(operation, room)
+    instance._call = lambda _binding, operation, **_request_options: asyncio.to_thread(operation, room)
     instance._raw_call = instance._call  # the roster probe bypasses the participation gate
     instance._stream_call = lambda _binding, operation: asyncio.to_thread(operation, room)
     instance.connects = []
@@ -603,7 +603,7 @@ class P7aRound2Tests(unittest.TestCase):
                             {"membershipId": "member-1", "displayName": "Agent"}]}
         api = types.SimpleNamespace(room_state=lambda _room: state, room_policy=lambda _room: {"policy": {}},
                                     events=events, artifacts=lambda _room: {"items": []}, artifact=lambda _r, _a: {})
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
         instance._publish = lambda *_args, **_kwargs: asyncio.sleep(0)
         instance.build_source = types.MethodType(
             lambda self, **kwargs: types.SimpleNamespace(platform=self.platform, **kwargs), instance)
@@ -1238,9 +1238,9 @@ class P7aRound3AddendumTests(unittest.TestCase):
                         room.stream_events = blocking_stream
                     ended, started = {}, []  # contacts counted where a loop starts them
                     for name in ("_call", "_stream_call"):
-                        def contact(target, operation, original=getattr(instance, name)):
+                        def contact(target, operation, original=getattr(instance, name), **request_options):
                             started.append(True)
-                            return original(target, operation)
+                            return original(target, operation, **request_options)
                         setattr(instance, name, contact)
                     for name in ("_revoke", "_expire"):
                         def end(target, original=getattr(instance, name)):

@@ -14,11 +14,15 @@ CASES = [
     'P15-01 loaded ask source reaches the model with resolved target addressing',
     'P15-02 older ask source resolves within the bounded epoch scan',
     'P15-03 all watcher contacts pause together and resume on active',
-    'P15-04 forbidden watcher pauses all contacts until membership changes',
+    'P15-04 active member post refusals surface without pausing',
     'P15-05 unread missing and other memberships cannot resume participation',
     'P15-06 credential failures stay terminal and shutdown cancels paused work',
     'P15-07 sibling memberships continue while one pauses',
     'P15-08 inactive enrollment pauses heartbeat and event watchers',
+    'P15-09 muted turn tools and replies fail fast',
+    'P15-10 active member photo download refusal surfaces',
+    'P15-11 a turn offer probes promptly and coalesces concurrent offers',
+    'P15-12 denied background contacts probe before pausing',
 ]
 
 
@@ -76,7 +80,7 @@ class P15Tests(unittest.TestCase):
                 room_policy=lambda _: {},
                 start_discussion_cycle=lambda _room,payload: posts.append(payload) or {},
             )
-            instance._call = lambda _binding,op: asyncio.sleep(0,result=op(api))
+            instance._call = lambda _binding,op, **_request_options: asyncio.sleep(0,result=op(api))
             binding = adapter.RoomBinding('https://room.invalid/api','room','oz4hxxig9zrj4ku','fixture')
             await instance._ensure_discussion_cycle(binding,source)
             self.assertEqual([member['membershipId'] for member in posts[0]['roster']],['oz4hxxig9zrj4ku'])
@@ -102,7 +106,7 @@ class P15Tests(unittest.TestCase):
             instance._pause_membership(binding,'muted')
             labels=['heartbeat','registration','enrollment','document','photo','ack','attempt renewal','attempt settle','activity','recovery']
             async def worker(label):
-                return await instance._call(binding,lambda _:api.contact(label))
+                return await instance._call(binding,lambda _:api.contact(label),background=True)
             with mock.patch.object(adapter,'RoomProtocol',lambda *_:api):
                 tasks=[asyncio.create_task(worker(label)) for label in labels]
                 await settle()
@@ -119,21 +123,22 @@ class P15Tests(unittest.TestCase):
 
     def test_04(self):
         async def run():
-            instance,binding,gate,clock,state,api=setup()
-            gate.interval=0.01
-            state['denied']=adapter.ProtocolError('the authenticated identity is not allowed to perform this operation',status=403)
-            async def raw(_binding,op): return op(api)
-            instance._raw_call=raw
-            task=asyncio.create_task(instance._call(binding,lambda _:api.contact('events')))
-            await settle()
-            self.assertTrue(gate.paused);self.assertEqual(state['calls'],['events']);self.assertEqual(state['reads'],1)
-            self.assertFalse(await instance._membership_active(binding))
-            self.assertEqual(state['calls'],['events'])
-            state['status']='active';clock[0]+=60
-            self.assertTrue(await instance._membership_active(binding))
-            self.assertEqual(await asyncio.wait_for(task,1),'events')
-            # A refusal with a non-403 status still classifies the same way.
-            self.assertTrue(instance._membership_denied(adapter.ProtocolError('not allowed',status=409)))
+            for status in [403, 409]:
+                instance,binding,gate,clock,state,api=setup()
+                state['status']='active'
+                error=adapter.ProtocolError('not allowed: artifact version is not accessible',status=status)
+                async def raw(_binding,op):
+                    if op == 'post': raise error
+                    return op(api)
+                instance._raw_call=raw
+                async def post():
+                    with self.assertRaises(adapter.ProtocolError) as caught:
+                        await instance._call(binding, 'post')
+                    self.assertIs(caught.exception,error)
+                await asyncio.gather(*(post() for _ in range(8)))
+                self.assertEqual(state['reads'],1)
+                self.assertEqual(gate.status,'active');self.assertFalse(gate.paused)
+                self.assertEqual(await instance._call(binding,lambda _:api.contact('next')),'next')
         asyncio.run(run())
 
     def test_05(self):
@@ -145,10 +150,10 @@ class P15Tests(unittest.TestCase):
                 self.assertFalse(await gate.active(lambda:asyncio.sleep(0,result=status)))
             clock[0]+=60
             self.assertTrue(await gate.active(lambda:asyncio.sleep(0,result='active')))
-            gate.pause();clock[0]+=60
-            self.assertFalse(await gate.active(lambda:asyncio.sleep(0,result='active')))
-            clock[0]+=60
-            self.assertFalse(await gate.active(lambda:asyncio.sleep(0,result='active')))
+            # A first readable active probe initialises an open gate.
+            first=adapter.MembershipGate()
+            self.assertTrue(await first.active(lambda:asyncio.sleep(0,result='active'),refresh=True))
+            self.assertEqual(first.status,'active');self.assertFalse(first.paused)
         asyncio.run(run())
 
     def test_06(self):
@@ -161,7 +166,7 @@ class P15Tests(unittest.TestCase):
                 instance._raw_call=failed
                 with self.assertRaises(adapter.ProtocolError):await instance._call(binding,lambda _:None)
             instance._pause_membership(binding,'muted')
-            task=asyncio.create_task(instance._call(binding,lambda _:None))
+            task=asyncio.create_task(instance._call(binding,lambda _:None,background=True))
             await settle();instance._stop.set()
             with self.assertRaises(asyncio.CancelledError):await task
         asyncio.run(run())
@@ -184,7 +189,7 @@ class P15Tests(unittest.TestCase):
             instance,binding,gate,clock,state,api=setup()
             async def raw(_binding,op):return op(api)
             instance._raw_call=raw
-            task=asyncio.create_task(instance._call(binding,lambda _:api.connector_enrollments('install')))
+            task=asyncio.create_task(instance._call(binding,lambda _:api.connector_enrollments('install'),background=True))
             await settle()
             self.assertTrue(gate.paused);self.assertEqual(gate.status,'muted')
             self.assertEqual(state['calls'],['enrollment'])
@@ -192,8 +197,107 @@ class P15Tests(unittest.TestCase):
             async def stream(_binding,op):self.fail('SSE opened while muted')
             instance._raw_stream_call=stream
             stream_task=asyncio.create_task(instance._stream_call(binding,lambda _:None))
-            heartbeat_task=asyncio.create_task(instance._call(binding,lambda _:api.contact('heartbeat')))
+            heartbeat_task=asyncio.create_task(instance._call(binding,lambda _:api.contact('heartbeat'),background=True))
             await settle();self.assertEqual(state['calls'],['enrollment'])
             instance._stop.set()
             await asyncio.gather(task,stream_task,heartbeat_task,return_exceptions=True)
+        asyncio.run(run())
+
+    def test_09(self):
+        async def run():
+            instance,binding,gate,clock,state,api=setup()
+            instance._pause_membership(binding,'muted')
+            for label in ['ArtCraft','document','share_file','post']:
+                with self.assertRaisesRegex(adapter.ProtocolError,'muted') as caught:
+                    await asyncio.wait_for(instance._call(binding,lambda _:api.contact(label)),0.1)
+                self.assertEqual(caught.exception.code,'membership_inactive')
+            @adapter.turn_contacts
+            async def reply():
+                return await instance._call(binding,lambda _:api.contact('nested ack'),background=True)
+            with self.assertRaisesRegex(adapter.ProtocolError,'muted'):
+                await asyncio.wait_for(reply(),0.1)
+            self.assertEqual(state['calls'],[]);self.assertEqual(state['reads'],0)
+        asyncio.run(run())
+        # Exercise the actual tool callbacks constructed at dispatch time.
+        def prepare(instance,binding):
+            original_handle=instance.handle_message
+            async def handle(_message):
+                instance._pause_membership(binding,'muted')
+                turn=adapter.share_file._ACTIVE[binding.room_id]
+                result=turn.artcraft.execute('artcraft_capabilities',{})
+                self.assertEqual(result['error']['code'],'not_member')
+                self.assertIn('muted',result['error']['message'])
+                self.assertEqual(turn.share({'path':'never-opened.pdf'})['code'],'muted')
+                from importlib import import_module
+                tools=import_module(adapter.__package__+'.room_tools')
+                with mock.patch.object(tools,'room_for_session',return_value=binding.room_id), \
+                     mock.patch.object(tools.share_file,'active_turn',return_value=(binding.room_id,turn)), \
+                     mock.patch.object(tools,'_select_room',side_effect=AssertionError('muted tool contacted Room')):
+                    result=json.loads(tools.room_document({'artifactId':'artifact'},session_id='session'))
+                self.assertEqual(result['code'],'membership_inactive')
+                self.assertIn('muted',result['error'])
+                await original_handle(_message)
+            instance.handle_message=handle
+        build_message(copy.deepcopy(FIXTURE['ready']),context=[copy.deepcopy(FIXTURE['source'])],attempt=cycle(),prepare=prepare)
+
+
+    def test_10(self):
+        # Real binary protocol boundary, including its HTTPError decoding.
+        import io
+        import urllib.error
+        async def run():
+            instance,binding,gate,clock,state,api=setup();state['status']='active'
+            api.download_artifact=lambda *_: adapter.RoomProtocol(binding.base_url,binding.credential).download_artifact('room-1','artifact','version','image/png')
+            async def raw(_binding,op):
+                # The own-roster probe stays an in-memory fake.
+                return op(api)
+            instance._raw_call=raw
+            failure=urllib.error.HTTPError('https://room.invalid',403,'Forbidden',{},io.BytesIO(b'{"message":"photo forbidden"}'))
+            open_photo=mock.Mock(side_effect=failure)
+            # Other suites reload modules under the same test package name.
+            # Patch the exact production function's globals, not a newer copy.
+            with mock.patch.dict(adapter.RoomProtocol.download_artifact.__globals__, {'_urlopen':open_photo}):
+                with self.assertRaises(adapter.ProtocolError) as caught:
+                    await instance._call(binding,lambda client:client.download_artifact(),background=True)
+            open_photo.assert_called_once()
+            self.assertEqual(caught.exception.status,403)
+            self.assertEqual(str(caught.exception),'photo forbidden')
+            self.assertFalse(gate.paused);self.assertEqual(state['reads'],1)
+        asyncio.run(run())
+
+    def test_11(self):
+        async def run():
+            instance,binding,gate,clock,state,api=setup()
+            instance._pause_membership(binding,'muted')
+            state['status']='active'
+            async def raw(_binding,op):
+                await asyncio.sleep(0)
+                return op(api)
+            instance._raw_call=raw
+            # The production offer entry rechecks before the background wait.
+            consumed=[]
+            async def consume(_binding,event): consumed.append(event)
+            instance._consume_locked=consume
+            ready=copy.deepcopy(FIXTURE['ready'])
+            await asyncio.gather(*(instance._consume(binding,ready) for _ in range(8)))
+            self.assertEqual(state['reads'],1);self.assertFalse(gate.paused)
+            self.assertEqual(len(consumed),8)
+        asyncio.run(run())
+
+    def test_12(self):
+        async def run():
+            instance,binding,gate,clock,state,api=setup()
+            async def raw(_binding,op): return op(api)
+            instance._raw_call=raw
+            state['status']='active'
+            await instance._membership_active(binding,refresh=True)
+            state['status']='muted';clock[0]+=60
+            state['denied']=adapter.ProtocolError('not allowed',status=403)
+            task=asyncio.create_task(instance._call(binding,lambda _:api.contact('events'),background=True))
+            await settle()
+            self.assertTrue(gate.paused);self.assertEqual(gate.status,'muted')
+            self.assertEqual(state['reads'],2);self.assertEqual(state['calls'],['events'])
+            state['status']='active';clock[0]+=60
+            self.assertTrue(await instance._membership_active(binding))
+            self.assertEqual(await asyncio.wait_for(task,1),'events')
         asyncio.run(run())

@@ -22,10 +22,12 @@ ISSUE-138/139 (P15): attempt-ready turns now resolve a human `/ask` source
 from the loaded context or bounded epoch scan and carry its instruction to the
 model. Resolved membership IDs control addressing. Muted memberships pause all
 Room watchers, including event reads, heartbeat, document and acknowledgement
-work. A Room permission refusal also pauses participation until the membership
-changes; watchers share at most one roster recheck per 60 seconds and resume on
-unmute. Journals and cursors stay intact. These fixes remain in this unreleased
-version; no state migration.
+work. Permission refusals trigger a shared roster probe and pause only on
+non-active membership evidence; active-member refusals reach their callers.
+Turn tools and replies fail fast while muted. Background watchers recheck within
+60 seconds, also probing on turn offers/attempt-ready, and resume on unmute.
+Journals and cursors stay intact. These fixes remain in this unreleased version;
+no state migration.
 
 Deploy the agent API and P13 server support first. Existing sessions require
 the host to load the updated tool registration: this offline source corpus

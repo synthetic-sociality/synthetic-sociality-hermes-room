@@ -191,7 +191,7 @@ class PhotoCases(unittest.TestCase):
                 # The common dispatch harness provides only the text API. Add
                 # the binary route while retaining the production offer path.
                 old_call = instance._call
-                async def call(binding, operation):
+                async def call(binding, operation, **_request_options):
                     api = types.SimpleNamespace(artifact=room.artifact,
                         download_artifact=lambda *args: (data, 'image/png'))
                     return operation(api)

@@ -118,7 +118,7 @@ def receive_instance(*, state=None, claim=None, policy=None, status_path=None, b
         def acknowledge_peer_contribution(self, *_args):
             return {"accepted": True}
 
-    instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(API()))
+    instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(API()))
     instance._complete_event = lambda *_args, **kwargs: asyncio.sleep(0, result=record.completed.append(kwargs))
 
     async def dispatch_next(current):
@@ -1477,7 +1477,7 @@ class P7cLeftoverTests(unittest.TestCase):
 
 def _wrap_start(call, start):
     """Route POST /cycles to ``start``; every other Room call as before."""
-    async def wrapped(binding, operation):
+    async def wrapped(binding, operation, **request_options):
         class Proxy:
             def __init__(self, inner):
                 self.inner = inner
@@ -1487,7 +1487,7 @@ def _wrap_start(call, start):
                     return lambda _room, request: start(request)
                 return getattr(self.inner, name)
 
-        return await call(binding, lambda api: operation(Proxy(api)))
+        return await call(binding, lambda api: operation(Proxy(api)), **request_options)
     return wrapped
 
 

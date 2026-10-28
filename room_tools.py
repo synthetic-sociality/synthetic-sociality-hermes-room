@@ -28,6 +28,7 @@ from .documents import (
     resolve_version,
     tool_arguments,
 )
+from . import share_file
 from .origin_context import is_room_context, room_for_session
 from .protocol import (
     MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
@@ -174,19 +175,29 @@ def _enabled_bindings() -> list[RoomBinding]:
     return [binding for binding in load().bindings if binding.enabled and not binding.revoked]
 
 
-def _select_room(requested: str) -> tuple[RoomBinding | None, dict[str, Any] | None, list[dict[str, str]]]:
+def _tool_protocol(binding, contact=None):
+    api = RoomProtocol(binding.base_url, binding.credential)
+    if contact is None:
+        return api
+    class ToolProtocol:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: contact(lambda: getattr(api, name)(*args, **kwargs))
+    return ToolProtocol()
+
+
+def _select_room(requested: str, contact=None) -> tuple[RoomBinding | None, dict[str, Any] | None, list[dict[str, str]]]:
     bindings = _enabled_bindings()
     if not bindings:
         return None, None, []
     if requested:
         exact = next((binding for binding in bindings if requested == binding.room_id), None)
         if exact is not None:
-            state = RoomProtocol(exact.base_url, exact.credential).room_state(exact.room_id)
+            state = _tool_protocol(exact, contact).room_state(exact.room_id)
             return exact, state, []
     candidates: list[tuple[RoomBinding, dict[str, Any]]] = []
     for binding in bindings:
         try:
-            state = RoomProtocol(binding.base_url, binding.credential).room_state(binding.room_id)
+            state = _tool_protocol(binding, contact).room_state(binding.room_id)
         except (ProtocolError, OSError, ValueError):
             continue
         title = str(state.get("title") or "").strip()
@@ -211,7 +222,16 @@ def _select_call_room(
     turn_room = room_for_session(metadata.get("session_id"))
     if not turn_room:
         return (*_select_room(requested), None)
-    binding, state, choices = _select_room(turn_room)
+    _, turn = share_file.active_turn(**metadata)
+    muted = getattr(turn, 'membership_error', lambda: '')()
+    if muted:
+        return None, None, [], refusal("membership_inactive", muted)
+    contact = getattr(turn, "contact", None)
+    binding, state, choices = _select_room(turn_room, contact) if contact else _select_room(turn_room)
+    own = next((member for member in (state or {}).get("roster", [])
+                if isinstance(member, dict) and member.get("membershipId") == getattr(binding, "membership_id", None)), None)
+    if own and own.get("status") and own["status"] != "active":
+        return None, None, [], refusal("membership_inactive", f"Room membership inactive ({own['status']})")
     title = str((state or {}).get("title") or "").strip()
     if requested and requested != turn_room and not (title and requested.casefold() == title.casefold()):
         # The argument itself is never logged (P7d-7).
@@ -952,6 +972,8 @@ def room_document(args: dict[str, Any], **metadata: Any) -> str:
         # Inside a Room turn the Room is the turn's own (P7d-5 session record).
         binding, state, choices, mismatch = _select_call_room(requested, metadata, "document")
     except (ProtocolError, OSError, ValueError) as error:
+        if getattr(error, "code", "") == "membership_inactive":
+            return _result(refusal("membership_inactive", str(error)))
         return _result(refusal("unavailable", f"The Room is not reachable now: {type(error).__name__}."))
     if mismatch is not None:
         return _result(mismatch)
@@ -959,7 +981,8 @@ def room_document(args: dict[str, Any], **metadata: Any) -> str:
         if choices:
             return _result({"success": False, "selectionRequired": True, "rooms": choices})
         return _result({"success": False, "error": "That room is not configured for this Hermes profile."})
-    api = RoomProtocol(binding.base_url, binding.credential)
+    _, turn = share_file.active_turn(**metadata)
+    api = _tool_protocol(binding, getattr(turn, "contact", None))
     code = "ok"
     try:
         target = resolve_version(
@@ -991,6 +1014,8 @@ def room_document(args: dict[str, Any], **metadata: Any) -> str:
         result = document_passages(target["name"], target["artifactId"], target["versionId"], text, arguments)
         return _result(result)
     except (ProtocolError, OSError, ValueError) as error:
+        if getattr(error, "code", "") == "membership_inactive":
+            return _result(refusal("membership_inactive", str(error)))
         code = "unavailable"
         return _result(refusal("unavailable", f"The Room is not reachable now: {type(error).__name__}."))
     finally:

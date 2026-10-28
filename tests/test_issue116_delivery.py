@@ -40,7 +40,7 @@ class AgentFileDelivery(unittest.TestCase):
                         posts.append(copy.deepcopy(payload))
                         return {'id':'posted','seq':6,'ts':'2026-01-01T00:00:00Z'}
                 client=Client(binding.base_url,binding.credential)
-                instance._call=lambda _binding,operation: asyncio.sleep(0,result=operation(client))
+                instance._call=lambda _binding,operation, **_request_options: asyncio.sleep(0,result=operation(client))
                 async def post():
                     return await instance._post_with_fresh_context(binding,'room','',5,'evt-5','Shared.','epoch',coordination_mode='open')
                 asyncio.run(post())

@@ -45,7 +45,7 @@ def threaded_calls(instance):
     """Run each Room read in a worker thread, as the production ``_call`` does."""
     inline = instance._call
 
-    async def call(binding, operation):
+    async def call(binding, operation, **_request_options):
         pending = await asyncio.to_thread(inline, binding, operation)
         return await pending
 
@@ -163,7 +163,7 @@ class ParityP6Tests(unittest.TestCase):
                               authorized.rotate_current_epoch_session), (False, "", True))
             # Consumed once at the next start: the current epoch gets an epoch session.
             restarted, original_adapter_update = persisted_instance(path)
-            restarted._call = lambda _binding, operation: asyncio.sleep(
+            restarted._call = lambda _binding, operation, **_request_options: asyncio.sleep(
                 0, result=operation(types.SimpleNamespace(room_state=lambda _room_id: {"activeEpoch": {"id": "current"}})),
             )
             try:
@@ -322,7 +322,7 @@ class ParityP5BoundTests(unittest.TestCase):
     def test_cycle_source_cache_is_bounded(self):
         # OP-12 P5 review: "cache bound removed" survived.
         instance = object.__new__(adapter.SyntheticSocialityAdapter)
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(types.SimpleNamespace(
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(types.SimpleNamespace(
             events=lambda _room, after, _wait: {"events": [{**SOURCE, "seq": 100}] if after < 100 else []})))
         binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential")
 
@@ -409,7 +409,7 @@ def switchable_start(holder, page_start=None):
     def prepare(instance, _binding):
         inline = instance._call
 
-        def call(binding, operation):
+        def call(binding, operation, **_request_options):
             def wrapped(api):
                 state = api.room_state(binding.room_id)
                 pages = api.events
@@ -667,7 +667,7 @@ class ProductionCallBoundTests(unittest.TestCase):
 class CacheConditionTests(unittest.TestCase):
     def lookup(self, cached, starts_at=41):
         instance = object.__new__(adapter.SyntheticSocialityAdapter)
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(types.SimpleNamespace(
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(types.SimpleNamespace(
             events=lambda _room, after, _wait: {"events": [SOURCE] if after < 42 else []})))
         binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential")
         instance._cycle_source_events = {("room-1", "cycle-1", "m-src"): cached}
@@ -691,7 +691,7 @@ class CacheConditionTests(unittest.TestCase):
 
     def test_not_found_entries_count_against_the_bound(self):
         instance = object.__new__(adapter.SyntheticSocialityAdapter)
-        instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(types.SimpleNamespace(
+        instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(types.SimpleNamespace(
             events=lambda _room, _after, _wait: {"events": []})))
         binding = adapter.RoomBinding("https://room.example/api", "room-1", "member-1", "credential")
 

@@ -135,7 +135,7 @@ def make_instance(
 
     api = API()
 
-    async def call(_binding, operation):
+    async def call(_binding, operation, **_request_options):
         result = operation(api)
         return await result if hasattr(result, "__await__") else result
 

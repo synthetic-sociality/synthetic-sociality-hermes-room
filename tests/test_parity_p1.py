@@ -141,7 +141,7 @@ def room_instance(attempt, *, mode="coordinated", queued=()):
     instance._buffered_output = {}
     binding.inbox["5"] = "pending"
     api = FakeRoom(attempt)
-    instance._call = lambda _binding, operation: asyncio.sleep(0, result=operation(api))
+    instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
     published, dispatched = [], []
 
     async def publish(_binding, source_id, kind, **fields):

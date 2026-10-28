@@ -26,7 +26,7 @@ from .photos import PHOTO_TYPES, append_photo_context, effective_photos, host_im
 from . import share_file, artcraft
 from . import cli, local_status, recovery, renewal, secret_isolation
 from . import link as device_link
-from .membership import MembershipGate
+from .membership import MembershipGate, TURN_CONTACT, turn_contacts
 from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
@@ -1788,6 +1788,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         final_content = self._buffered_output.get(message_id, content)
         return await self._send_final(chat_id, source_id, final_content)
 
+    @turn_contacts
     async def _send_final(
         self,
         chat_id: str,
@@ -3489,6 +3490,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             str(request["attempt_id"]),
                             dict(request["payload"]),
                         ),
+                        background=True,
                     )
                 else:
                     await self._call(
@@ -3501,6 +3503,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             int(request["observed_seq"]),
                             str(request["source_event_id"]),
                         ),
+                        background=True,
                     )
             except ProtocolError as error:
                 if error.code in {"cycle_superseded", "turn_not_active", "turn_expired", "turns_not_used"}:
@@ -3680,6 +3683,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         page = await self._call(
             binding,
             lambda api: valid_event_page(api.events(binding.room_id, self._read_frontier(binding), 8, all_epochs=True)),
+            background=True,
         )
         for event in page.get("events") or []:
             await self._consume(binding, event)
@@ -3728,6 +3732,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 heartbeat = await self._call(
                     binding,
                     lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
+                    background=True,
                 )
                 self._note_connected(binding, heartbeat)
                 return heartbeat
@@ -3752,7 +3757,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             "transport": "sse_preferred",
             "modelDescriptor": os.environ.get("HERMES_MODEL", "active Hermes profile model"),
         }
-        session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata))
+        session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata), background=True)
         binding.connector_session_id = session["sessionId"]
         registered.add(binding.room_id)
         counts = getattr(self, "_registrations", None)
@@ -3774,7 +3779,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _ensure_epoch_session_routing(self, binding: RoomBinding) -> None:
         if binding.epoch_session_routing_initialized:
             return
-        state = await self._call(binding, lambda api: api.room_state(binding.room_id))
+        state = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
         active_epoch_id = (state.get("activeEpoch") or {}).get("id")
         if not isinstance(active_epoch_id, str) or not active_epoch_id.strip():
             raise ProtocolError(
@@ -3820,7 +3825,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         """Negotiate this binding's write dialect through one read-only GET."""
         if binding.room_id in self._message_contract_checked:
             return
-        report = await self._call(binding, lambda api: api.status())
+        report = await self._call(binding, lambda api: api.status(), background=True)
         raw_capabilities = report.get("protocolCapabilities")
         if raw_capabilities is None:
             capabilities: list[str] = []  # legacy server: explicit safe v1
@@ -3877,6 +3882,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         heartbeat = await self._call(
                             binding,
                             lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
+                            background=True,
                         )
                         if not binding.enabled or binding.revoked:
                             return  # ended meanwhile (P2c-3): its status stays stopped
@@ -4004,7 +4010,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             raise
         except ProtocolError as error:
             if self._membership_denied(error):
-                self._pause_membership(binding)
+                await self._membership_active(binding, refresh=True)
             self._renewal_retry_after[room_id] = time.monotonic() + 60
         except Exception:
             self._renewal_retry_after[room_id] = time.monotonic() + 60
@@ -4048,11 +4054,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 return status if isinstance(status, str) else ""
         return ""
 
-    async def _membership_active(self, binding: RoomBinding) -> bool:
+    async def _membership_active(self, binding: RoomBinding, *, refresh=False, force=False) -> bool:
         """P15: the same rule for enrollments and all other Room contacts."""
         gate = self._membership_gate(binding)
         paused = gate.paused
-        active = await gate.active(lambda: self._own_membership_status(binding))
+        active = await gate.active(lambda: self._own_membership_status(binding), refresh=refresh, force=force)
+        if not paused and gate.paused:
+            self._pause_membership(binding, gate.status)
         if paused and active and self._inactive_rooms().pop(binding.room_id, None) is not None:
             logger.info("Room %s membership is active again; Room watchers resume", binding.room_id)
             self._status_room(binding, inactive=False, connection="reconnecting", error_code="")
@@ -4071,11 +4079,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         return (not error.revoked and not error.expired and not error.non_json
                 and (error.status == 403 or "not allowed" in str(error).lower()))
 
-    def _pause_membership(self, binding: RoomBinding, status: str = "") -> None:
+    def _pause_membership(self, binding: RoomBinding, status: str) -> None:
         gate = self._membership_gate(binding)
-        if gate.paused:
-            return
         gate.pause(status)
+        if not gate.paused or binding.room_id in self._inactive_rooms():
+            return
         self._inactive_rooms()[binding.room_id] = time.monotonic()
         # Existing streams stop at their next callback; no new stream starts.
         getattr(self, "_stream_generations", {}).pop(binding.room_id, None)
@@ -4089,15 +4097,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 raise asyncio.CancelledError()
             if await self._membership_active(binding):
                 return
-            delay = self._membership_gate(binding).delay()
-            if stop is None:
-                await asyncio.sleep(delay)
-            else:
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=delay)
-                except asyncio.TimeoutError:
-                    continue
-                raise asyncio.CancelledError()
+            gate = self._membership_gate(binding)
+            waits = [asyncio.create_task(gate.resumed.wait())]
+            if stop is not None:
+                waits.append(asyncio.create_task(stop.wait()))
+            try:
+                await asyncio.wait(waits, timeout=gate.delay(), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in waits:
+                    task.cancel()
+                await asyncio.gather(*waits, return_exceptions=True)
 
     def _room_map(self, name: str) -> dict[str, Any]:
         """A per-Room map of this adapter (contract P8 cadences)."""
@@ -4181,6 +4190,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 pending, poll_after = enrollment_listing(await self._call(
                     source,
                     lambda api: api.connector_enrollments(source.installation_id),
+                    background=True,
                 ))
                 lineage["interval"] = poll_after or ENROLLMENT_LISTING_INTERVAL_SECONDS
                 lineage["due_at"] = listed_at + lineage["interval"]
@@ -4242,6 +4252,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         lambda api, invitation_id=invitation_id: api.claim_connector_enrollment(
                             invitation_id, source.installation_id,
                         ),
+                        background=True,
                     )
                     if not isinstance(claimed, dict):
                         raise ProtocolError(
@@ -4395,6 +4406,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _consume(self, binding: RoomBinding, event: dict[str, Any]) -> None:
         if not binding.enabled or binding.revoked:
             return
+        if event.get("type") in {"discussion.cycle_attempt_ready", "message.posted", "human.command"}:
+            await self._membership_active(binding, refresh=True, force=True)
         await self._wait_membership_active(binding)
         receive_locks = getattr(self, "_receive_locks", None)
         if receive_locks is None:
@@ -4562,6 +4575,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # closed and remains unacknowledged.
         receive_state = await self._call(
             binding, lambda api: api.room_state(binding.room_id),
+            background=True,
         )
         active_epoch = receive_state.get("activeEpoch") or {}
         active_epoch_id = active_epoch.get("id")
@@ -4603,6 +4617,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if event_type == "discussion.cycle_terminal" and str(payload.get("state") or "") == "completed":
             policy_response = await self._call(
                 binding, lambda api: _room_policy(api, binding.room_id),
+                background=True,
             )
             policy_view = _policy_view(policy_response)
             coordinator = str(policy_view.get("summaryCoordinatorMembershipId") or "")
@@ -4656,6 +4671,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._call(
                 binding,
                 lambda api: _acknowledge_peer(api, binding.room_id, event_id),
+                background=True,
             )
         if event_type == "message.posted" and payload.get("cycleId"):
             # A cycle-bound post is canonical model context. The server-owned
@@ -4671,6 +4687,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if event_type in {"message.posted", "human.command", "discussion.started", "discussion.cycle_attempt_ready", "discussion.cycle_terminal"}:
             policy_response = await self._call(
                 binding, lambda api: _room_policy(api, binding.room_id),
+                background=True,
             )
             policy_view = _policy_view(policy_response)
             coordination_mode = str(policy_view.get("coordinationMode") or "coordinated")
@@ -4883,7 +4900,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self, binding: RoomBinding, event: dict[str, Any], *, state: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if state is None:
-            state = await self._call(binding, lambda api: api.room_state(binding.room_id))
+            state = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
         active_epoch = state.get("activeEpoch") or {}
         if not active_epoch.get("id"):
             return None
@@ -4914,7 +4931,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     if str(member.get("membershipId")) in targets
                 ]
             elif command_name == "summarize":
-                policy = await self._call(binding, lambda api: api.room_policy(binding.room_id))
+                policy = await self._call(binding, lambda api: api.room_policy(binding.room_id), background=True)
                 coordinator = str(policy.get("summaryCoordinatorMembershipId") or "")
                 roster = [
                     member for index, member in enumerate(roster)
@@ -4947,6 +4964,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return await self._call(
                 binding,
                 lambda api: api.start_discussion_cycle(binding.room_id, request),
+                background=True,
             )
         except ProtocolError as error:
             if error.code != "cycle_conflict":
@@ -4957,7 +4975,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # source that is now historical is safely complete transport work;
             # a same-epoch conflict remains a real server-owned invariant and
             # must stay visible rather than being silently retried.
-            fresh = await self._call(binding, lambda api: api.room_state(binding.room_id))
+            fresh = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
             fresh_epoch = fresh.get("activeEpoch") or {}
             starts_at = _known_epoch_start(fresh_epoch.get("startsAtSeq"))
             if starts_at and int(event.get("seq") or 0) < starts_at:
@@ -5025,6 +5043,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 lambda api: (
                     _bounded_protocol(api, request_seconds) if request_seconds else api
                 ).claim_discussion_attempt(binding.room_id, cycle_id),
+                background=True,
             )
         except ProtocolError as error:
             if error.code in {"cycle_no_attempt", "cycle_superseded"}:
@@ -5073,6 +5092,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     lambda api: api.complete_discussion_attempt(
                         binding.room_id, str(cycle["id"]), str(attempt["id"]), payload,
                     ),
+                    background=True,
                 )
                 break
             except ProtocolError as error:
@@ -5267,7 +5287,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # The authenticated current-epoch fence precedes recovery as well as
         # new model dispatch. A frozen historical result must never regain an
         # outbound I/O path merely because the process restarted.
-        state = await self._call(binding, lambda api: api.room_state(binding.room_id))
+        state = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
         active_epoch = state.get("activeEpoch") or {}
         starts_at = _known_epoch_start(active_epoch.get("startsAtSeq"))
         if starts_at and seq < starts_at:
@@ -5330,6 +5350,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         try:
             context_policy = await self._call(
                 binding, lambda api: _room_policy(api, binding.room_id),
+                background=True,
             )
         except Exception as error:
             logger.warning("Room %s guidance refresh unavailable: %s", binding.room_id, error)
@@ -5349,6 +5370,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         before_seq=seq,
                         active_epoch_starts_at=starts_at,
                     ),
+                    background=True,
                 )
         except InvalidEventPage:
             # Contract P2c-3a: an invalid page is never processed; this turn
@@ -5367,6 +5389,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             try:
                 current_page = await self._call(
                     binding, lambda api: _loaded_page(valid_event_page(api.events(binding.room_id, max(0, seq - 101), 0)), seq),
+                    background=True,
                 )
             except InvalidEventPage:
                 self._inflight_events.discard(event_id)
@@ -5389,6 +5412,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         lambda api: _epoch_start_event(
                             lambda after: valid_event_page(api.events(binding.room_id, after, 0)), starts_at,
                         ),
+                        background=True,
                     )
                 except Exception as error:
                     logger.warning("Room %s discussion start unavailable: %s", binding.room_id, error)
@@ -5483,6 +5507,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         list((api.artifacts(binding.room_id).get("items") or [])),
                         cycle_source=cycle_source,
                     ),
+                    background=True,
                 )
             else:
                 artifact_context = await self._discussion_document_context(
@@ -5590,19 +5615,39 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return self._persist_binding(binding)
         extra = getattr(getattr(self, "config", None), "extra", None) or {}
         root = share_file.configured_root(extra)
+        tool_loop = asyncio.get_running_loop()
+        def membership_error():
+            gate = self._membership_gate(binding)
+            return f"Room membership inactive ({gate.status or 'muted'})" if gate.paused else ""
+        def tool_contact(operation):
+            if membership_error():
+                raise self._membership_inactive_error(self._membership_gate(binding).status)
+            try:
+                return operation()
+            except ProtocolError as error:
+                if self._membership_denied(error) and not hasattr(error, "artcraft_error"):
+                    # Synchronous host tools cannot wait on the gateway loop.
+                    # The same coalesced roster probe runs there; the caller
+                    # still receives its original refusal immediately.
+                    tool_loop.call_soon_threadsafe(lambda: tool_loop.create_task(self._membership_active(binding, refresh=True)))
+                raise
         turn = share_file.ShareTurn(
             records, root, _secret_store_dirs(), persist_share,
-            lambda data, name, mime, title: RoomProtocol(binding.base_url, binding.credential).create_artifact(binding.room_id, data, name, mime, title),
+            lambda data, name, mime, title: tool_contact(lambda: RoomProtocol(binding.base_url, binding.credential).create_artifact(binding.room_id, data, name, mime, title)),
             sealed=lambda: bool(binding.delivery_intents.get(event_id, {}).get("selected") or binding.delivery_intents.get(event_id, {}).get("post")),
         )
+        turn.membership_error = membership_error
+        turn.contact = tool_contact
         def artcraft_request(method, path, body, timeout):
+            if membership_error():
+                return artcraft.error('not_member', membership_error())
             with turn.gate:
                 if not turn.active or turn.sealed():
                     return artcraft.error('not_member', 'ArtCraft requires an active Room turn.')
                 if method == "POST":
-                    return RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body)
+                    return tool_contact(lambda: RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body))
             # A timed-out status reader must not hold the canonical-post/end gate.
-            return RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body)
+            return tool_contact(lambda: RoomProtocol(binding.base_url, binding.credential, timeout=timeout).request(method, path, body))
         turn.artcraft = artcraft.ArtCraftTurn(binding.room_id, artcraft_request,
             lambda: turn.active and not turn.sealed(), binding.credential)
         host_session = self._host_session_id(session_key)
@@ -5647,7 +5692,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             entries, given, binding.membership_id,
             lambda aid: api.artifact(binding.room_id, aid),
             lambda aid, vid, mime: api.download_artifact(binding.room_id, aid, vid, mime), store,
-        ))
+        ), background=True)
         offers = getattr(self, "_documents_offered", None)
         if offers is None:
             offers = self._documents_offered = {}
@@ -5722,7 +5767,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 sizes=lambda artifact_id, version_id: _known_document_size(scope, artifact_id, version_id),
             )
 
-        context, offered, counts = await self._call(binding, build)
+        context, offered, counts = await self._call(binding, build, background=True)
         offers = getattr(self, "_documents_offered", None)
         if offers is None:
             offers = self._documents_offered = {}
@@ -5864,7 +5909,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 types=types,
             )
 
-        worker = asyncio.ensure_future(self._call(binding, scan))
+        worker = asyncio.ensure_future(self._call(binding, scan, background=True))
         done, _pending = await asyncio.wait({worker}, timeout=CYCLE_DOCUMENT_SOURCE_TIMEOUT_SECONDS)
         if not done:
             # Not cancelled: _call waits for its thread on cancellation, which
@@ -5926,7 +5971,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         lambda after: valid_event_page(api.events(binding.room_id, after, 0)), source_id,
                         before_seq=current_seq, active_epoch_starts_at=starts_at,
                         types=MISSED_SOURCE_EVENT_TYPES,
-                    ))
+                    ), background=True)
                 offered.append(source_id)
                 source_seq = int((source or {}).get("seq") or 0)
                 # P2a-3 epoch floor, also for a source found on the current page.
@@ -5936,7 +5981,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     continue
                 newer, complete = await self._call(binding, lambda api, source_seq=source_seq: _count_messages_between(
                     lambda after: valid_event_page(api.events(binding.room_id, after, 0)), source_seq, current_seq,
-                ))
+                ), background=True)
                 time_text = ""
                 raw_ts = str(source.get("ts") or "")
                 if _valid_canonical_timestamp(raw_ts):
@@ -6027,7 +6072,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 source = await self._call(binding, lambda api: _cycle_source_message(
                     lambda after: valid_event_page(api.events(binding.room_id, after, 0)), source_id,
                     before_seq=current_seq + 1, active_epoch_starts_at=starts_at,
-                ))
+                ), background=True)
         except ProtocolError as error:
             logger.warning("Room %s kept reply source unavailable: code %s", binding.room_id, error.code or "-")
             return "", False
@@ -6087,6 +6132,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 lambda api: _epoch_start_event(
                     lambda after: valid_event_page(api.events(binding.room_id, after, 0)), starts_at,
                 ),
+                background=True,
             )
         rendered = _discussion_handover_context(start_event)
         cache[key] = rendered
@@ -6553,7 +6599,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if cursor == binding.acknowledged_cursor:
             return
         try:
-            response = await self._call(binding, lambda api: api.acknowledge(binding.room_id, cursor))
+            response = await self._call(binding, lambda api: api.acknowledge(binding.room_id, cursor), background=True)
             authoritative = (response or {}).get("acknowledgedSeq")
             if type(authoritative) is not int or authoritative != cursor:
                 raise ProtocolError(
@@ -6706,7 +6752,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     recovery.prior_state(binding, seq)
                     proven = await self._call(binding, lambda api, record=record: recovery.server_proof(
                         api, binding.room_id, binding.membership_id, record["seq"], record["reason"], record["evidenceRef"],
-                    ))
+                    ), background=True)
                     if proven["eventId"] != record["eventId"]:
                         raise recovery.RecoveryRefused("evidence_mismatch", "the Room's event differs from the record")
                     # Recorded before completion: a transient acknowledgement
@@ -7517,36 +7563,46 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if canonical_event_id:
             payload["canonicalEventId"] = canonical_event_id
         try:
-            await self._call(binding, lambda api: api.activity(binding.room_id, payload))
+            await self._call(binding, lambda api: api.activity(binding.room_id, payload), background=True)
         except Exception:
             if not suppress_errors:
                 raise
 
-    async def _call(self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any]) -> Any:
-        return await self._membership_contact(binding, lambda: self._raw_call(binding, operation))
+    @staticmethod
+    def _membership_inactive_error(status: str) -> ProtocolError:
+        return ProtocolError(f"Room membership inactive ({status or 'muted'}); turn call refused", code="membership_inactive")
 
-    async def _membership_contact(self, binding: RoomBinding, contact: Callable) -> Any:
+    async def _call(self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any], *, background=False) -> Any:
+        return await self._membership_contact(binding, lambda: self._raw_call(binding, operation), background=background)
+
+    async def _membership_contact(self, binding: RoomBinding, contact: Callable, *, background=False) -> Any:
+        # Reply scopes include nested background helpers (status/ack/settle).
+        background = background and not TURN_CONTACT.get()
         while True:
-            await self._wait_membership_active(binding)
+            if background:
+                await self._wait_membership_active(binding)
+            elif self._membership_gate(binding).paused:
+                raise self._membership_inactive_error(self._membership_gate(binding).status)
             try:
                 answer = await contact()
             except ProtocolError as error:
-                if error.code == "connector_not_active" and not self._membership_denied(error):
-                    if await self._own_membership_status(binding) == "muted":
-                        self._pause_membership(binding, "muted")
-                        continue
-                if not self._membership_denied(error) or hasattr(error, "artcraft_error"):
-                    raise
-                self._pause_membership(binding)
-                continue
+                denied = self._membership_denied(error) and not hasattr(error, "artcraft_error")
+                if denied or error.code == "connector_not_active":
+                    await self._membership_active(binding, refresh=True)
+                    if self._membership_gate(binding).paused:
+                        if background:
+                            continue
+                        raise self._membership_inactive_error(self._membership_gate(binding).status) from None
+                # Ordinary active-member 403s retain the exact original error.
+                raise
             roster = answer.get("roster") if isinstance(answer, dict) else None
-            if isinstance(roster, list) and any(
-                isinstance(member, dict) and member.get("membershipId") == binding.membership_id
-                and member.get("status") == "muted"
-                for member in roster
-            ):
-                self._pause_membership(binding, "muted")
-                continue
+            own = next((member for member in roster if isinstance(member, dict)
+                        and member.get("membershipId") == binding.membership_id), None) if isinstance(roster, list) else None
+            if own and own.get("status") and own["status"] != "active":
+                self._pause_membership(binding, own["status"])
+                if background:
+                    continue
+                raise self._membership_inactive_error(own["status"])
             return answer
 
     async def _raw_call(self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any]) -> Any:
@@ -7562,7 +7618,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _stream_call(
         self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any],
     ) -> Any:
-        return await self._membership_contact(binding, lambda: self._raw_stream_call(binding, operation))
+        return await self._membership_contact(binding, lambda: self._raw_stream_call(binding, operation), background=True)
 
     async def _raw_stream_call(
         self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any],
