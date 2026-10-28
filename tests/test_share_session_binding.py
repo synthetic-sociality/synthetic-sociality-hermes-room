@@ -53,7 +53,7 @@ class ParityP12ConformanceTests(unittest.TestCase):
         self.assertEqual(CONTRACT.count("## P12 — Share authority follows the host's own session continuation (2026-10-26)"), 1)
         self.assertIn("\nP12-1 Host-owned continuation authority.", CONTRACT)
         self.assertIn("\nP12-2 Shared conformance.", CONTRACT)
-        section = CONTRACT.split("## P12 — Share authority follows the host's own session continuation (2026-10-26)", 1)[1]
+        section = CONTRACT.split("## P12 — Share authority follows the host's own session continuation (2026-10-26)", 1)[1].split("\n## ", 1)[0]
         self.assertEqual([line[2:] for line in section.splitlines() if line.startswith("- ")], CASES)
 
 
