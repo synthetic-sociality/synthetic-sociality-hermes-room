@@ -279,10 +279,107 @@ class P15Tests(unittest.TestCase):
             async def consume(_binding,event): consumed.append(event)
             instance._consume_locked=consume
             ready=copy.deepcopy(FIXTURE['ready'])
+            ready['payload']['membershipId']=binding.membership_id
             await asyncio.gather(*(instance._consume(binding,ready) for _ in range(8)))
             self.assertEqual(state['reads'],1);self.assertFalse(gate.paused)
             self.assertEqual(len(consumed),8)
         asyncio.run(run())
+
+    def test_only_assigned_events_force_a_roster_probe(self):
+        async def run():
+            instance,binding,gate,clock,state,api=setup()
+            state['status']='active'
+            async def raw(_binding,op): return op(api)
+            instance._raw_call=raw
+            consumed=[]
+            async def consume(_binding,event): consumed.append(event)
+            instance._consume_locked=consume
+
+            def message(role='participant_agent', actor='peer', **payload):
+                return {'type':'message.posted','actorRole':role,'actorId':actor,'payload':payload}
+            def command(name='ask', role='human_owner', **payload):
+                return {'type':'human.command','actorRole':role,'payload':{'command':{'command':name,**payload}}}
+            def ready(member):
+                return {'type':'discussion.cycle_attempt_ready','payload':{'membershipId':member}}
+
+            cases=[
+                ('another member message',message(resolvedRecipientMembershipIds=['other']),False),
+                ('assigned message',message(resolvedRecipientMembershipIds=['member-1']),True),
+                ('own post',message(actor='member-1',resolvedRecipientMembershipIds=['member-1']),False),
+                ('another attempt',ready('other'),False),
+                ('own attempt',ready('member-1'),True),
+                ('another addressed ask',command(resolvedTargetMembershipIds=['other'],targetSelectors=[{'membershipId':'member-1'}]),False),
+                ('own addressed ask',command(resolvedTargetMembershipIds=['member-1'],targetSelectors=[{'membershipId':'other'}]),True),
+                ('human summary',command('summarize'),True),
+                ('unaddressed ask',command(),False),
+                ('empty ask targets',command(resolvedTargetMembershipIds=[]),False),
+                ('existing cycle ask',{**command(resolvedTargetMembershipIds=['member-1']),'payload':{'cycleId':'cycle','command':{'command':'ask','resolvedTargetMembershipIds':['member-1']}}},False),
+                ('other human command',command('hold'),False),
+                ('nonhuman ask',command(role='participant_agent',resolvedTargetMembershipIds=['member-1']),False),
+                ('general agent post',message(resolvedRecipientMembershipIds=[]),True),
+                ('cycle post without recipients',message(cycleId='cycle',resolvedRecipientMembershipIds=[]),False),
+                ('human open message',message('human_member'),True),
+                ('human addressed elsewhere',message('agent_owner',resolvedRecipientMembershipIds=['other']),False),
+                ('human resolved targets win',message('human_owner',resolvedRecipientMembershipIds=['other'],recipientSelectors=[{'kind':'everyone'}]),False),
+                ('human unresolved selector',message('human',resolvedRecipientMembershipIds=[],recipientSelectors=[{'membershipId':'member-1'}]),False),
+                ('human selector fallback',message('human',recipientSelectors=[{'membershipId':'member-1'}]),True),
+                ('room master message',message('room_master',resolvedRecipientMembershipIds=['other']),True),
+                ('admin message',message('admin'),True),
+                ('topic change',{'type':'topic.changed'},False),
+            ]
+            for label,event,assigned in cases:
+                with self.subTest(event=label):
+                    before=state['reads']
+                    await instance._consume(binding,event)
+                    self.assertEqual(state['reads']-before,int(assigned))
+                    self.assertIs(consumed[-1],event)
+        asyncio.run(run())
+
+    def test_tool_thread_probe_is_retained_and_failure_logged_without_secrets(self):
+        for outcome in ['failure','success','cancelled']:
+            with self.subTest(outcome=outcome):
+                secret='fixture-probe-secret-never-log'
+                refusal=adapter.ProtocolError('tool refused',status=403)
+                def prepare(instance,binding):
+                    original_handle=instance.handle_message
+                    started=asyncio.Event()
+                    release=asyncio.Event()
+                    async def probe(_binding,**options):
+                        self.assertIs(_binding,binding)
+                        self.assertEqual(options,{'refresh':True})
+                        started.set()
+                        await release.wait()
+                        if outcome=='failure':
+                            raise adapter.ProtocolError(secret,status=403,code='credential_revoked')
+                        return True
+                    instance._membership_active=probe
+                    async def handle(_message):
+                        debug.reset_mock()
+                        turn=adapter.share_file._ACTIVE[binding.room_id]
+                        def denied(): raise refusal
+                        def tool():
+                            with self.assertRaises(adapter.ProtocolError) as caught:
+                                turn.contact(denied)
+                            self.assertIs(caught.exception,refusal)
+                        await asyncio.to_thread(tool)
+                        await asyncio.wait_for(started.wait(),1)
+                        tasks=list(instance._membership_probe_tasks)
+                        self.assertEqual(len(tasks),1)
+                        self.assertFalse(tasks[0].done())
+                        if outcome=='cancelled': tasks[0].cancel()
+                        else: release.set()
+                        await asyncio.gather(*tasks,return_exceptions=True)
+                        await settle()
+                        self.assertEqual(instance._membership_probe_tasks,set())
+                        await original_handle(_message)
+                    instance.handle_message=handle
+                with mock.patch.object(adapter.logger,'debug') as debug:
+                    build_message(copy.deepcopy(FIXTURE['ready']),context=[copy.deepcopy(FIXTURE['source'])],attempt=cycle(),prepare=prepare)
+                if outcome=='failure':
+                    debug.assert_called_once_with('Room tool membership probe failed (%s)','ProtocolError')
+                    self.assertNotIn(secret,str(debug.call_args))
+                else:
+                    debug.assert_not_called()
 
     def test_12(self):
         async def run():

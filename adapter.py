@@ -858,10 +858,12 @@ def _is_general_agent_post(payload: dict[str, Any]) -> bool:
     return not str(payload.get("cycleId") or "").strip() and not (payload.get("recipientSelectors") or [])
 
 
-def _agent_event_addresses(payload: dict[str, Any], membership_id: str) -> bool:
+def _agent_event_addresses(payload: dict[str, Any], membership_id: str, *, human_source=False) -> bool:
     resolved = payload.get("resolvedRecipientMembershipIds")
     if isinstance(resolved, list):
         if not resolved:
+            if human_source:
+                return not (payload.get("recipientSelectors") or [])
             # Whether a general post may start a reply is decided against the
             # Room policy downstream; coordinated rooms keep explicit routing.
             return _is_general_agent_post(payload)
@@ -869,7 +871,45 @@ def _agent_event_addresses(payload: dict[str, Any], membership_id: str) -> bool:
     for selector in payload.get("recipientSelectors") or []:
         if selector.get("kind") == "everyone" or str(selector.get("membershipId") or "") == membership_id:
             return True
-    return False
+    return human_source and not (payload.get("recipientSelectors") or [])
+
+
+def _is_addressed_ask(event: dict[str, Any]) -> bool:
+    payload = event.get("payload") or {}
+    command = payload.get("command") or {}
+    targets = command.get("resolvedTargetMembershipIds")
+    return (
+        event.get("type") == "human.command" and command.get("command") == "ask"
+        and isinstance(targets, list) and bool(targets)
+        and not str(payload.get("cycleId") or "").strip()
+    )
+
+
+def _is_attempt_ready_for(event: dict[str, Any], membership_id: str) -> bool:
+    return (
+        event.get("type") == "discussion.cycle_attempt_ready"
+        and str((event.get("payload") or {}).get("membershipId") or "") == membership_id
+    )
+
+
+def _is_assigned_event(event: dict[str, Any], membership_id: str) -> bool:
+    payload = event.get("payload") or {}
+    if event.get("type") == "discussion.cycle_attempt_ready":
+        return _is_attempt_ready_for(event, membership_id)
+    if event.get("type") == "human.command":
+        command = payload.get("command") or {}
+        # OpenClaw offers ask turns only for canonical resolved targets.
+        # Legacy unaddressed asks can still follow Hermes' receive path.
+        return _is_human_cycle_source(event) and (
+            command.get("command") != "ask"
+            or (_is_addressed_ask(event)
+                and membership_id in {str(value) for value in command["resolvedTargetMembershipIds"]})
+        )
+    if event.get("type") != "message.posted" or event.get("actorId") == membership_id:
+        return False
+    if str(event.get("actorRole") or "") in {"room_master", "admin"}:
+        return True
+    return _agent_event_addresses(payload, membership_id, human_source=_is_human_cycle_source(event))
 
 
 def _policy_view(response: dict[str, Any]) -> dict[str, Any]:
@@ -1422,6 +1462,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self._state: PluginState = load()
         self._tasks: dict[str, asyncio.Task] = {}
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}
+        self._membership_probe_tasks: set[asyncio.Task] = set()
         # Contract P2c-5: the host label is this machine's, read at start,
         # never a value remembered in state.
         self._host_label = platform.node()
@@ -1642,12 +1683,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         acknowledgement_retries = list(getattr(self, "_ack_retry_tasks", {}).values())
         for task in acknowledgement_retries:
             task.cancel()
+        membership_probes = list(getattr(self, "_membership_probe_tasks", set()))
+        for task in membership_probes:
+            task.cancel()
         await asyncio.gather(
             *self._tasks.values(),
             *self._heartbeat_tasks.values(),
             *getattr(self, "_attempt_renewal_tasks", {}).values(),
             *getattr(self, "_submission_tasks", {}).values(),
             *acknowledgement_retries,
+            *membership_probes,
             return_exceptions=True,
         )
         self._tasks.clear()
@@ -4066,6 +4111,26 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._status_room(binding, inactive=False, connection="reconnecting", error_code="")
         return active
 
+    def _start_membership_probe(self, binding: RoomBinding) -> None:
+        """Own probes scheduled by synchronous tools on the gateway loop."""
+        if getattr(self, "_stop", None) is not None and self._stop.is_set():
+            return
+        tasks = getattr(self, "_membership_probe_tasks", None)
+        if tasks is None:
+            tasks = self._membership_probe_tasks = set()
+        task = asyncio.create_task(self._membership_active(binding, refresh=True))
+        tasks.add(task)
+
+        def completed(task):
+            tasks.discard(task)
+            if not task.cancelled():
+                error = task.exception()
+                if error is not None:
+                    # Exception messages/tracebacks may contain credentials.
+                    logger.debug("Room tool membership probe failed (%s)", type(error).__name__)
+
+        task.add_done_callback(completed)
+
     def _membership_gate(self, binding: RoomBinding) -> MembershipGate:
         # Do not carry a pause across a replaced identity or credential.
         key = (binding.base_url, binding.room_id, binding.membership_id, binding.credential)
@@ -4406,7 +4471,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _consume(self, binding: RoomBinding, event: dict[str, Any]) -> None:
         if not binding.enabled or binding.revoked:
             return
-        if event.get("type") in {"discussion.cycle_attempt_ready", "message.posted", "human.command"}:
+        if _is_assigned_event(event, binding.membership_id):
             await self._membership_active(binding, refresh=True, force=True)
         await self._wait_membership_active(binding)
         receive_locks = getattr(self, "_receive_locks", None)
@@ -4609,10 +4674,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         legacy_untyped_message = event_type == "message.posted" and not str(event.get("actorRole") or "")
         human_source = _is_human_cycle_source(event)
         agent_seed = _is_agent_cycle_seed(event)
-        ready_for_self = (
-            event_type == "discussion.cycle_attempt_ready"
-            and str(payload.get("membershipId") or "") == binding.membership_id
-        )
+        ready_for_self = _is_attempt_ready_for(event, binding.membership_id)
         summary_for_self = False
         if event_type == "discussion.cycle_terminal" and str(payload.get("state") or "") == "completed":
             policy_response = await self._call(
@@ -4709,12 +4771,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         summarize_command = human_source and event_type == "human.command" and command.get("command") == "summarize"
         # Contract P2a-4: an ask addressed to agents starts a cycle for its
         # targets in open Rooms too, with or without retryUnavailable.
-        addressed_ask = (
-            human_source and event_type == "human.command"
-            and command.get("command") == "ask"
-            and bool(retry_targets)
-            and not str(payload.get("cycleId") or "").strip()
-        )
+        addressed_ask = human_source and _is_addressed_ask(event)
         if event_type == "discussion.started" and coordination_mode != "open":
             # Contract L1-16 (owner 2026-10-03): in a coordinated Room a
             # discussion start is not a trigger. Its topic reaches the agent as
@@ -5629,7 +5686,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     # Synchronous host tools cannot wait on the gateway loop.
                     # The same coalesced roster probe runs there; the caller
                     # still receives its original refusal immediately.
-                    tool_loop.call_soon_threadsafe(lambda: tool_loop.create_task(self._membership_active(binding, refresh=True)))
+                    tool_loop.call_soon_threadsafe(self._start_membership_probe, binding)
                 raise
         turn = share_file.ShareTurn(
             records, root, _secret_store_dirs(), persist_share,
