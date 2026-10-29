@@ -99,7 +99,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.98"
+CONNECTOR_VERSION = "1.0.99"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -1676,6 +1676,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             task.cancel()
         for task in self._heartbeat_tasks.values():
             task.cancel()
+        enrollment_listings = list(getattr(self, "_enrollment_tasks", {}).values())
+        for task in enrollment_listings:
+            task.cancel()
         for task in getattr(self, "_attempt_renewal_tasks", {}).values():
             task.cancel()
         for task in getattr(self, "_submission_tasks", {}).values():
@@ -1689,6 +1692,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         await asyncio.gather(
             *self._tasks.values(),
             *self._heartbeat_tasks.values(),
+            *enrollment_listings,
             *getattr(self, "_attempt_renewal_tasks", {}).values(),
             *getattr(self, "_submission_tasks", {}).values(),
             *acknowledgement_retries,
@@ -3932,7 +3936,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         if not binding.enabled or binding.revoked:
                             return  # ended meanwhile (P2c-3): its status stays stopped
                         self._note_connected(binding, heartbeat)
-                    await self._accept_connector_enrollments(binding)
+                    # Contract P8-2 beside the beat (1.0.99): the heartbeat
+                    # never waits for the enrollment listing or its lock.
+                    self._start_enrollment_listing(binding)
                     # Contract P8-4: an idle frame after a registration, else
                     # at most once per idle_activity_frame_interval().
                     if registered_now or self._idle_frame_due(binding.room_id):
@@ -4030,7 +4036,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     return
             self._renewing_rooms.add(room_id)
             self._stream_generations.pop(room_id, None)
-            tasks = [task for task in (self._tasks.get(room_id), self._heartbeat_tasks.get(room_id)) if task]
+            # The Room's own enrollment listing runs beside its heartbeat (1.0.99).
+            tasks = [task for task in (self._tasks.get(room_id), self._heartbeat_tasks.get(room_id),
+                                       self._room_map("_enrollment_tasks").get(room_id)) if task]
             for task in tasks:
                 task.cancel()
             # _call drains its bounded worker even when its asyncio caller is
@@ -4128,6 +4136,36 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if error is not None:
                     # Exception messages/tracebacks may contain credentials.
                     logger.debug("Room tool membership probe failed (%s)", type(error).__name__)
+
+        task.add_done_callback(completed)
+
+    def _start_enrollment_listing(self, binding: RoomBinding) -> None:
+        """Contract P8-2 from the heartbeat, in its own task (1.0.99).
+
+        The enrollment lock is shared by every Room of this process; a
+        heartbeat that awaited the listing waited for any other Room's
+        listing too. At most one listing task per Room is in flight; a beat
+        meanwhile starts none (an owed listing stays owed for the next beat).
+        """
+        if getattr(self, "_stop", None) is not None and self._stop.is_set():
+            return
+        tasks = self._room_map("_enrollment_tasks")
+        running = tasks.get(binding.room_id)
+        if running is not None and not running.done():
+            return
+        task = asyncio.create_task(
+            self._accept_connector_enrollments(binding),
+            name=f"synthetic-sociality-enrollments:{binding.room_id}",
+        )
+        tasks[binding.room_id] = task
+
+        def completed(task, room_id=binding.room_id):
+            if tasks.get(room_id) is task:
+                tasks.pop(room_id, None)
+            if not task.cancelled() and task.exception() is not None:
+                # The listing contains its own failures; logged by type only.
+                logger.warning("Room %s connector enrollment check failed (%s)",
+                               room_id, type(task.exception()).__name__)
 
         task.add_done_callback(completed)
 
@@ -4240,10 +4278,21 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if lock is None:
             lock = asyncio.Lock()
             self._enrollment_lock = lock
+        # 1.0.99 (live 2026-10-29): the lock is shared by every Room of this
+        # process, so nothing waits for a membership while holding it (P15-3:
+        # sibling memberships keep running). The participation check, which
+        # may read the own roster, runs before the lock; the listing and claim
+        # contacts fail fast on a paused membership instead of waiting for an
+        # unmute. A refusal still pauses this membership's watchers (P15-2);
+        # _watch waits outside the lock, the heartbeat skips its beats.
+        if not await self._membership_active(source):
+            # Contract P8-2: a muted binding never lists for its lineage.
+            self._enrollment_lineage(source)["members"].pop(source.room_id, None)
+            return
         async with lock:
             lineage = self._enrollment_lineage(source)
-            if not await self._membership_active(source):
-                # Contract P8-2: a muted binding never lists for its lineage.
+            if self._membership_gate(source).paused:
+                # Paused while this binding waited for the lock (P8-2).
                 lineage["members"].pop(source.room_id, None)
                 return
             if not self._enrollment_listing_due(source, lineage):
@@ -4255,7 +4304,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 pending, poll_after = enrollment_listing(await self._call(
                     source,
                     lambda api: api.connector_enrollments(source.installation_id),
-                    background=True,
+                    background=False,  # fail fast: never wait under the lock
                 ))
                 lineage["interval"] = poll_after or ENROLLMENT_LISTING_INTERVAL_SECONDS
                 lineage["due_at"] = listed_at + lineage["interval"]
@@ -4265,6 +4314,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # HTML SPA fallback with HTTP 200.  Presence and ordinary Room
                 # work must continue for every compatibility shape.
                 if error.status in {404, 405, 501}:
+                    return
+                if error.code == "membership_inactive":
+                    # Contract P15-2: the own-roster probe of this refusal
+                    # paused the membership (muted, removed or another
+                    # non-active status). Contract P8-2: the lineage stays
+                    # due, and another of its bindings lists at its next
+                    # heartbeat.
+                    lineage["members"].pop(source.room_id, None)
+                    lineage["due_at"] = listed_at
                     return
                 if error.code == "connector_not_active":
                     # Contract P8-2: this binding's answer; the lineage stays
@@ -4317,7 +4375,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         lambda api, invitation_id=invitation_id: api.claim_connector_enrollment(
                             invitation_id, source.installation_id,
                         ),
-                        background=True,
+                        background=False,  # fail fast: never wait under the lock
                     )
                     if not isinstance(claimed, dict):
                         raise ProtocolError(
@@ -4328,6 +4386,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 except ProtocolError as error:
                     if error.code in {"invitation_consumed", "not_found"}:
                         continue
+                    if error.code == "membership_inactive":
+                        # Paused meanwhile: the unclaimed invitations stay
+                        # pending for the lineage's next listing (P8-2).
+                        lineage["members"].pop(source.room_id, None)
+                        lineage["due_at"] = listed_at
+                        return
                     logger.warning(
                         "Room connector could not process enrollment %s: %s",
                         str(enrollment.get("invitationId") or "").strip()

@@ -7,6 +7,34 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.99 — A muted Room no longer stops the other Rooms' heartbeats
+
+Hotfix on 1.0.98; OpenClaw is unchanged (0.2.77). Seen live on 2026-10-29:
+about 90 s after a gateway start with 14 Rooms, one of them with a muted
+membership, every Room stopped its heartbeat at once, the leases expired and
+the agent showed offline everywhere. The muted Room's connector enrollment
+listing ran as a waiting background contact (P15, new in 1.0.97) inside the
+enrollment lock that all Rooms of the process share: the Room answered
+`connector_not_active`, the roster probe paused the membership, and the
+listing then waited for an unmute while holding the lock. Every other Room's
+heartbeat and event watcher queued behind it. 1.0.96 made the same request
+directly and returned on that answer.
+
+Now nothing waits for a membership while holding the lock: the participation
+check runs before it, and the listing and claim requests fail fast on a paused
+membership. Their refusal still pauses that membership's watchers (P15-2); its
+event watcher waits outside the lock and its heartbeat skips its beats until
+the unmute (P15-3). The heartbeat no longer waits for the enrollment listing
+at all: the listing runs beside the beat in one task per Room, so neither
+another Room's listing nor a stalled own listing delays a heartbeat. The P8
+listing cadence, the P15 pause and resume, and active memberships are
+otherwise unchanged. Regression tests: `tests/test_parity_p15.py`
+(`MutedEnrollmentLockTests`).
+
+No persisted state migration. `plugin.yaml` is unchanged beyond its version
+line from 1.0.98: updating from 1.0.98 and rolling back to it need no
+`MANIFEST_SHA`; from or to 1.0.97 or older, the 1.0.98 notes below apply.
+
 ## 1.0.98 — Five Room-bound ArtCraft agent tools (P14)
 
 Paired with OpenClaw 0.2.77. Builds on 1.0.97 (P15, below) and adds the P13

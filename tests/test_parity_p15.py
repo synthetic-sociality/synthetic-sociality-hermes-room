@@ -398,3 +398,93 @@ class P15Tests(unittest.TestCase):
             self.assertTrue(await instance._membership_active(binding))
             self.assertEqual(await asyncio.wait_for(task,1),'events')
         asyncio.run(run())
+
+
+class MutedEnrollmentLockTests(unittest.TestCase):
+    """1.0.99: one Room's membership never stops another Room's heartbeat.
+
+    Live 2026-10-29 (Hermes 1.0.98, 14 Rooms, one muted membership): the muted
+    Room's enrollment listing waited for an unmute inside the process-wide
+    enrollment lock, and every other Room's heartbeat and event watcher queued
+    behind that lock until the leases expired. The real participation gate and
+    `_call` path run here; only the Room transport is a double (P8 idle Room).
+    """
+
+    def run_rooms(self, *, mute_at, until, hang=None):
+        from test_parity_p8 import IdleRoom, REAL_SLEEP, START, VirtualClock, binding_for, idle_instance, simulated, start, stop
+        clock = VirtualClock()
+        room = IdleRoom(clock)
+        active, other = binding_for('a1', 'inst-A'), binding_for('m1', 'inst-A')
+        observed = {}
+        released = asyncio.Event()
+
+        async def body():
+            instance = idle_instance(room, [active, other])
+            del instance._call  # the production _call -> _membership_contact path
+
+            async def raw(binding, operation):
+                await REAL_SLEEP(0)
+                if hang is not None and binding.room_id == 'm1' and clock.now >= START + hang:
+                    probe = types.SimpleNamespace(connector_enrollments=lambda _installation: 'listing')
+                    try:
+                        is_listing = operation(probe) == 'listing'
+                    except Exception:  # noqa: BLE001 - another route
+                        is_listing = False
+                    if is_listing:
+                        # The listing of m1 never answers (a stalled server).
+                        observed.setdefault('hung', clock.now)
+                        await released.wait()
+                return operation(room.api(binding))
+            instance._raw_call = raw
+            # The active Room runs (registration, listing, heartbeats) before
+            # the other one starts, as in the live gateway.
+            await start(instance, [active])
+            await clock.run_until(START + 30)
+            if mute_at == 0:
+                room.muted.add('m1')
+            await start(instance, [other])
+            if mute_at:
+                await clock.run_until(START + mute_at)
+                room.muted.add('m1')
+            await clock.run_until(START + until)
+            observed['gate'] = instance._membership_gate(other)
+            observed['watching'] = not instance._tasks['m1'].done()
+            observed['lock_held'] = instance._enrollment_lock.locked()
+            released.set()
+            await stop(instance)
+
+        with simulated(clock):
+            asyncio.run(body())
+        return room, observed, START
+
+    def assert_beats(self, room, room_id, since, until):
+        beats = room.times('heartbeat', room_id, since=since, until=until)
+        # One heartbeat every 15 s from `since` (a beat time) until before `until`.
+        self.assertEqual(len(beats), int((until - since - 1e-9) // 15) + 1, (room_id, beats))
+        self.assertEqual({round(later - earlier, 6) for earlier, later in zip(beats, beats[1:])}, {15.0})
+
+    def test_muted_enrollment_listing_never_stops_sibling_heartbeats(self):
+        for label, mute_at in [('muted before start', 0), ('muted while running', 100)]:
+            with self.subTest(label):
+                room, observed, start_at = self.run_rooms(mute_at=mute_at, until=400)
+                muted_listing = room.times('enrollments', 'm1', since=start_at + mute_at)
+                # The muted listing paused m1 (P15-2) and m1 waits for an unmute ...
+                self.assertEqual(len(muted_listing), 1, room.calls)
+                self.assertTrue(observed['gate'].paused)
+                self.assertEqual(observed['gate'].status, 'muted')
+                self.assertTrue(observed['watching'])
+                self.assertEqual(room.times('heartbeat', 'm1', since=muted_listing[0] + 1), [])
+                # ... outside the lock: a1 keeps its heartbeat and the lineage's listing.
+                self.assertFalse(observed['lock_held'])
+                self.assert_beats(room, 'a1', start_at + 15, start_at + 400)
+                listings = room.times('enrollments', 'a1', since=muted_listing[0] + 1)
+                self.assertGreaterEqual(len(listings), 4, listings)
+
+    def test_a_stalled_enrollment_listing_never_delays_a_heartbeat(self):
+        # m1's own listing stalls inside the lock from +100 on: neither its own
+        # heartbeat nor a1's waits for the listing or the lock.
+        room, observed, start_at = self.run_rooms(mute_at=None, until=400, hang=100)
+        self.assertIn('hung', observed)
+        self.assertTrue(observed['lock_held'])
+        self.assert_beats(room, 'a1', start_at + 15, start_at + 400)
+        self.assert_beats(room, 'm1', start_at + 45, start_at + 400)
