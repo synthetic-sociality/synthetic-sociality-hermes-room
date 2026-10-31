@@ -1770,7 +1770,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # /deny, resolving the wait without publishing control text.
         if _PRIVATE_APPROVAL.search(content or ""):
             logger.warning("Suppressed a private Hermes approval prompt for Room %s", chat_id)
-            asyncio.create_task(self._auto_deny_approval(chat_id))
+            asyncio.create_task(self._auto_deny_approval(
+                chat_id, self._approval_thread(chat_id, source_ref, metadata),
+            ))
             approval_source = source_ref or "approval"
             return SendResult(success=True, message_id=f"private-approval:{approval_source}")
         if not source_ref:
@@ -1825,7 +1827,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if _PRIVATE_APPROVAL.search(content or ""):
             self._buffered_source.pop(message_id, None)
             self._buffered_output.pop(message_id, None)
-            asyncio.create_task(self._auto_deny_approval(chat_id))
+            asyncio.create_task(self._auto_deny_approval(
+                chat_id, self._approval_thread(chat_id, source_id),
+            ))
             return SendResult(success=True, message_id=f"private-approval:{source_id}")
         self._buffered_output[message_id] = content
         if not finalize:
@@ -7427,7 +7431,32 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
         self._persist_binding(binding)
 
-    async def _auto_deny_approval(self, chat_id: str) -> None:
+    def _approval_thread(
+        self, chat_id: str, source_ref: str = "", metadata: Optional[Dict[str, Any]] = None,
+    ) -> str | None:
+        """The thread of the Room turn that a suppressed approval prompt holds.
+
+        Hermes keys the waiting approval by the turn's session, and that key
+        carries the epoch thread. The prompt's metadata names the thread; an
+        edited preview has none, so the turn's recorded epoch gives the thread
+        its dispatch used. With no turn to find there is no thread: the /deny
+        then resolves nothing, and a wait elsewhere still fails at its timeout.
+        """
+        thread_id = (metadata or {}).get("thread_id")
+        if thread_id:
+            return str(thread_id)
+        source_id, _generation = _decode_dispatch_source(
+            source_ref or getattr(self, "_latest_source", {}).get(chat_id, ""),
+        )
+        epoch_id = getattr(self, "_event_epoch", {}).get(source_id, "")
+        if not epoch_id:
+            return None
+        try:
+            return _session_thread_for_epoch(self._binding(chat_id), epoch_id)
+        except ValueError:
+            return None
+
+    async def _auto_deny_approval(self, chat_id: str, thread_id: str | None = None) -> None:
         """Resolve a Hermes approval wait privately and fail closed."""
         await asyncio.sleep(0)
         message_id = "private-deny-" + uuid.uuid4().hex
@@ -7435,6 +7464,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             chat_name="Synthetic Sociality Room private control",
             chat_type="group",
+            thread_id=thread_id,
             user_id=chat_id,
             user_name="Room connector policy",
             message_id=message_id,
