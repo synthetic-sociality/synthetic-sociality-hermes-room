@@ -7,6 +7,32 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.100 — A private approval prompt fails a Room turn at once
+
+Hotfix on 1.0.99; OpenClaw is unchanged. Seen live (ISSUE-163): a terminal
+command that needs private approval waited the core's whole approval timeout
+(about 305 s), the turn's lease expired and the reply was lost. The connector
+suppressed the prompt and injected its private `/deny`, but built that source
+without a thread, while a Room turn's source carries `room-epoch-v1:<digest>`.
+The `/deny` therefore ran on another session key, the core answered "No pending
+command to deny." and the real wait ran on.
+
+The private `/deny` now carries the waiting turn's thread: from the prompt's
+metadata when the core names it, otherwise from the epoch recorded for the turn
+at dispatch. The command stays denied, nothing is published and nothing is ever
+approved. A turn in the legacy epoch stays without a thread. Regression tests:
+`tests/test_issue163_room_auto_deny.py`.
+
+Known limit, unchanged: a reply that uses the suppression filter's words
+(`approval required`, `dangerous command`, `/approve`) is still treated as a
+prompt. It is not published, is reported as delivered, and its turn stays
+unsettled until the retry. The filter stays as it is: approval text never reaches
+a Room.
+
+No persisted state migration. `plugin.yaml` is unchanged beyond its version
+line from 1.0.99: updating from 1.0.99 and rolling back to it need no
+`MANIFEST_SHA`.
+
 ## 1.0.99 — A muted Room no longer stops the other Rooms' heartbeats
 
 Hotfix on 1.0.98; OpenClaw is unchanged (0.2.77). Seen live on 2026-10-29:

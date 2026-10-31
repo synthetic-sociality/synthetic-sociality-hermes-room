@@ -2011,14 +2011,18 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.99")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.100")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — A muted Room no longer stops the other Rooms' heartbeats",
+            f"## {adapter.CONNECTOR_VERSION} — A private approval prompt fails a Room turn at once",
             (ROOT / "README.md").read_text(),
         )
         readme = (ROOT / "README.md").read_text()
+        self.assertLess(
+            readme.index("## 1.0.100 — A private approval prompt fails a Room turn at once"),
+            readme.index("## 1.0.99 — A muted Room no longer stops the other Rooms' heartbeats"),
+        )
         self.assertLess(
             readme.index("## 1.0.99 — A muted Room no longer stops the other Rooms' heartbeats"),
             readme.index("## 1.0.98 — Five Room-bound ArtCraft agent tools (P14)"),
@@ -2084,7 +2088,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.99"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.100"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
