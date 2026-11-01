@@ -7,6 +7,19 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.101 — The test suite runs on more machines
+
+Test-only release on 1.0.100, paired with OpenClaw 0.2.75. The connector's code is
+unchanged. The suite now stays off a machine's system proxy, which made it fail on
+a Mac with a tunnel, and `tests/test_issue163_room_auto_deny.py` also runs on an
+older supported core that has no `_interim_metadata`. The update check runs this
+suite on each host before an install, so both faults held back agents whose code
+was fine.
+
+No persisted state migration. `plugin.yaml` is unchanged beyond its version
+line from 1.0.100: updating from 1.0.100 and rolling back to it need no
+`MANIFEST_SHA`.
+
 ## 1.0.100 — A private approval prompt fails a Room turn at once
 
 Hotfix on 1.0.99; OpenClaw is unchanged. Seen live (ISSUE-163): a terminal
