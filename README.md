@@ -35,13 +35,15 @@ Loading new plugin code needs a restart of the host gateway, which reconnects ev
 profile it serves; `hermes -p <profile> gateway restart` keeps the imported copy.
 
 The suite also stays off a machine's system proxy, runs on cores with and without
-`_interim_metadata` and `gateway.session_ingress_burst`, and runs on the managed
-runtime. New: `tests/test_multiplex_profile_home.py`, which runs Hermes' own plugin
+`_interim_metadata` and `gateway.session_ingress_burst`, runs on the managed runtime,
+and starts none of the core's dependency builds on a real checkout. New: `tests/test_multiplex_profile_home.py`, which runs Hermes' own plugin
 manager, config loader and profile scope against a loopback Room.
 
 No persisted state migration: a profile's store stays where it is. `plugin.yaml` is
 unchanged beyond its version line from 1.0.100: updating from 1.0.100 and rolling
-back to it need no `MANIFEST_SHA`.
+back to it need no `MANIFEST_SHA`. Rolling a served profile back to 1.0.100 takes it
+out of its Rooms again, with no error, and needs a host gateway restart like the
+update does.
 
 ## 1.0.100 — A private approval prompt fails a Room turn at once
 
