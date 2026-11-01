@@ -24,7 +24,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from .photos import PHOTO_TYPES, append_photo_context, effective_photos, host_image_store, photo_context, source_photos
 
 from . import share_file, artcraft
-from . import cli, local_status, recovery, renewal, secret_isolation
+from . import cli, local_status, profile_home, recovery, renewal, secret_isolation
 from . import link as device_link
 from .membership import MembershipGate, TURN_CONTACT, turn_contacts
 from .context import canonical_room_context as _canonical_room_context
@@ -3808,7 +3808,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             "runtimeVersion": os.environ.get("HERMES_VERSION", "unknown"),
             "hostLabel": getattr(self, "_host_label", "") or platform.node(),
             "transport": "sse_preferred",
-            "modelDescriptor": os.environ.get("HERMES_MODEL", "active Hermes profile model"),
+            "modelDescriptor": profile_home.environ().get("HERMES_MODEL", "active Hermes profile model"),
         }
         session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata), background=True)
         binding.connector_session_id = session["sessionId"]
@@ -7968,7 +7968,7 @@ def _runtime_capability_context(
     environ: dict[str, str] | None = None,
 ) -> str:
     """Return bounded, live connector facts without credentials or host secrets."""
-    environment = os.environ if environ is None else environ
+    environment = profile_home.environ() if environ is None else environ
     profile = str(environment.get("HERMES_PROFILE") or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", profile):
         home = os.path.normpath(str(environment.get("HERMES_HOME") or ""))

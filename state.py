@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterator, TypeVar
 import fcntl
 
 from .documents import valid_given_memory
+from .profile_home import home as hermes_home
 from .share_file import valid_uploads, valid_refs
 from .secret_isolation import remember_secrets
 
@@ -49,9 +50,7 @@ def _valid_canonical_timestamp(value: Any) -> bool:
 
 
 def state_root() -> Path:
-    hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    root = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
-    return root / "synthetic-sociality-room"
+    return hermes_home() / "synthetic-sociality-room"
 
 
 def state_path() -> Path:

@@ -7,18 +7,41 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
-## 1.0.101 — The test suite runs on more machines
+## 1.0.101 — A Room agent runs under Hermes' one gateway for all profiles
 
-Test-only release on 1.0.100, paired with OpenClaw 0.2.75. The connector's code is
-unchanged. The suite now stays off a machine's system proxy, which made it fail on
-a Mac with a tunnel, and `tests/test_issue163_room_auto_deny.py` also runs on an
-older supported core that has no `_interim_metadata`. The update check runs this
-suite on each host before an install, so both faults held back agents whose code
-was fine.
+On 1.0.100, paired with OpenClaw 0.2.75. Seen live: after a core update folded the
+Mac 2024's profiles onto one gateway (`gateway.multiplex_profiles`, the core's
+default), Berlin kept its Telegram and lost its Rooms, with no error. In that
+gateway the process environment describes the host profile; a served profile exists
+only as Hermes' context-local home and its scopes. The connector read `HERMES_HOME`
+from the environment, found no binding in the host's home, and the platform was
+never enabled.
 
-No persisted state migration. `plugin.yaml` is unchanged beyond its version
-line from 1.0.100: updating from 1.0.100 and rolling back to it need no
-`MANIFEST_SHA`.
+The connector now asks Hermes for its home, and a copy of the plugin keeps the home
+it was imported under: Hermes imports a directory plugin once per home, inside that
+home's scope (`profile_home.py`). The same answer now serves everything that read
+the host's values in that gateway: the state store, the store fence and its reach
+report (`TERMINAL_*` from the profile's terminal scope), the share tool's root, the
+facts given to a turn, the model named at registration, and the per-process session
+state, which is per profile so two profiles in one Room do not read each other's
+sessions. A profile running its own gateway behaves as before.
+
+Python 3.14 and the managed environment of the new launcher need no change here:
+`cryptography` is a core dependency and is in that environment. An error
+`No module named '_cffi_backend'` means a process mixed one Python with the other's
+packages; it is not a missing dependency of this plugin.
+
+Loading new plugin code needs a restart of the host gateway, which reconnects every
+profile it serves; `hermes -p <profile> gateway restart` keeps the imported copy.
+
+The suite also stays off a machine's system proxy, runs on cores with and without
+`_interim_metadata` and `gateway.session_ingress_burst`, and runs on the managed
+runtime. New: `tests/test_multiplex_profile_home.py`, which runs Hermes' own plugin
+manager, config loader and profile scope against a loopback Room.
+
+No persisted state migration: a profile's store stays where it is. `plugin.yaml` is
+unchanged beyond its version line from 1.0.100: updating from 1.0.100 and rolling
+back to it need no `MANIFEST_SHA`.
 
 ## 1.0.100 — A private approval prompt fails a Room turn at once
 

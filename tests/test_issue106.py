@@ -25,8 +25,13 @@ protocol = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = protocol
 spec.loader.exec_module(protocol)
 
-share_spec = importlib.util.spec_from_file_location('issue106_share_file', ROOT / 'share_file.py')
+# share_file reads its profile from a sibling module, so it loads inside a package of this checkout.
+share_package = types.ModuleType('issue106_plugin')
+share_package.__path__ = [str(ROOT)]
+sys.modules[share_package.__name__] = share_package
+share_spec = importlib.util.spec_from_file_location('issue106_plugin.share_file', ROOT / 'share_file.py')
 share_file = importlib.util.module_from_spec(share_spec)
+sys.modules[share_spec.name] = share_file
 share_spec.loader.exec_module(share_file)
 
 # Only local source and standard library. No gateway, plugins or user config.

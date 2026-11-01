@@ -107,7 +107,7 @@ cleanup() {
     fi
 }
 trap cleanup EXIT HUP INT TERM
-for file in README.md __init__.py adapter.py artcraft.py artcraft-tools.json cli.py conformance.json context.py documents.py photos.py link.py local_status.py membership.py origin_context.py install.sh plugin.yaml protocol.py recovery.py renewal.py room_tools.py share_file.py secret_isolation.py state.py; do
+for file in README.md __init__.py adapter.py artcraft.py artcraft-tools.json cli.py conformance.json context.py documents.py photos.py link.py local_status.py membership.py origin_context.py install.sh plugin.yaml profile_home.py protocol.py recovery.py renewal.py room_tools.py share_file.py secret_isolation.py state.py; do
     cp "$source_dir/$file" "$stage_dir/$file"
 done
 chmod 700 "$stage_dir" "$stage_dir/install.sh"

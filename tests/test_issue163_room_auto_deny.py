@@ -383,7 +383,10 @@ class RealCoreWaitEndsOnThePrivateDeny(unittest.TestCase):
             )
             env.update(
                 HERMES_HOME=home, HERMES_EXEC_ASK="1", PYTHONDONTWRITEBYTECODE="1",
-                PYTHONPATH=os.pathsep.join([str(core), str(Path(__file__).parent)]),
+                # The parent's own path follows: on the managed runtime the core's packages may arrive that way.
+                PYTHONPATH=os.pathsep.join(
+                    [str(core), str(Path(__file__).parent), *filter(None, os.environ.get("PYTHONPATH", "").split(os.pathsep))]
+                ),
             )
             result = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), "--probe", case],

@@ -30,6 +30,8 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .profile_home import environ as profile_environ
+
 ISOLATING_BACKENDS = frozenset({
     "docker", "singularity", "modal", "managed_modal", "daytona", "vercel_sandbox",
 })
@@ -114,7 +116,7 @@ def store_reachability(store_dir: str | os.PathLike[str], environ: Mapping[str, 
                        tool_names: Iterable[str] | None = None,
                        mcp_servers: Iterable[str] = ()) -> list[str]:
     """Reason codes for which the agent's tools can reach the store; [] if none."""
-    environ = os.environ if environ is None else environ
+    environ = profile_environ() if environ is None else environ
     names = None if tool_names is None else set(tool_names)
     reasons = _shell_route_reasons(store_dir, environ, mount_sources, names)
     # Host-side tools outside both routes (P3-7).
@@ -198,7 +200,7 @@ def store_spellings(store_dir: str | os.PathLike[str], environ: Mapping[str, str
     same path written from ~, $HOME or $HERMES_HOME. The bare directory name is
     not one: a plugin directory of the same name (~/.hermes/plugins/...) or a
     command argument naming the plugin is not the store."""
-    environ = os.environ if environ is None else environ
+    environ = profile_environ() if environ is None else environ
     paths = {str(Path(os.path.expanduser(str(store_dir)))), str(_resolved(store_dir))}
     spellings = set(paths)
     home = os.path.expanduser("~")
@@ -227,7 +229,7 @@ def _tool_base(cwd: str, environ: Mapping[str, str]) -> str:
 def tool_call_block(tool_name: str, args: Any, store_dir: str | os.PathLike[str],
                     environ: Mapping[str, str] | None = None, *, cwd: str = "") -> str | None:
     """The block message for a tool call that would reach the store, else None."""
-    environ = os.environ if environ is None else environ
+    environ = profile_environ() if environ is None else environ
     store = _resolved(store_dir)
     mapping = args if isinstance(args, Mapping) else {"value": args}
     if tool_name in SHELL_TOOLS:

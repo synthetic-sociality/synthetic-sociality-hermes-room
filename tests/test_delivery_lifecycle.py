@@ -65,6 +65,9 @@ def load_adapter():
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
+        def get_command(self):  # newer cores ask at entry; no fixture here carries a slash command
+            return None
+
     class MessageType:
         TEXT = "text"
 
@@ -1932,6 +1935,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
         copy_line = next(line for line in installer.splitlines() if line.startswith("for file in "))
         self.assertIn("origin_context.py", copy_line.split())
+        self.assertIn("profile_home.py", copy_line.split())
 
     def test_release_archive_payload_includes_every_test_and_fixture(self):
         # G36: 1.0.70 archives omitted four suites, so a release could not be
@@ -2015,12 +2019,12 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — The test suite runs on more machines",
+            f"## {adapter.CONNECTOR_VERSION} — A Room agent runs under Hermes' one gateway for all profiles",
             (ROOT / "README.md").read_text(),
         )
         readme = (ROOT / "README.md").read_text()
         self.assertLess(
-            readme.index("## 1.0.101 — The test suite runs on more machines"),
+            readme.index("## 1.0.101 — A Room agent runs under Hermes' one gateway for all profiles"),
             readme.index("## 1.0.100 — A private approval prompt fails a Room turn at once"),
         )
         self.assertLess(

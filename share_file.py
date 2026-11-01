@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 import logging
 
+from .profile_home import environ as profile_environ, process_state
+
 _DIAG = logging.getLogger('hermes_plugins.synthetic_sociality_room.share_diag')
 
 TOOL_NAME = 'synthetic_sociality_room_share_file'
@@ -44,7 +46,8 @@ def boundary(path, root, excluded):
 
 
 def configured_root(extra):
-    configured = extra.get('shareRoot') or os.environ.get('TERMINAL_CWD') or os.environ.get('MESSAGING_CWD')
+    environment = profile_environ()
+    configured = extra.get('shareRoot') or environment.get('TERMINAL_CWD') or environment.get('MESSAGING_CWD')
     if configured:
         return configured
     try:
@@ -200,19 +203,9 @@ class ShareTurn:
 
 # Bind sessions to this active run, independently of host turn-id schemes.
 
-def _process_state(name, factory):
-    """One state object per process, whatever module copy asks: a core that evicts and reloads
-    plugin modules would otherwise give the Room adapter and the share tool separate copies."""
-    import sys as _sys, types as _types
-    holder = _sys.modules.get('_synthetic_sociality_room_process_state')
-    if holder is None:
-        holder = _sys.modules.setdefault('_synthetic_sociality_room_process_state', _types.ModuleType('_synthetic_sociality_room_process_state'))
-    if not hasattr(holder, name):
-        setattr(holder, name, factory())
-    return getattr(holder, name)
 
-_ACTIVE = _process_state('share_active', dict)
-_ACTIVE_LOCK = _process_state('share_active_lock', threading.Lock)
+_ACTIVE = process_state('share_active', dict)
+_ACTIVE_LOCK = process_state('share_active_lock', threading.Lock)
 
 def _bind_session(room_id, turn, session_id):
     from .origin_context import remember_room_session

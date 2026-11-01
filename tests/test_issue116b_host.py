@@ -113,7 +113,8 @@ class Issue116bHostTests(unittest.TestCase):
         self.assertTrue((core / 'agent/tool_executor.py').is_file(), 'Select a supported core with HERMES_CORE_PATH')
         with tempfile.TemporaryDirectory() as home:
             env = dict(os.environ, HERMES_HOME=home, PYTHONDONTWRITEBYTECODE='1',
-                       PYTHONPATH=os.pathsep.join([str(core), str(Path(__file__).parent)]))
+                       PYTHONPATH=os.pathsep.join([str(core), str(Path(__file__).parent),
+                                                    *filter(None, os.environ.get('PYTHONPATH', '').split(os.pathsep))]))
             result = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--probe'],
                                     env=env, text=True, capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

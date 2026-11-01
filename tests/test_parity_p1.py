@@ -28,17 +28,29 @@ ACCEPTED_LAYERS = {"provider", "runtime", "infrastructure"}
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
 
 
+# What the core's session methods import while they run. Newer cores only; an older core has none of them.
+CORE_LATE_IMPORTS = ("gateway.session_ingress_burst",)
+
+
 def real_core_base():
     """Hermes core's real BasePlatformAdapter, loaded beside the suite's stub."""
     stubbed = {name: module for name, module in sys.modules.items() if name == "gateway" or name.startswith("gateway.")}
     for name in stubbed:
         del sys.modules[name]
+    late = {}
     try:
-        return importlib.import_module("gateway.platforms.base").BasePlatformAdapter
+        base = importlib.import_module("gateway.platforms.base").BasePlatformAdapter
+        for name in CORE_LATE_IMPORTS:
+            try:
+                late[name] = importlib.import_module(name)
+            except ModuleNotFoundError:
+                pass
+        return base
     finally:
         for name in [name for name in sys.modules if name == "gateway" or name.startswith("gateway.")]:
             del sys.modules[name]
         sys.modules.update(stubbed)
+        sys.modules.update(late)  # by full name: the stub ``gateway`` is no package to find them in
 
 
 CoreBase = real_core_base()
@@ -555,6 +567,8 @@ class ParityP1Tests(unittest.TestCase):
 
 
 
+# Newer cores only, like CORE_LATE_IMPORTS.
+CORE_LATE_METHODS = ("_shared_runtime_owns_input",)
 MISSING_CORE_SESSION_METHODS = [name for name in CORE_SESSION_METHODS if not hasattr(CoreBase, name)]
 
 
@@ -571,7 +585,7 @@ class SessionReleaseTests(unittest.TestCase):
 
     def core_instance(self, attempt, queued=(6,)):
         instance, binding, api, published, _dispatched = room_instance(attempt, queued=queued)
-        for name in CORE_SESSION_METHODS:
+        for name in (*CORE_SESSION_METHODS, *(name for name in CORE_LATE_METHODS if hasattr(CoreBase, name))):
             setattr(instance, name, types.MethodType(getattr(CoreBase, name), instance))
         instance.name = "synthetic_sociality"
         instance._message_handler = object()
