@@ -196,7 +196,12 @@ def probe(case):
     from gateway.config import GatewayConfig, PlatformConfig
     from gateway.platform_registry import PlatformEntry, platform_registry
     from gateway.platforms.base import _thread_metadata_for_source
-    from gateway.run import GatewayRunner, _format_exec_approval_fallback, _interim_metadata
+    from gateway.run import GatewayRunner, _format_exec_approval_fallback
+    try:
+        from gateway.run import _interim_metadata
+    except ImportError:  # an older supported core has no such marker; this test only uses it to send the prompt
+        def _interim_metadata(metadata=None):
+            return dict(metadata or {})
     from gateway.session import build_session_key
     from tools import approval
     try:

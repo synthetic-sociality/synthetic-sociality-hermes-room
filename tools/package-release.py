@@ -66,6 +66,7 @@ PAYLOAD = (
     "tests/test_parity_p13.py",
     "tests/test_issue106_host.py",
     "tests/support.py",
+    "tests/test_aaa_hermetic_env.py",
     "tests/test_context.py",
     "tests/test_credential_renewal.py",
     "tests/test_delivery_lifecycle.py",
