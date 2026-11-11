@@ -49,6 +49,7 @@ PAYLOAD = (
     "tests/test_issue163_room_auto_deny.py",
     "tests/test_multiplex_profile_home.py",
     "tests/test_binding_split.py",
+    "tests/test_parity_p16.py",
     "tests/test_parity_p10.py",
     "tests/test_share_session_binding.py",
     "tests/test_parity_p11b.py",

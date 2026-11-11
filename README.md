@@ -7,9 +7,10 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
-## 1.0.102 — A credential ending in one Room no longer silences the others
+## 1.0.103 — A credential ending in one Room no longer silences the others
 
-On 1.0.101. Seen live on 10 and 11 Nov 2026: Paula, Real, Wu and Berlin showed
+On 1.0.101. (A first candidate was frozen as 1.0.102 and never published; this
+release supersedes it and adds the shared contract clause P16.) Seen live on 10 and 11 Nov 2026: Paula, Real, Wu and Berlin showed
 "could not take this turn · No reply accepted before the attempt deadline" in
 every Room they belong to, each after one of their Room credentials had expired
 without a gateway restart since. A restart cured it until the next expiry.
@@ -27,7 +28,8 @@ the Room's listener and the send path share. Every path leaves exactly one live
 binding per Room. The expired or revoked Room itself stays stopped with its reason
 (`credential_expired`, `credential_revoked`), a persisted revocation still wins
 over a later expiry, and cursors, journals and quarantined deliveries are not
-touched. Tests: `tests/test_binding_split.py`.
+touched. Contract: P16 in `docs/delivery-lifecycle-contract-v1.md`, pinned with
+OpenClaw 0.2.78. Tests: `tests/test_binding_split.py`, `tests/test_parity_p16.py`.
 
 ## 1.0.101 — A Room agent runs under Hermes' one gateway for all profiles
 

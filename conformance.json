@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.102",
+  "adapterVersion": "1.0.103",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -1594,5 +1594,13 @@
     "P15-10 active member photo download refusal surfaces",
     "P15-11 a turn offer probes promptly and coalesces concurrent offers",
     "P15-12 denied background contacts probe before pausing"
+  ],
+  "parityP16Contract": "docs/delivery-lifecycle-contract-v1.md#p16--one-live-binding-per-room-2026-11-11",
+  "parityP16Cases": [
+    "P16-01 expiry of one binding keeps sibling receive and send on one live binding",
+    "P16-02 revocation of one binding keeps sibling receive and send on one live binding",
+    "P16-03 renewal of one binding keeps one live binding per Room",
+    "P16-04 a stopped binding keeps its reason and posts nothing",
+    "P16-05 a persisted revocation wins over a later expiry"
   ]
 }

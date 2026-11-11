@@ -63,7 +63,7 @@ class P15Tests(unittest.TestCase):
         conf = json.loads((ROOT/'conformance.json').read_text())
         self.assertEqual(conf['parityP15Cases'], CASES)
         self.assertEqual(conf['parityP15Contract'], 'docs/delivery-lifecycle-contract-v1.md#p15--ask-sources-and-membership-watcher-pause')
-        section = (ROOT/'docs/delivery-lifecycle-contract-v1.md').read_text().split('## P15 — Ask sources and membership watcher pause')[1]
+        section = (ROOT/'docs/delivery-lifecycle-contract-v1.md').read_text().split('## P15 — Ask sources and membership watcher pause')[1].split('\n## ')[0]
         self.assertEqual([line[2:] for line in section.splitlines() if line.startswith('- ')], CASES)
 
     def test_01(self):
