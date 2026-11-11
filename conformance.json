@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.101",
+  "adapterVersion": "1.0.102",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -23,7 +23,8 @@
     "canonicalTimestampCompatibility": "rfc3339_fractional_seconds_1_to_9_preserved_exactly",
     "blockedLifecycleReconciliation": "canonical_receipt_plus_authoritative_terminal_cycle_audited_nonreplayable_closure",
     "externalChannelRecipientRouting": "exact_active_agent_inline_mention_to_frozen_membership_selector",
-    "cycleAttemptCurrentInput": "canonical_source_message_promoted_from_history_to_current_addressed_turn"
+    "cycleAttemptCurrentInput": "canonical_source_message_promoted_from_history_to_current_addressed_turn",
+    "oneLiveBindingPerRoom": "expiry_revocation_and_renewal_change_only_their_own_room_in_place"
   },
   "priorEpochLifecycleTerminals": [
     {
@@ -71,7 +72,12 @@
     "external_channel_inline_recipient_open_v1": "test_external_channel_inline_mention_resolves_recipient_for_room_routing",
     "external_channel_inline_recipient_coordinated_v2_replay": "test_external_channel_coordinated_v2_mentions_freeze_and_replay",
     "external_channel_inline_recipient_eligibility": "test_inline_mention_routing_orders_multiple_agents_and_excludes_ineligible_members",
-    "external_channel_inline_recipient_ambiguity": "test_inline_mention_routing_ignores_ambiguous_active_display_name"
+    "external_channel_inline_recipient_ambiguity": "test_inline_mention_routing_ignores_ambiguous_active_display_name",
+    "one_live_binding_after_sibling_expiry": "test_expiry_in_one_room_keeps_sibling_send_path_on_the_listener_binding",
+    "one_live_binding_after_sibling_revocation": "test_revocation_in_one_room_keeps_sibling_send_path_on_the_listener_binding",
+    "one_live_binding_after_renewal": "test_renewal_in_one_room_keeps_one_shared_binding_per_room",
+    "renewal_keeps_a_running_listener_binding": "test_renewal_while_the_listener_runs_never_replaces_its_binding",
+    "expiry_keeps_persisted_revocation": "test_expiry_preserves_a_concurrently_persisted_revocation"
   },
   "receiptBoundaryFixtures": {
     "invalid_or_incomplete_receipt": "test_canonical_delivery_rejects_malformed_receipts_without_state_change",

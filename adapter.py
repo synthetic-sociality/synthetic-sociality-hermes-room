@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -99,7 +99,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.101"
+CONNECTOR_VERSION = "1.0.102"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -4079,11 +4079,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if latest is not None:
                     # Contract P2c-1: a renewed credential is scrubbed too.
                     secret_isolation.remember_secrets([latest])
-                    upsert(self._state, latest)
-                    if (not self._stop.is_set() and latest.enabled and not latest.revoked
-                            and not latest.credential_rotation and room_id not in self._tasks):
+                    # One live binding per Room: a listener still registered
+                    # here and the send path keep the same object.
+                    live = self._adopt_binding(latest)
+                    if (not self._stop.is_set() and live.enabled and not live.revoked
+                            and not live.credential_rotation and room_id not in self._tasks):
                         self._tasks[room_id] = asyncio.create_task(
-                            self._watch(latest, is_reconnect=True), name=f"synthetic-sociality:{room_id}",
+                            self._watch(live, is_reconnect=True), name=f"synthetic-sociality:{room_id}",
                         )
 
     def _inactive_rooms(self) -> dict[str, float]:
@@ -7798,6 +7800,33 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             raise ValueError(f"Room {room_id!r} is not configured for this Hermes profile")
         return binding
 
+    def _adopt_binding(self, latest: RoomBinding) -> RoomBinding:
+        """Apply a freshly loaded binding to this Room's one live object.
+
+        Listeners and the send path share one ``RoomBinding`` per Room. A
+        persisted change therefore updates that object in place; it never
+        swaps it, and never replaces ``self._state`` for sibling Rooms.
+        """
+        live = self._state.binding(latest.room_id)
+        if live is None:
+            self._state.bindings.append(latest)
+            return latest
+        if live is not latest:
+            for field in fields(RoomBinding):
+                setattr(live, field.name, getattr(latest, field.name))
+        return live
+
+    def _stop_live_binding(self, binding: RoomBinding, *, reason: str) -> None:
+        """Keep the send path's object stopped with its listener's object."""
+        state = getattr(self, "_state", None)
+        live = state.binding(binding.room_id) if state is not None else None
+        if live is None or live is binding or not self._same_generation(live, binding):
+            return
+        live.enabled = False
+        live.revoked = binding.revoked
+        live.disabled_reason = binding.disabled_reason or reason
+        live.connector_session_id = ""
+
     def _revoke(self, binding: RoomBinding) -> None:
         self._status_room(binding, connection="stopped", error_code="credential_revoked")
         binding.revoked = True
@@ -7813,7 +7842,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 existing.connector_session_id = ""
             return latest
 
-        self._state = update(revoke_generation)
+        # Change only this Room, in place: replacing self._state here split
+        # every sibling Room's listener from its send path (1.0.102).
+        update(revoke_generation)
+        binding.disabled_reason = "credential_revoked"
+        self._stop_live_binding(binding, reason="credential_revoked")
 
     def _expire(self, binding: RoomBinding) -> None:
         """Stop an expired binding without turning expiry into revocation."""
@@ -7832,11 +7865,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding.revoked = existing.revoked
                 if existing.enabled or existing.disabled_reason == "credential_expired":
                     existing.disabled_reason = "credential_expired"
+                binding.disabled_reason = existing.disabled_reason
                 existing.enabled = False
                 existing.connector_session_id = ""
             return latest
 
-        self._state = update(expire_generation)
+        # Change only this Room, in place: replacing self._state here split
+        # every sibling Room's listener from its send path (1.0.102).
+        update(expire_generation)
+        self._stop_live_binding(binding, reason="credential_expired")
 
 
 def _restore_escaped_json_layout(candidate: str) -> str:

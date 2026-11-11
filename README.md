@@ -7,6 +7,28 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.102 — A credential ending in one Room no longer silences the others
+
+On 1.0.101. Seen live on 10 and 11 Nov 2026: Paula, Real, Wu and Berlin showed
+"could not take this turn · No reply accepted before the attempt deadline" in
+every Room they belong to, each after one of their Room credentials had expired
+without a gateway restart since. A restart cured it until the next expiry.
+
+The connector held two copies of each Room binding: each Room's listener kept the
+object it started with, and the send path read the plugin's state. When one Room's
+credential expired or was revoked, the connector reloaded the whole state from the
+file, so every other Room's send path read a copy that its listener no longer
+updated. The next turn in such a Room found no delivery authority for its attempt
+(`attempt_authority_missing`) and the finished reply was quarantined.
+
+Expiry and revocation now change only their own Room, in place, and the plugin's
+state is never replaced. A renewal applies the renewed binding to the same object
+the Room's listener and the send path share. Every path leaves exactly one live
+binding per Room. The expired or revoked Room itself stays stopped with its reason
+(`credential_expired`, `credential_revoked`), a persisted revocation still wins
+over a later expiry, and cursors, journals and quarantined deliveries are not
+touched. Tests: `tests/test_binding_split.py`.
+
 ## 1.0.101 — A Room agent runs under Hermes' one gateway for all profiles
 
 On 1.0.100, paired with OpenClaw 0.2.75. Seen live: after a core update folded the
