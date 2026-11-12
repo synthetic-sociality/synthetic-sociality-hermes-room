@@ -1159,3 +1159,126 @@ class ConnectorControlR2Tests(ConnectorControlFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConnectorControlR3Tests(ConnectorControlFixture):
+    """OP-12 R2 residual of B-F001: a served profile whose adapter exists in the
+    gateway process but is disconnected or never joined is restarted with the
+    process, so it belongs to the guard, the inventory, the receipts and the
+    declaration. Committed equivalents of review-r2/probe-hermes/tests/
+    test_zz_op12_r2_probe.py (reviewer evidence, not edited)."""
+
+    second_profile = ConnectorControlR2Tests.second_profile
+    DEBT = {"state": "prepared", "delivery_state": "not_started", "lifecycle_state": "not_started"}
+
+    async def _p2_with_debt(self, *, register: bool, leave: bool, debt: bool = True):
+        other, other_path = await self.second_profile(register=register)
+        if debt:
+            data = json.loads(other_path.read_text())
+            for binding in data["bindings"]:
+                if binding.get("room_id") == ROOM_E:
+                    binding.setdefault("delivery_intents", {})["evt-probe"] = dict(self.DEBT)
+            other_path.write_text(json.dumps(data))
+        if leave:
+            other._control_leave()
+        return other, other_path
+
+    async def _assert_refused(self, actions=("restart", "reconnect")):
+        for action in actions:
+            with self.subTest(action=action):
+                command = _command(action)
+                self.deliver(ROOM_A, command)
+                await self.settle()
+                self.assertEqual(self.room.phases(command["commandId"]), [("refused", "work_in_progress")])
+        self.assertEqual(self.requests, [])
+        self.assert_listeners_untouched()
+
+    # Reviewer probe cases (a), (b), (c), restart and reconnect -------------
+    async def test_bf001_r2_probe_a_joined_profile_with_disabled_debt_refuses(self):
+        await self._p2_with_debt(register=True, leave=False)
+        await self._assert_refused()
+
+    async def test_bf001_r2_probe_b_disconnected_profile_with_disabled_debt_refuses(self):
+        await self._p2_with_debt(register=True, leave=True)
+        await self._assert_refused()
+
+    async def test_bf001_r2_probe_c_never_joined_profile_with_disabled_debt_refuses(self):
+        await self._p2_with_debt(register=False, leave=False)
+        await self._assert_refused()
+
+    async def test_bf001_profile_disconnected_by_the_core_with_disabled_debt_refuses_both_actions(self):
+        other, other_path = await self._p2_with_debt(register=True, leave=False)
+        await other.disconnect()  # the real path: the adapter leaves the live registry
+        before = other_path.read_bytes()
+        await self._assert_refused()
+        self.assertEqual(other_path.read_bytes(), before, "control never writes the member's state")
+        self.assertEqual(other._tasks, {}, "a disconnected profile is never started by control")
+
+    # Inventory, receipts and declaration include non-joined profiles -------
+    async def test_bf001_restart_inventory_and_receipts_include_a_disconnected_profile(self):
+        other, other_path = await self._p2_with_debt(register=True, leave=False, debt=False)
+        await other.disconnect()
+        drained_before = list(self.room.disconnects)
+        seen = []
+        self.instance._restart_requester = lambda: seen.append((self.receipt(), self.receipt(other_path)))
+        command = _command("restart")
+        self.deliver(ROOM_A, command)
+        await self.settle()
+        self.assertEqual(self.room.phases(command["commandId"]), [("restarting", "")])
+        self.assertEqual(len(seen), 1)
+        for receipt in seen[0]:
+            self.assertIsNotNone(receipt, "every member profile's status.json holds the receipt before the request")
+            self.assertEqual(receipt["before"]["counts"], {"bindings": 5, "enabled": 3, "disabled": 2})
+            self.assertEqual(sorted(item["membershipId"] for item in receipt["before"]["bindings"]),
+                             ["member-a", "member-b", "member-c", "member-d", "member-e"])
+            self.assertIn(str(other_path), receipt["stateFiles"])
+            self.assert_no_secret(receipt)
+        # Only joined adapters are drained; the disconnected profile is not touched again.
+        self.assertEqual(sorted(self.room.disconnects[len(drained_before):]), [ROOM_A, ROOM_B])
+
+    async def test_bf001_never_joined_profile_is_in_inventory_receipt_and_declaration(self):
+        other, other_path = await self._p2_with_debt(register=False, leave=False, debt=False)
+        binding = self.instance._binding(ROOM_A)
+        granted = {**ANSWER, "sessionId": f"session-{ROOM_A}", "capabilities": [CAPABILITY]}
+        self.instance._note_connected(binding, granted, registered=True)
+        await self.settle()
+        _room, _session, declaration = self.room.declarations[-1]
+        self.assertEqual(sorted(declaration["memberships"]), ["member-a", "member-b", "member-c", "member-d"])
+        self.assertEqual(sorted(declaration["origins"], key=lambda item: item["origin"]), [
+            {"origin": "https://other.example:8443", "bindings": 1, "enabled": 0},
+            {"origin": "https://room.example", "bindings": 4, "enabled": 3},
+        ])
+        seen = []
+        self.instance._restart_requester = lambda: seen.append(self.receipt(other_path))
+        command = _command("restart")
+        self.deliver(ROOM_A, command)
+        await self.settle()
+        self.assertEqual(self.room.phases(command["commandId"]), [("restarting", "")])
+        self.assertEqual(seen[0]["before"]["counts"], {"bindings": 5, "enabled": 3, "disabled": 2})
+
+    async def test_bf001_reconnect_keeps_joined_listeners_and_never_starts_a_disconnected_profile(self):
+        other, other_path = await self._p2_with_debt(register=True, leave=False, debt=False)
+        await other.disconnect()
+        command = _command("reconnect")
+        self.deliver(ROOM_A, command)
+        await self.settle()
+        reports = [report for _room, cid, report in self.room.reports if cid == command["commandId"]]
+        self.assertEqual([report["phase"] for report in reports], ["reconnecting", "completed"])
+        member_counts = {"bindings": 5, "enabled": 3, "disabled": 2}
+        self.assertEqual(reports[-1]["inventory"], {"before": member_counts, "after": member_counts, "match": True})
+        self.assertEqual(sorted(self.watched), [ROOM_A, ROOM_B], "joined listeners started again, once each")
+        self.assertEqual(other._tasks, {}, "the disconnected profile stays as it was")
+        self.assertNotIn(ROOM_D, self.watched)
+        self.assertEqual(self.receipt(other_path)["phase"], "reported")
+
+    async def test_bf001_unreadable_never_joined_profile_state_refuses_with_connector_scope_unknown(self):
+        _other, other_path = await self._p2_with_debt(register=False, leave=False, debt=False)
+        other_path.write_text("{not json")
+        for action in ("reconnect", "restart"):
+            with self.subTest(action=action):
+                command = _command(action)
+                self.deliver(ROOM_A, command)
+                await self.settle()
+                self.assertEqual(self.room.phases(command["commandId"]), [("refused", "connector_scope_unknown")])
+        self.assertEqual(self.requests, [])
+        self.assert_listeners_untouched()
