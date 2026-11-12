@@ -148,5 +148,25 @@ class StaleBindingAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(watched, [])
 
 
+class StaleBindingAdoptionRaceTests(StaleBindingAdoptionTests):
+    async def test_a_binding_that_became_active_in_the_state_file_is_kept(self):
+        """The in-memory copy looks stale, the stored binding is active: the state transaction keeps it."""
+        existing = self.stored()
+        original = adapter.SyntheticSocialityAdapter._accept_connector_enrollments
+
+        async def stale_in_memory(instance, source):
+            live = instance._state.binding("room-2")
+            live.enabled, live.revoked = False, True
+            return await original(instance, source)
+
+        adapter.SyntheticSocialityAdapter._accept_connector_enrollments = stale_in_memory
+        try:
+            _instance, path, _live, watched, _cancelled, before = await self.claim(existing)
+        finally:
+            adapter.SyntheticSocialityAdapter._accept_connector_enrollments = original
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(watched, [])
+
+
 if __name__ == "__main__":
     unittest.main()

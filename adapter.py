@@ -1683,6 +1683,20 @@ def env_enablement() -> dict[str, Any] | None:
     return {} if validate_config(None) else None
 
 
+def _stale_inert_binding(binding: RoomBinding) -> bool:
+    """Owner 2026-11-12: a binding a re-admission may replace.
+
+    Stale: revoked or disabled. Inert: it holds no delivery intent, delivery
+    lifecycle, quarantined or pending inbox entry, recovery closure or
+    credential rotation, so replacing it loses no evidence. An active binding,
+    or a stale one that holds evidence, is never replaced automatically.
+    """
+    if binding.enabled and not binding.revoked:
+        return False
+    return not (binding.delivery_intents or binding.delivery_lifecycle or binding.recovery_closures
+                or binding.credential_rotation or binding.pending_since or binding.inbox)
+
+
 class SyntheticSocialityAdapter(BasePlatformAdapter):
     # Contract P1-1 (revised), same values as OpenClaw 0.2.58: one re-claim
     # answers within 4 s; a transient failure is retried every 5 s while the
@@ -4731,7 +4745,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             code="connector_enrollment_malformed",
                             retryable=False,
                         )
-                    if self._state.binding(room_id) is not None:
+                    existing = self._state.binding(room_id)
+                    if existing is not None and not _stale_inert_binding(existing):
                         logger.warning("Room %s was already bound while its enrollment was claimed", room_id)
                         continue
                     binding = RoomBinding(
@@ -4747,11 +4762,34 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         acknowledged_cursor=head_seq,
                         transport=source.transport,
                     )
-                    # Persist the one-time credential before exposing the
-                    # binding to any runtime task. update() uses the
-                    # profile-private 0600 atomic state transaction.
-                    update(lambda current, binding=binding: upsert(current, binding))
-                    self._state.bindings.append(binding)
+                    if existing is not None:
+                        # Owner 2026-11-12: the Room re-admitted this membership.
+                        # Replace only a stale, inert binding: stop and await any
+                        # leftover listener, swap it in the state transaction only
+                        # if the stored binding is still stale and inert, then
+                        # adopt into the one live object (contract P16).
+                        await self._stop_room_tasks(room_id)
+
+                        def replace(current, binding=binding, room_id=room_id):
+                            stored = current.binding(room_id)
+                            if stored is None or not _stale_inert_binding(stored):
+                                raise StateUnchanged(False)
+                            upsert(current, binding)
+
+                        try:
+                            update(replace)
+                        except StateUnchanged:
+                            logger.warning("Room %s changed while its re-admission was claimed; kept as stored", room_id)
+                            continue
+                        secret_isolation.remember_secrets([binding])
+                        binding = self._adopt_binding(binding)
+                        logger.info("Replaced the stale binding of re-admitted Room %s", room_id)
+                    else:
+                        # Persist the one-time credential before exposing the
+                        # binding to any runtime task. update() uses the
+                        # profile-private 0600 atomic state transaction.
+                        update(lambda current, binding=binding: upsert(current, binding))
+                        self._state.bindings.append(binding)
                     if not self._stop.is_set() and room_id not in self._tasks:
                         self._tasks[room_id] = asyncio.create_task(
                             self._watch(binding, is_reconnect=False),
@@ -4767,6 +4805,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         invitation_id,
                         error,
                     )
+
+    async def _stop_room_tasks(self, room_id: str) -> None:
+        """Cancel and await one Room's listener, heartbeat and enrollment tasks (a stale binding being replaced)."""
+        tasks = [task for task in (getattr(self, "_tasks", {}).get(room_id), getattr(self, "_heartbeat_tasks", {}).get(room_id),
+                                   getattr(self, "_enrollment_tasks", {}).get(room_id)) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for registry in ("_tasks", "_heartbeat_tasks", "_enrollment_tasks"):
+            getattr(self, registry, {}).pop(room_id, None)
 
     async def _stream_once(self, binding: RoomBinding) -> None:
         loop = asyncio.get_running_loop()
