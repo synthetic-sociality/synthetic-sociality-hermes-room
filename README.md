@@ -52,8 +52,10 @@ never send it and nothing changes for them.
   with the receipt and reports `completed` or `inventory_mismatch` once; a
   receipt never causes a second restart, and only a new gateway process (a new
   incarnation) completes it. A requested restart the core accepts but never
-  carries out leaves the Rooms disconnected and the receipt `restart_overdue`
-  after 600 s, with nothing reported.
+  carries out leaves the Rooms disconnected and the receipt `restart_overdue`,
+  with nothing reported, after the restart window: core's
+  `restart_after_turn_timeout` (default 1800 s) plus 300 s, which the
+  `restarting` report also hands the Room as `restartWithinSeconds`.
 - Control never edits cursors, journals, quarantined deliveries, recovery fences
   or credentials. No persisted state migration; `plugin.yaml` changes only its
   version line. Contract: P17 in `docs/delivery-lifecycle-contract-v1.md`.

@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -150,7 +151,12 @@ _connected_rooms: set[str] = set()
 INSTALLATION_FILE = "installation.json"
 INSTALLATION_ID_PATTERN = re.compile(r"^hermes-inst-[0-9a-f]{32}$")
 CONTROL_RECONNECT_WAIT_SECONDS = 90.0
-CONTROL_RESTART_OVERDUE_SECONDS = 600.0
+# R2-8b: the restarting window is core's restart_after_turn_timeout (default
+# 1800 s) plus this margin for the drain and the new process's start; a value
+# here overrides the window (tests only).
+CORE_RESTART_AFTER_TURN_DEFAULT_SECONDS = 1800.0
+RESTART_WINDOW_MARGIN_SECONDS = 300
+CONTROL_RESTART_OVERDUE_SECONDS: float | None = None
 CONTROL_PROCESS_MODULE = "_synthetic_sociality_room_connector_control"
 CONTROL_ACTIONS = frozenset({"reconnect", "restart"})
 CONTROL_STATES = frozenset({"requested", "claimed", "reconnecting", "restarting"})
@@ -192,6 +198,36 @@ def host_store_directory() -> Any:
     configured = os.environ.get("HERMES_HOME", "").strip()
     home = Path(configured).expanduser() if configured else Path.home() / ".hermes"
     return home / "synthetic-sociality-room"
+
+
+def restart_within_seconds() -> int:
+    """Contract R2-8b: how long the accepted gateway restart may take, in seconds.
+
+    The effective core ``restart_after_turn_timeout`` (as core's loader reads
+    it: ``HERMES_RESTART_AFTER_TURN_TIMEOUT`` when set, else ``agent.
+    restart_after_turn_timeout`` of the process host home's ``config.yaml``)
+    plus 300 s. Read only; no core startup code is imported. Unreadable or
+    invalid: the core default of 1800 s. Bounded to the wire range 60..86400.
+    """
+    timeout = CORE_RESTART_AFTER_TURN_DEFAULT_SECONDS
+    try:
+        raw: Any = os.environ.get("HERMES_RESTART_AFTER_TURN_TIMEOUT")
+        if raw is None or not str(raw).strip():
+            raw = None
+            config = host_store_directory().parent / "config.yaml"
+            if config.is_file() and not config.is_symlink():
+                import yaml
+
+                data = yaml.safe_load(config.read_text(encoding="utf-8"))
+                agent = data.get("agent") if isinstance(data, dict) else None
+                raw = agent.get("restart_after_turn_timeout") if isinstance(agent, dict) else None
+        if raw is not None and not isinstance(raw, bool) and str(raw).strip() != "":
+            value = float(raw)
+            if math.isfinite(value) and value >= 0:
+                timeout = value
+    except Exception:  # noqa: BLE001 - unreadable config: the core default
+        timeout = CORE_RESTART_AFTER_TURN_DEFAULT_SECONDS
+    return int(min(max(math.ceil(timeout) + RESTART_WINDOW_MARGIN_SECONDS, 60), 86400))
 
 
 def binding_origin(base_url: str) -> str:
@@ -8447,8 +8483,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             logger.warning("Room connector restart unavailable: no supervisor relaunches this gateway")
             await self._report_control(binding, command_id, {"phase": "failed", "code": "supervisor_unavailable"})
             return True
-        await self._report_control(binding, command_id, {"phase": "restarting"})
-        receipt = self._control_receipt(command, "restarting", before, adapters)
+        within = restart_within_seconds()
+        await self._report_control(binding, command_id, {"phase": "restarting", "restartWithinSeconds": within})
+        receipt = {**self._control_receipt(command, "restarting", before, adapters), "restartWithinSeconds": within}
         if not self._write_receipts(adapters, receipt):
             await self._report_control(binding, command_id, {"phase": "failed", "code": "receipt_unavailable"})
             return True
@@ -8477,10 +8514,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     async def _mark_restart_overdue(self, receipt: dict[str, Any], adapters: list["SyntheticSocialityAdapter"]) -> None:
         """Contract R2-8: no report, no restore; recovery is an operator action."""
-        await asyncio.sleep(float(CONTROL_RESTART_OVERDUE_SECONDS))
+        window = CONTROL_RESTART_OVERDUE_SECONDS
+        window = float(receipt.get("restartWithinSeconds") or 0) if window is None else float(window)
+        await self._restart_overdue_sleep(window or float(restart_within_seconds()))
         logger.error("Room connector: the gateway did not restart within %ss after the request (%s); "
-                     "Rooms stay disconnected", CONTROL_RESTART_OVERDUE_SECONDS, receipt["commandId"])
+                     "Rooms stay disconnected", window, receipt["commandId"])
         self._write_receipts(adapters, {**receipt, "phase": "restart_overdue", "overdueAt": local_status._now()})
+
+    @staticmethod
+    async def _restart_overdue_sleep(seconds: float) -> None:
+        await asyncio.sleep(seconds)
 
     async def _restore_after_failed_restart(self) -> dict[str, int]:
         self._stop.clear()

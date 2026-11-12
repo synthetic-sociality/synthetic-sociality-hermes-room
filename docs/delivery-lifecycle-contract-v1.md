@@ -1583,10 +1583,15 @@ command and delivers it to the installation's live controllable sessions
   `supervisor_unavailable`, then the connector reconnects to restore service.
   Once the request was accepted the fence, the receipt and the disconnect stay
   until the process ends; a connect of the same incarnation starts no Room.
-  Hermes: when the gateway has not restarted after the server's restarting
-  window (600 s) the receipt is marked `restart_overdue`; nothing is reported
-  and nothing restored (the server shows `did_not_come_back`, recovery is an
-  operator action).
+  The `restarting` report carries `restartWithinSeconds` (integer 60..86400),
+  the host's own wait plus a 300 s margin (Hermes: core's effective
+  `restart_after_turn_timeout`, read only from the process host home's config or
+  `HERMES_RESTART_AFTER_TURN_TIMEOUT`, core default 1800 s when unreadable;
+  OpenClaw: `gateway.reload.deferralTimeoutMs / 1000`, default 300 s); the
+  server's restarting deadline is that value clamped to 600..7200 s.
+  Hermes: when the gateway has not restarted within the same window the receipt
+  is marked `restart_overdue`; nothing is reported and nothing restored (the
+  server shows `did_not_come_back`, recovery is an operator action).
 - P17-7 After a restart. Only a new incarnation completes a restart: an
   adapter of the incarnation in the receipt (a re-created adapter, a reconnect
   watcher, a re-attached profile) never reports and never resumes the drained
@@ -1603,7 +1608,8 @@ command and delivers it to the installation's live controllable sessions
 The receipt is an optional top-level key of the P2c-4 local status file,
 present only once a command was taken up (readers ignore unknown keys):
 `connectorControl` = `{commandId, action, phase, code, requestedAt, startedAt,
-reportedAt, overdueAt, pid, incarnation, stateFiles, before: {counts, bindings},
+reportedAt, overdueAt, pid, incarnation, stateFiles, restartWithinSeconds,
+before: {counts, bindings},
 after: {counts}}` with `phase` `reconnecting` or `restarting`, then `reported`
 (or `restart_overdue`). It holds codes, identifiers, counts, times, the paths
 of the process's state files and the P17-4 inventory only.
