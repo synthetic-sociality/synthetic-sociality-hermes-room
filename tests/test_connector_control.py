@@ -1116,6 +1116,46 @@ class ConnectorControlR2Tests(ConnectorControlFixture):
         self.assertEqual(instance._tasks, {})
         self.assertTrue(instance._control_fenced(), "the fence stays held")
 
+    async def test_bf008_restart_window_follows_the_core_after_turn_timeout(self):
+        # R2-8b: core restart_after_turn_timeout (default 1800 s) + 300 s, read
+        # read-only from the host home's config; the overdue mark uses it too.
+        config = self.host_home / "config.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        cases = (("configured", "agent:\n  restart_after_turn_timeout: 600\n", 900),
+                 ("unreadable", "agent: [unclosed\n  : :\n", 2100),
+                 ("absent", None, 2100))
+        for label, text, expected in cases:
+            with self.subTest(config=label):
+                self.new_process()
+                if text is None:
+                    config.unlink(missing_ok=True)
+                else:
+                    config.write_text(text)
+                self.room.reports.clear()
+                instance = self._adapter()
+                instance._restart_requester = lambda: None
+                slept: list[float] = []
+
+                async def overdue_sleep(seconds, slept=slept):
+                    slept.append(seconds)
+
+                instance._restart_overdue_sleep = overdue_sleep
+                command = _command("restart")
+                environment = {key: value for key, value in os.environ.items()
+                               if key != "HERMES_RESTART_AFTER_TURN_TIMEOUT"}
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch.object(adapter, "CONTROL_RESTART_OVERDUE_SECONDS", None, create=True):
+                    self.deliver(ROOM_A, command, instance=instance)
+                    await self.settle(instance)
+                    deadline = time.monotonic() + 5
+                    while (self.receipt() or {}).get("phase") != "restart_overdue" and time.monotonic() < deadline:
+                        await asyncio.sleep(0.02)
+                reports = [report for _room, cid, report in self.room.reports if cid == command["commandId"]]
+                self.assertEqual([report["phase"] for report in reports], ["restarting"])
+                self.assertEqual(reports[0].get("restartWithinSeconds"), expected)
+                self.assertEqual(slept, [expected])
+                self.assertEqual(self.receipt()["phase"], "restart_overdue")
+
 
 if __name__ == "__main__":
     unittest.main()
