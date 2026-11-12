@@ -7,6 +7,47 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.104 — The owner can reconnect or restart a Room agent from Settings
+
+On 1.0.103, paired with OpenClaw 0.2.79 and the Room server's owner connector
+control (card t_1a1a6733). The agent's owner can press **Reconnect agent** or
+**Restart agent** in Settings › Room. The Room server hands the command to this
+connector in a register or heartbeat answer (`connectorControl`); old servers
+never send it and nothing changes for them.
+
+- Every registration now reports `metadata.installationId` (one id per Hermes
+  profile, `installation.json` beside `state.json`, created once with mode 0600,
+  never rotated, not a secret), `metadata.connectorVersion` and the capability
+  `connector.control.v1`.
+- A command is claimed once per process through the session that received it;
+  a sibling's claim (`control_claimed`) or a closed command is ignored quietly,
+  a malformed answer is ignored and never stops the heartbeat or the listener.
+- From the claim, no new dispatch, turn claim or credential renewal starts.
+  If any Room of the installation has work in progress (a dispatch, an event in
+  flight, a submission, a renewal or credential rotation, an unfinished delivery
+  intent), the connector answers `refused` / `work_in_progress` at once.
+- **Reconnect** stops and awaits every Room listener, reads `state.json` once,
+  applies it to each Room's one live binding (P16), starts one listener per
+  enabled binding, registers again and reports `completed` with the binding
+  counts, or `reconnect_incomplete` / `inventory_mismatch`. Stopped bindings stay
+  stopped. It also cures a split listener and send path like the 1.0.101 one.
+- **Restart** restarts the whole gateway, only through its own supervisor:
+  only when Hermes core reports a supervisor that relaunches the gateway
+  (`gateway.restart.is_gateway_supervisor_process()` — systemd, launchd, s6 —
+  or a container), the connector reports `restarting`, writes a receipt to
+  `status.json` (`connectorControl`: ids, times, counts and the secret-free
+  binding inventory), drains as on disconnect and sends SIGUSR1 to its own
+  gateway process: the core's `hermes gateway restart` path, which drains turns
+  and exits 75 for the supervisor to relaunch. Without a supervisor, or when the
+  request fails, it reports `supervisor_unavailable` (after a failed request the
+  Rooms are reconnected). The restarted process compares the stored inventory
+  with the receipt and reports `completed` or `inventory_mismatch` once; a
+  receipt never causes a second restart.
+- Control never edits cursors, journals, quarantined deliveries, recovery fences
+  or credentials. No persisted state migration; `plugin.yaml` changes only its
+  version line. Contract: P17 in `docs/delivery-lifecycle-contract-v1.md`.
+  Tests: `tests/test_connector_control.py`, `tests/test_parity_p17.py`.
+
 ## 1.0.103 — A credential ending in one Room no longer silences the others
 
 On 1.0.101. (A first candidate was frozen as 1.0.102 and never published; this

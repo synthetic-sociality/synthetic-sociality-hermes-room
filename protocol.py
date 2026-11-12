@@ -24,6 +24,8 @@ class MultipartBody:
 
 MAX_JSON_RESPONSE_BYTES = 16 << 20
 MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY = "messages.logical_contribution.v1"
+# Contract P17-1: the connector accepts owner connector control commands.
+CONNECTOR_CONTROL_CAPABILITY = "connector.control.v1"
 MESSAGE_PAYLOAD_DIALECTS = frozenset({"v1", "v2"})
 # Contract P2c-3a: the reconnect schedule, identical in OpenClaw
 # (conformance.json parityP7aReconnectSchedule).
@@ -359,10 +361,25 @@ class RoomProtocol:
             "contractVersion": 1,
             "capabilities": [
                 "events.sse", "events.long_poll", "activity.relay",
-                MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY,
+                MESSAGE_LOGICAL_CONTRIBUTION_CAPABILITY, CONNECTOR_CONTROL_CAPABILITY,
             ],
             "metadata": metadata,
         })
+
+    def claim_connector_control(self, room_id: str, session_id: str, command_id: str) -> dict[str, Any]:
+        """Contract P17-2: claim an owner control command through this session."""
+        return self.request("POST", self._control_path(room_id, session_id, command_id, "claim"), {})
+
+    def report_connector_control(
+        self, room_id: str, session_id: str, command_id: str, report: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Contract P17-2: report a control phase ({phase, code?, inventory?})."""
+        return self.request("POST", self._control_path(room_id, session_id, command_id, "report"), report)
+
+    @staticmethod
+    def _control_path(room_id: str, session_id: str, command_id: str, verb: str) -> str:
+        room, session, command = (urllib.parse.quote(value, safe="") for value in (room_id, session_id, command_id))
+        return f"/rooms/{room}/connector/sessions/{session}/control/{command}/{verb}"
 
     def heartbeat(self, room_id: str, session_id: str) -> dict[str, Any]:
         room, session = urllib.parse.quote(room_id, safe=""), urllib.parse.quote(session_id, safe="")

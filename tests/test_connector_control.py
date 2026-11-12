@@ -15,8 +15,11 @@ signals the test process, a gateway or any Hermes process.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
+import importlib.util
+import logging
 import json
 import os
 import signal
@@ -41,16 +44,56 @@ ANSWER = {"leaseExpiresAt": "2099-01-01T00:00:00Z", "heartbeatIntervalSeconds": 
 COUNTS = {"bindings": 3, "enabled": 2, "disabled": 1}
 SECRETS = ("credential-room-a", "credential-room-b", "credential-room-c")
 
+# The exact Hermes core this plugin runs in (~/.hermes/hermes-agent). Importing
+# gateway.run would run hermes_bootstrap (a dependency sync for the data root),
+# so the two signal functions are taken verbatim from their files and executed
+# alone; gateway/restart.py is loaded from its file.
+CORE = Path(importlib.util.find_spec("hermes_cli").origin).resolve().parents[1]
+
+
+def core_function(relative: str, name: str) -> str:
+    source = (CORE / relative).read_text(encoding="utf-8")
+    node = next(item for item in ast.parse(source).body if isinstance(item, ast.FunctionDef) and item.name == name)
+    return ast.get_source_segment(source, node)
+
+
+def core_restart_module():
+    spec = importlib.util.spec_from_file_location("p17_core_gateway_restart", CORE / "gateway" / "restart.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def core_restart_handler_factory():
+    namespace = {"logger": logging.getLogger("p17.core.gateway.run")}
+    exec(core_function("gateway/run.py", "_start_gateway_make_restart_signal_handler"), namespace)  # noqa: S102
+    return namespace["_start_gateway_make_restart_signal_handler"]
+
+
+# A simulated supervised gateway: a child process installs its signal handlers
+# with the core's own installer (gateway/run_bootstrap.py) and restart handler
+# (gateway/run.py); a fake runner records what request_restart was asked.
 SUPERVISOR = textwrap.dedent("""
-    import pathlib, signal, sys, time
+    import asyncio, json, logging, pathlib, sys, threading
     record, ready = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-    def restart(_signum, _frame):
-        record.write_text("SIGUSR1\\n")
-        sys.exit(0)
-    signal.signal(signal.SIGUSR1, restart)
+    namespace = {"logger": logging.getLogger("core"), "threading": threading}
+    for source in json.loads(sys.argv[3]):
+        exec(source, namespace)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    class Runner:
+        def request_restart(self, **kwargs):
+            record.write_text(json.dumps(kwargs, sort_keys=True))
+            loop.stop()
+
+    namespace["_start_gateway_install_signal_handlers"](
+        loop, lambda *_args: loop.stop(), namespace["_start_gateway_make_restart_signal_handler"](Runner()))
     ready.write_text("ready")
-    time.sleep(60)
+    loop.call_later(60, loop.stop)
+    loop.run_forever()
 """)
+RESTART_REQUEST = {"detached": False, "via_service": True}
 
 
 def _command(action: str, *, state: str = "requested", command_id: str = "") -> dict:
@@ -73,6 +116,7 @@ class FakeRoom:
         self.reports: list[tuple[str, str, dict]] = []
         self.disconnects: list[str] = []
         self.attempt_claims: list[str] = []
+        self.attempt_answers: dict[str, dict] = {}
         self.claim_errors: dict[str, BaseException] = {}
         self.posted: list[tuple[str, str]] = []
         self.during_report = None
@@ -114,7 +158,7 @@ class FakeRoom:
             # The send path of tests/test_binding_split.py.
             def claim_discussion_attempt(self, _room, cycle_id):
                 room.attempt_claims.append(cycle_id)
-                return None
+                return room.attempt_answers.get(cycle_id)
 
             def room_state(self, _room):
                 return {"headSeq": 5, "activeEpoch": {"id": "epoch-1", "startsAtSeq": 1}}
@@ -190,6 +234,8 @@ class ConnectorControlFixture(unittest.IsolatedAsyncioTestCase):
         instance._call = call
         instance._watch = watch
         instance._restart_requester = requester
+        # A supervised gateway (systemd/launchd) unless a test says otherwise.
+        instance._restart_supervised = lambda: True
         instance._message_contract_checked.update({ROOM_A, ROOM_B, ROOM_C})
         self.addAsyncCleanup(self._stop_adapter, instance)
         return instance
@@ -579,6 +625,7 @@ class ConnectorControlTests(ConnectorControlFixture):
         listener.delivery_authority[adapter._attempt_authority_key(listener, SOURCE, attempt)] = \
             adapter._attempt_authority_record(listener, SOURCE, attempt)
         instance._cycle_attempts = {SOURCE: attempt}
+        self.room.attempt_answers["cycle-b"] = attempt
         result = await instance.send(ROOM_B, "reply in room-b",
                                      reply_to=adapter._dispatch_source_ref(SOURCE, "g-b"), metadata={"notify": True})
         self.assertTrue(result.success, getattr(result, "error", None))
@@ -591,7 +638,12 @@ class ConnectorControlTests(ConnectorControlFixture):
         """A simulated supervisor: a child process that records SIGUSR1."""
         directory = Path(self._directory.name)
         record, ready = directory / "supervisor-record.txt", directory / "supervisor-ready.txt"
-        child = subprocess.Popen([sys.executable, "-I", "-c", SUPERVISOR, str(record), str(ready)])
+        sources = json.dumps([
+            core_function("gateway/run.py", "_start_gateway_make_restart_signal_handler"),
+            core_function("gateway/run_bootstrap.py", "_start_gateway_install_signal_handlers"),
+        ])
+        child = subprocess.Popen([sys.executable, "-I", "-c", SUPERVISOR, str(record), str(ready), sources],
+                                 cwd=self._directory.name, env={"PATH": os.environ.get("PATH", "")})
 
         def stop():
             if child.poll() is None:
@@ -613,7 +665,7 @@ class ConnectorControlTests(ConnectorControlFixture):
         while not record.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         child.wait(15)
-        return record.read_text() if record.exists() else ""
+        return json.loads(record.read_text()) if record.exists() else None
 
     async def test_restart_persists_the_receipt_before_the_simulated_supervisor_is_asked(self):
         instance = self.instance
@@ -645,9 +697,46 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assertEqual(seen[0]["listeners"], {}, "a clean drain precedes the supervisor request")
         self.assertEqual(sorted(self.room.disconnects), [ROOM_A, ROOM_B])
         self.assertEqual(stat.S_IMODE((self.path.parent / "status.json").stat().st_mode), 0o600)
-        self.assertEqual(self._wait_for_record(child, record), "SIGUSR1\n")
+        self.assertEqual(self._wait_for_record(child, record), RESTART_REQUEST)
         self.assertEqual(self.watched, {}, "no listener restarts while the supervisor restarts the gateway")
         self.assertEqual(self.path.read_bytes(), state_before)
+
+    async def test_core_maps_sigusr1_to_the_supervised_drain_aware_gateway_restart(self):
+        # Pins the exact Hermes core: SIGUSR1 is its `hermes gateway restart`
+        # path, request_restart(detached=False, via_service=True), which exits
+        # 75 after the drain so the supervisor relaunches the gateway.
+        gateway_restart = core_restart_module()
+        _start_gateway_make_restart_signal_handler = core_restart_handler_factory()
+
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def request_restart(self, **kwargs):
+                self.calls.append(kwargs)
+
+        runner = Runner()
+        _start_gateway_make_restart_signal_handler(runner)()
+        self.assertEqual(runner.calls, [RESTART_REQUEST])
+        self.assertEqual(gateway_restart.GATEWAY_SERVICE_RESTART_EXIT_CODE, 75)
+        supervised = gateway_restart.is_gateway_supervisor_process
+        self.assertTrue(supervised({"XPC_SERVICE_NAME": "ai.hermes.gateway"}))
+        self.assertTrue(supervised({"HERMES_LAUNCHD_LABEL": "ai.hermes.gateway"}))
+        self.assertTrue(supervised({"INVOCATION_ID": "0123456789abcdef"}))
+        self.assertFalse(supervised({"PATH": "/usr/bin", "HOME": "/tmp/home", "XPC_SERVICE_NAME": "0"}))
+        # The plugin's pre-check is that same core decision.
+        modules = mock.patch.dict(sys.modules, {"gateway.restart": gateway_restart})
+        modules.start()
+        self.addCleanup(modules.stop)
+        with mock.patch.object(gateway_restart, "is_gateway_supervisor_process", return_value=True), \
+                mock.patch.object(gateway_restart, "is_container_restart_context", return_value=False):
+            self.assertTrue(adapter.gateway_restart_supervised())
+        with mock.patch.object(gateway_restart, "is_gateway_supervisor_process", return_value=False), \
+                mock.patch.object(gateway_restart, "is_container_restart_context", return_value=True):
+            self.assertTrue(adapter.gateway_restart_supervised())
+        with mock.patch.object(gateway_restart, "is_gateway_supervisor_process", return_value=False), \
+                mock.patch.object(gateway_restart, "is_container_restart_context", return_value=False):
+            self.assertFalse(adapter.gateway_restart_supervised())
 
     async def test_default_requester_signals_only_its_own_gateway_process(self):
         # The default asks the gateway it runs in (SIGUSR1 to os.getpid()). Here
@@ -656,7 +745,7 @@ class ConnectorControlTests(ConnectorControlFixture):
         with mock.patch("os.getpid", return_value=child.pid), \
                 mock.patch("signal.getsignal", return_value=lambda *_args: None):
             adapter.request_gateway_restart()
-        self.assertEqual(self._wait_for_record(child, record), "SIGUSR1\n")
+        self.assertEqual(self._wait_for_record(child, record), RESTART_REQUEST)
         # Without the gateway's SIGUSR1 handler (the default action would end
         # the process), it refuses and sends nothing.
         with mock.patch("os.kill") as kill, mock.patch("signal.getsignal", return_value=signal.SIG_DFL):
@@ -683,6 +772,28 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assertNotIn(ROOM_C, instance._tasks)
         receipt = self.receipt()
         self.assertEqual((receipt["phase"], receipt.get("code")), ("reported", "supervisor_unavailable"))
+
+    async def test_unsupervised_gateway_reports_supervisor_unavailable_without_drain_or_signal(self):
+        instance = self.instance
+        instance._restart_supervised = adapter.gateway_restart_supervised
+        gateway_restart = core_restart_module()
+        modules = mock.patch.dict(sys.modules, {"gateway.restart": gateway_restart})
+        modules.start()
+        self.addCleanup(modules.stop)
+
+        command = _command("restart")
+        with mock.patch.object(gateway_restart, "is_gateway_supervisor_process", return_value=False), \
+                mock.patch.object(gateway_restart, "is_container_restart_context", return_value=False), \
+                mock.patch("os.kill") as kill:
+            self.deliver(ROOM_A, command)
+            await self.settle()
+        kill.assert_not_called()
+        self.assertEqual(self.room.phases(command["commandId"]), [("failed", "supervisor_unavailable")])
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.room.disconnects, [])
+        self.assertIsNone(self.receipt())
+        self.assert_listeners_untouched()
+        self.assertFalse(instance._stop.is_set())
 
     # P17-12 ---------------------------------------------------------------
     async def _restart_then_new_process(self, between=None):

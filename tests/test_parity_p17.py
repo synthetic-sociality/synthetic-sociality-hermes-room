@@ -40,8 +40,10 @@ CASE_TESTS = {
                "test_reconnect_reports_incomplete_when_a_binding_does_not_register_again"],
     "P17-09": ["test_reconnect_cures_the_split_and_a_sibling_turn_is_accepted"],
     "P17-10": ["test_restart_persists_the_receipt_before_the_simulated_supervisor_is_asked",
-               "test_default_requester_signals_only_its_own_gateway_process"],
-    "P17-11": ["test_requester_failure_reports_supervisor_unavailable_and_restores_listeners"],
+               "test_default_requester_signals_only_its_own_gateway_process",
+               "test_core_maps_sigusr1_to_the_supervised_drain_aware_gateway_restart"],
+    "P17-11": ["test_requester_failure_reports_supervisor_unavailable_and_restores_listeners",
+               "test_unsupervised_gateway_reports_supervisor_unavailable_without_drain_or_signal"],
     "P17-12": ["test_post_restart_reports_completion_once_and_never_restarts_again",
                "test_post_restart_reports_an_inventory_mismatch"],
 }

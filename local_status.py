@@ -91,6 +91,11 @@ class LocalStatus:
         # Room's own connection state under that mark (P2c-4).
         self._inactive: set[str] = set()
         self._connection: dict[str, str] = {}
+        # Contract P17-6/P17-7: an owner control receipt survives the process
+        # that wrote it, so the restarted process can report and never repeat.
+        receipt = _prior_connector_control(self.path)
+        if receipt is not None:
+            self._data["connectorControl"] = receipt
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -232,6 +237,22 @@ class LocalStatus:
             return  # a deferred time alone never creates the directory again
         self.write()
 
+    def connector_control(self) -> dict[str, Any] | None:
+        """Contract P17: the owner control receipt, or None."""
+        with self._lock:
+            receipt = self._data.get("connectorControl")
+            return json.loads(json.dumps(receipt)) if isinstance(receipt, dict) else None
+
+    def set_connector_control(self, receipt: dict[str, Any]) -> bool:
+        """Contract P17-6: store the owner control receipt and write it at once.
+
+        Codes, identifiers, counts, times and the non-secret binding inventory
+        only; True when the file was written.
+        """
+        with self._lock:
+            self._data["connectorControl"] = json.loads(json.dumps(receipt))
+        return self.write()
+
     LINK_STATES = frozenset({"not_linked", "pending", "connecting", "connected", "reconnecting", "stopped"})
 
     def set_link(self, link: dict[str, Any]) -> None:
@@ -295,6 +316,19 @@ class LocalStatus:
             return False
         self._failed = False
         return True
+
+
+def _prior_connector_control(path: Path) -> dict[str, Any] | None:
+    """The receipt a previous process left in ``status.json``, or None."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        receipt = json.loads(path.read_text(encoding="utf-8")).get("connectorControl")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("commandId"), str):
+        return None
+    return receipt
 
 
 def read(path: Path) -> dict[str, Any]:
