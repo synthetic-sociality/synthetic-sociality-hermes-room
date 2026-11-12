@@ -97,6 +97,7 @@ PAYLOAD = (
     "tests/test_reply_marker.py",
     "tests/test_room_history_tool.py",
     "tests/test_stale_dispatch_recovery.py",
+    "tests/test_stale_binding_adoption.py",
     # Shipped so the extracted archive can verify its own payload (G36).
     "tools/package-release.py",
 )
