@@ -37,7 +37,7 @@ class StaleBindingAdoptionTests(unittest.IsolatedAsyncioTestCase):
         values.update(fields)
         return adapter.RoomBinding("https://room.example/api", "room-2", "member-2", "credential-old", **values)
 
-    async def claim(self, existing, *, running_listener=False):
+    async def claim(self, existing, *, running_listener=False, listing=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "state.json"
@@ -51,6 +51,8 @@ class StaleBindingAdoptionTests(unittest.IsolatedAsyncioTestCase):
         instance._enrollment_lock = asyncio.Lock()
         instance._state_file = path
         watched, cancelled = [], []
+        self.claims = []
+        listed = [{"invitationId": "invite-9", "roomId": "room-2"}] if listing is None else listing
         if running_listener:
             async def old_listener():
                 try:
@@ -63,9 +65,10 @@ class StaleBindingAdoptionTests(unittest.IsolatedAsyncioTestCase):
         async def call(_binding, operation, **_request_options):
             class Protocol:
                 def connector_enrollments(self, _installation_id):
-                    return [{"invitationId": "invite-9"}]
+                    return [dict(item) for item in listed]
 
-                def claim_connector_enrollment(self, _invitation_id, _installation_id):
+                def claim_connector_enrollment(protocol, invitation_id, _installation_id):
+                    self.claims.append(invitation_id)
                     return dict(CLAIM)
             return operation(Protocol())
 
@@ -146,6 +149,53 @@ class StaleBindingAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(path.read_bytes(), before, "cursor, journal and quarantine stay as stored")
                 self.assertEqual(instance._state.binding("room-2").credential, "credential-old")
                 self.assertEqual(watched, [])
+
+
+class EligibilityBeforeClaimTests(StaleBindingAdoptionTests):
+    """OP-12 R5 B-F009/B-F010: an already bound Room is checked before the claim, so an ineligible binding never
+    consumes the invitation (the server membership stays removed and the old binding stays as stored)."""
+
+    async def assert_not_claimed(self, existing, **kwargs):
+        instance, path, live, watched, _cancelled, before = await self.claim(existing, **kwargs)
+        self.assertEqual(self.claims, [], "the enrollment must not be claimed")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertIs(instance._state.binding("room-2"), live)
+        self.assertEqual(watched, [])
+
+    async def test_bf009_a_stale_binding_holding_debt_is_never_claimed(self):
+        intent = {"state": "prepared", "delivery_state": "not_started", "lifecycle_state": "not_started"}
+        await self.assert_not_claimed(self.stored(enabled=False, revoked=True, disabled_reason="credential_revoked",
+                                                  delivery_intents={"evt-9": intent}))
+
+    async def test_bf009_an_active_binding_is_never_claimed(self):
+        await self.assert_not_claimed(self.stored())
+
+    async def test_bf009_a_listing_without_a_valid_room_id_is_never_claimed(self):
+        for listing in ([{"invitationId": "invite-9"}], [{"invitationId": "invite-9", "roomId": ""}],
+                        [{"invitationId": "invite-9", "roomId": 7}]):
+            with self.subTest(listing=listing):
+                await self.assert_not_claimed(self.stored(enabled=False, revoked=True,
+                                                          disabled_reason="credential_revoked"), listing=listing)
+
+    async def test_bf010_a_manually_disabled_binding_is_never_claimed_nor_enabled(self):
+        await self.assert_not_claimed(self.stored(enabled=False, disabled_reason="manual"))
+
+    async def test_bf010_failed_or_received_inbox_entries_are_evidence(self):
+        for inbox in ({"9": "failed"}, {"9": "received"}, {"9": "quarantined"}):
+            with self.subTest(inbox=inbox):
+                await self.assert_not_claimed(self.stored(enabled=False, revoked=True,
+                                                          disabled_reason="credential_revoked", inbox=inbox))
+
+    async def test_bf010_a_settled_inbox_and_an_expired_credential_still_adopt(self):
+        for fields in (dict(enabled=False, revoked=True, disabled_reason="credential_revoked", inbox={"9": "posted"}),
+                       dict(enabled=False, disabled_reason="credential_expired"),
+                       dict(credential_expires_at="2026-01-01T00:00:00Z")):
+            with self.subTest(fields=fields):
+                instance, path, live, watched, _cancelled, _before = await self.claim(self.stored(**fields))
+                self.assertEqual(self.claims, ["invite-9"])
+                self.assertEqual(state_store.load(path).binding("room-2").credential, "credential-fresh")
+                self.assertIs(instance._state.binding("room-2"), live)
+                self.assertEqual(len(watched), 1, "exactly one listener")
 
 
 class StaleBindingAdoptionRaceTests(StaleBindingAdoptionTests):
