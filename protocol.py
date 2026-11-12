@@ -376,6 +376,11 @@ class RoomProtocol:
         """Contract P17-2: report a control phase ({phase, code?, inventory?})."""
         return self.request("POST", self._control_path(room_id, session_id, command_id, "report"), report)
 
+    def declare_installation(self, room_id: str, session_id: str, declaration: dict[str, Any]) -> dict[str, Any]:
+        """Contract R2-3: declare this process's installation through this session."""
+        room, session = urllib.parse.quote(room_id, safe=""), urllib.parse.quote(session_id, safe="")
+        return self.request("PUT", f"/rooms/{room}/connector/sessions/{session}/installation", declaration)
+
     @staticmethod
     def _control_path(room_id: str, session_id: str, command_id: str, verb: str) -> str:
         room, session, command = (urllib.parse.quote(value, safe="") for value in (room_id, session_id, command_id))

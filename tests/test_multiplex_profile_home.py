@@ -266,6 +266,10 @@ def probe_gateway(root, report):
 
     asyncio.run(main())
     report["host_store_exists"] = (Path(root) / STORE).exists()
+    # R2-1 (OP-12 B-F001): the gateway process's installation id lives in the
+    # host home; a served profile's state and status never do.
+    report["host_store_files"] = sorted(path.name for path in (Path(root) / STORE).iterdir()) \
+        if (Path(root) / STORE).is_dir() else []
     report["core_has_terminal_scopes"] = "tools.terminal_scope" in sys.modules
 
 
@@ -350,7 +354,7 @@ class PluginServesItsOwnProfile(unittest.TestCase):
             ("/api/rooms/roomsecond00000/connector/sessions", "fake-second"),
         })
         self.assertEqual(report["status_written"], {"berlin": True, "second": True, "unbound": False})
-        self.assertIs(report["host_store_exists"], False)
+        self.assertEqual(report["host_store_files"], ["installation.json"])
 
     def test_a_served_profile_reads_its_own_terminal_policy_not_the_hosts(self):
         _root, report = self.run_probe("gateway")

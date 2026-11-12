@@ -1501,14 +1501,29 @@ or to restart the agent's gateway (the whole installation) from the Harness
 command and delivers it to the installation's live controllable sessions
 (Plugin B wire contract v1, card t_1a1a6733). A connector:
 
-- P17-1 Installation identity and registration metadata. One installation id
-  per installation, in `installation.json` (`{"installationId":
-  "hermes-inst-<32 hex>"|"openclaw-inst-<32 hex>"}`) in the connector's state
-  directory (Hermes: next to `state.json`; OpenClaw: next to `status.json`),
-  created once by exclusive create with mode 0600, never rotated by control, not
-  a secret. Every registration reports it as `metadata.installationId`, the
-  plugin version as `metadata.connectorVersion`, and requests the capability
-  `connector.control.v1`.
+- P17-1 Installation identity and registration metadata. The installation is
+  the gateway process (R2). One installation id per installation, in
+  `installation.json` (`{"installationId": "hermes-inst-<32 hex>"|
+  "openclaw-inst-<32 hex>"}`), created once by exclusive create with mode 0600,
+  never rotated by control, not a secret. Hermes keeps it in the process host
+  home (`<HERMES_HOME of the process environment, else ~/.hermes>/
+  synthetic-sociality-room/installation.json`), so under
+  `gateway.multiplex_profiles` every served profile's plugin copy reports the
+  same id; OpenClaw keeps it next to `status.json`. Process-wide control state
+  (the live adapters, the fence, the command ids taken up, the incarnation and
+  the restart receipt owner) is shared by every plugin copy of the process
+  (Hermes: one holder in `sys.modules` without a per-home key; OpenClaw:
+  `globalThis`). Every registration reports the id as `metadata.installationId`,
+  the plugin version as `metadata.connectorVersion`, and requests the capability
+  `connector.control.v1`. After a registration whose answer grants that
+  capability the connector declares the installation through that session
+  (`PUT /rooms/{roomId}/connector/sessions/{sessionId}/installation`,
+  `{installationId, incarnation, memberships, origins}`): the incarnation is one
+  opaque token per plugin load in a process; `memberships` lists every stored
+  binding of the process (every profile, disabled included) whose base-URL
+  origin equals this binding's; `origins` counts every stored binding per
+  scheme://host[:port]. It declares again on every such registration; 404, 409
+  and old-server answers are not fatal.
 - P17-2 Delivery and claim. A command arrives as `connectorControl`
   (`{commandId, action: reconnect|restart, state, requestedAt, expiresAt}`) in a
   register or heartbeat answer. The connector dedupes by `commandId` per process
@@ -1522,23 +1537,30 @@ command and delivers it to the installation's live controllable sessions
   control never runs a shell string.
 - P17-3 Fence and installation-wide guard. From the claim until the action
   finishes or is refused, no new dispatch starts, no new turn attempt is claimed
-  and no credential renewal starts; events stay durable and are processed when
-  the fence lifts. Then, in the same step, the guard over every binding of the
-  installation: any active dispatch, event in flight, submission, attempt
-  renewal, pending or non-quiescent renewal (renewing Room,
-  `credential_rotation`, renewal journal) or unfinished delivery intent (not
-  plain quarantined or terminal) makes the connector report `refused` /
-  `work_in_progress` at once and lift the fence, without waiting.
-- P17-4 Inventory. The stored binding inventory is read from the state file
-  and never written by control: per binding the Room id, membership id, base
+  and no credential renewal starts anywhere in the process; events stay durable
+  and are processed when the fence lifts. Then, in the same step, the guard over
+  every stored binding of the process (every profile; enabled, disabled,
+  revoked-but-stored, running or not): any active dispatch, event in flight,
+  submission, attempt renewal, pending or non-quiescent renewal (renewing Room,
+  `credential_rotation`, renewal journal) or unfinished delivery intent or
+  delivery lifecycle (not plain quarantined or terminal) makes the connector
+  report `refused` / `work_in_progress` at once and lift the fence, without
+  waiting. No owner waiver exists for disabled bindings: an installation whose
+  disabled binding holds fail-closed unfinished intents refuses both controls
+  until that debt is resolved under its own procedure. When the process-wide
+  scope cannot be established (a served profile's state cannot be read, no
+  process-global holder) the connector reports `refused` /
+  `connector_scope_unknown`.
+- P17-4 Inventory. The stored binding inventory is read from every state file
+  of the process (every served profile) and never written by control: per binding the Room id, membership id, base
   URL, client instance id, identity version, enabled, disabled reason, revoked,
   cursor, acknowledged cursor, delivery-intent keys and states, inbox and
   pending counts and quarantined seqs. No credential, credential hash or secret.
   Counts are `{bindings, enabled, disabled}`; two inventories are equal when
   every field of every binding, enabled and disabled, is equal.
 - P17-5 Reconnect. Report `reconnecting`; stop and await every Room listener,
-  heartbeat and enrollment task (other channels untouched); reload the state
-  file once; apply each loaded binding to the existing live object (one live
+  heartbeat and enrollment task of every adapter of the process (other channels
+  untouched); reload each state file once; apply each loaded binding to the existing live object (one live
   object per Room, P16); start exactly one listener per enabled binding;
   disabled bindings stay disabled; force re-registration; compare the
   inventory; lift the fence; when every enabled binding registered again within
@@ -1551,16 +1573,27 @@ command and delivers it to the installation's live controllable sessions
   `failed` / `supervisor_unavailable` and drain nothing. Otherwise report
   `restarting`; persist the receipt in `status.json` key `connectorControl`
   (`{commandId, action, phase: "restarting", requestedAt, startedAt, pid,
-  before: {counts, bindings}}`) before asking the supervisor; drain cleanly as on
-  disconnect with the fence held; ask through the supported lifecycle only
+  incarnation, stateFiles, before: {counts, bindings}}`; Hermes writes it into
+  every served profile's `status.json`) before asking the supervisor; drain
+  every Room of the process cleanly as on disconnect with the fence held; ask through the supported lifecycle only
   (Hermes: SIGUSR1 to its own gateway process, the core's drain-aware
   `hermes gateway restart` path, `request_restart(detached=False,
   via_service=True)`, exit 75; OpenClaw: `openclaw gateway restart --safe` with
   fixed argv). A failed request is reported `failed` /
   `supervisor_unavailable`, then the connector reconnects to restore service.
-- P17-7 After a restart. The new process reads the receipt and computes the
-  after inventory from the state file before any listener starts. On the first
-  authenticated registration of a snapshot binding it reports `completed`
+  Once the request was accepted the fence, the receipt and the disconnect stay
+  until the process ends; a connect of the same incarnation starts no Room.
+  Hermes: when the gateway has not restarted after the server's restarting
+  window (600 s) the receipt is marked `restart_overdue`; nothing is reported
+  and nothing restored (the server shows `did_not_come_back`, recovery is an
+  operator action).
+- P17-7 After a restart. Only a new incarnation completes a restart: an
+  adapter of the incarnation in the receipt (a re-created adapter, a reconnect
+  watcher, a re-attached profile) never reports and never resumes the drained
+  Rooms. The new process reads the receipt (from any served profile's
+  `status.json`) and computes the after inventory from the recorded state files
+  before its first listener starts. On the first authenticated registration of a
+  snapshot binding, in any profile, it reports `completed`
   (inventories equal) or `failed` / `inventory_mismatch`, with counts, and marks
   the receipt `reported`; a repeated or closed answer marks it reported too. A
   receipt never causes a second restart.
@@ -1570,9 +1603,10 @@ command and delivers it to the installation's live controllable sessions
 The receipt is an optional top-level key of the P2c-4 local status file,
 present only once a command was taken up (readers ignore unknown keys):
 `connectorControl` = `{commandId, action, phase, code, requestedAt, startedAt,
-reportedAt, pid, before: {counts, bindings}, after: {counts}}` with `phase`
-`reconnecting` or `restarting`, then `reported`. It holds codes, identifiers,
-counts, times and the P17-4 inventory only.
+reportedAt, overdueAt, pid, incarnation, stateFiles, before: {counts, bindings},
+after: {counts}}` with `phase` `reconnecting` or `restarting`, then `reported`
+(or `restart_overdue`). It holds codes, identifiers, counts, times, the paths
+of the process's state files and the P17-4 inventory only.
 
 First released as Hermes 1.0.104/OpenClaw 0.2.79. No persisted state migration
 (`installation.json` and the status key are new files and keys).

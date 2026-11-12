@@ -15,17 +15,25 @@ control (card t_1a1a6733). The agent's owner can press **Reconnect agent** or
 connector in a register or heartbeat answer (`connectorControl`); old servers
 never send it and nothing changes for them.
 
-- Every registration now reports `metadata.installationId` (one id per Hermes
-  profile, `installation.json` beside `state.json`, created once with mode 0600,
-  never rotated, not a secret), `metadata.connectorVersion` and the capability
-  `connector.control.v1`.
+- Every registration now reports `metadata.installationId`, `metadata.connectorVersion`
+  and the capability `connector.control.v1`. The installation is the gateway
+  process: one id in the process host home
+  (`<HERMES_HOME, else ~/.hermes>/synthetic-sociality-room/installation.json`,
+  created once with mode 0600, never rotated, not a secret), the same for every
+  profile one multiplexed gateway serves. Guard, fence, inventory, reconnect and
+  restart cover every served profile of the process; when one profile's state
+  cannot be read, control refuses with `connector_scope_unknown`. A Room that
+  grants the capability receives the installation's declaration (installation id,
+  incarnation, the memberships at its origin, per-origin counts) after each
+  registration.
 - A command is claimed once per process through the session that received it;
   a sibling's claim (`control_claimed`) or a closed command is ignored quietly,
   a malformed answer is ignored and never stops the heartbeat or the listener.
 - From the claim, no new dispatch, turn claim or credential renewal starts.
   If any Room of the installation has work in progress (a dispatch, an event in
   flight, a submission, a renewal or credential rotation, an unfinished delivery
-  intent), the connector answers `refused` / `work_in_progress` at once.
+  intent, disabled bindings included), the connector answers `refused` /
+  `work_in_progress` at once.
 - **Reconnect** stops and awaits every Room listener, reads `state.json` once,
   applies it to each Room's one live binding (P16), starts one listener per
   enabled binding, registers again and reports `completed` with the binding
@@ -42,7 +50,10 @@ never send it and nothing changes for them.
   request fails, it reports `supervisor_unavailable` (after a failed request the
   Rooms are reconnected). The restarted process compares the stored inventory
   with the receipt and reports `completed` or `inventory_mismatch` once; a
-  receipt never causes a second restart.
+  receipt never causes a second restart, and only a new gateway process (a new
+  incarnation) completes it. A requested restart the core accepts but never
+  carries out leaves the Rooms disconnected and the receipt `restart_overdue`
+  after 600 s, with nothing reported.
 - Control never edits cursors, journals, quarantined deliveries, recovery fences
   or credentials. No persisted state migration; `plugin.yaml` changes only its
   version line. Contract: P17 in `docs/delivery-lifecycle-contract-v1.md`.

@@ -11,11 +11,15 @@ import logging
 import os
 import platform
 import re
+import secrets
 import signal
 import sys
 import tempfile
 import time
+import types
+import urllib.parse
 import uuid
+import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, fields
@@ -78,6 +82,7 @@ from .room_tools import (
     room_history,
     room_post,
 )
+from .state import assert_state_directory
 from .state import (
     KEPT_REPLY_CHARACTER_LIMIT, MISSED_SOURCE_LIMIT, kept_reply_bound, PluginState, RoomBinding, StateUnchanged,
     file_identity, load, load_cached, state_path, state_root, update, upsert,
@@ -137,17 +142,69 @@ IDLE_ACTIVITY_FRAME_SECONDS = 20.0
 # once per process.
 _SECRET_REFUSAL_LOGGED: set[bool] = set()
 _connected_rooms: set[str] = set()
-# Contract P17 (owner connector control): the installation identity file next
-# to state.json, how long a reconnect waits for every enabled binding to
-# register again, and the commands this process has taken up (dedupe by
-# commandId across every binding and adapter of the process).
+# Contract P17 (owner connector control, R2): the installation is the gateway
+# process. Its identity file lives in the process host home; how long a
+# reconnect waits for every enabled binding to register again; how long an
+# accepted restart may take before its receipt is marked overdue (R2-8: the
+# server's restarting window).
 INSTALLATION_FILE = "installation.json"
 INSTALLATION_ID_PATTERN = re.compile(r"^hermes-inst-[0-9a-f]{32}$")
 CONTROL_RECONNECT_WAIT_SECONDS = 90.0
+CONTROL_RESTART_OVERDUE_SECONDS = 600.0
+CONTROL_PROCESS_MODULE = "_synthetic_sociality_room_connector_control"
 CONTROL_ACTIONS = frozenset({"reconnect", "restart"})
 CONTROL_STATES = frozenset({"requested", "claimed", "reconnecting", "restarting"})
 _CONTROL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_CONTROL_COMMANDS_SEEN: set[str] = set()
+
+
+def control_process() -> types.ModuleType:
+    """Contract R2-1: the process-global owner control state of this gateway.
+
+    One holder in ``sys.modules`` without a per-home key, so every plugin copy
+    (one per served profile under ``gateway.multiplex_profiles``) shares it: the
+    registry of live adapters (weak references), the fence, the command ids
+    taken up, the incarnation token and the restart receipt owner.
+    """
+    holder = sys.modules.get(CONTROL_PROCESS_MODULE)
+    if holder is None:
+        holder = sys.modules.setdefault(CONTROL_PROCESS_MODULE, types.ModuleType(CONTROL_PROCESS_MODULE))
+    if getattr(holder, "schema", None) != 1:
+        holder.adapters = weakref.WeakSet()  # live: connected or registered with a Room
+        holder.members = weakref.WeakSet()  # every adapter of this process (the fence covers them)
+        holder.fenced = None  # the command id holding the fence
+        holder.seen = set()  # command ids taken up by this process
+        # R2-3/R2-7: one opaque token per plugin load in a process.
+        holder.incarnation = f"hermes-{os.getpid()}-{secrets.token_hex(12)}"
+        holder.installation_id = ""
+        holder.restarting = None  # the command whose SIGUSR1 the core accepted
+        holder.pending = None  # a previous incarnation's restart receipt to report
+        holder.after = None
+        holder.reported = set()
+        holder.reporting = False
+        holder.schema = 1
+    return holder
+
+
+def host_store_directory() -> Any:
+    """Contract R2-1: ``<process HERMES_HOME, else ~/.hermes>/synthetic-sociality-room``."""
+    from pathlib import Path
+
+    configured = os.environ.get("HERMES_HOME", "").strip()
+    home = Path(configured).expanduser() if configured else Path.home() / ".hermes"
+    return home / "synthetic-sociality-room"
+
+
+def binding_origin(base_url: str) -> str:
+    """scheme://host[:port] of a Room base URL; never a path, query or user info."""
+    try:
+        parts = urllib.parse.urlsplit(str(base_url or ""))
+        host, port = parts.hostname or "", parts.port
+    except ValueError:
+        return ""
+    if not parts.scheme or not host:
+        return ""
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme.lower()}://{host.lower()}" + (f":{port}" if port else "")
 
 
 def installation_identity(directory: Any) -> str:
@@ -198,7 +255,7 @@ def connector_control_inventory(state: PluginState) -> dict[str, Any]:
     one, a renewal journal or a message body.
     """
     bindings = []
-    for binding in sorted(state.bindings, key=lambda item: item.room_id):
+    for binding in sorted(state.bindings, key=lambda item: (item.room_id, item.membership_id)):
         intents = {
             str(key): "/".join(str(intent.get(name, "")) for name in ("state", "delivery_state", "lifecycle_state"))
             for key, intent in sorted(binding.delivery_intents.items()) if isinstance(intent, dict)
@@ -1682,28 +1739,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._state_file.parent / "status.json",
             plugin="hermes", version=CONNECTOR_VERSION, host_label=self._host_label,
         )
-        # Contract P17 (owner connector control). The fence is open while set;
-        # control tasks are kept here (never inline in a heartbeat, which a
-        # reconnect cancels); the restart requester is injectable.
+        # Contract P17 (owner connector control). The fence is process-wide
+        # (R2-1); this adapter's event mirrors it. Control tasks are kept here
+        # (never inline in a heartbeat, which a reconnect cancels); the
+        # restart requester and the supervisor check are injectable.
         self._control_open = asyncio.Event()
         self._control_open.set()
         self._control_tasks: set[asyncio.Task] = set()
-        self._control_reporting = False
+        self._control_watchdog: asyncio.Task | None = None
         self._restart_requester: Callable[[], None] = request_gateway_restart
         self._restart_supervised: Callable[[], bool] = gateway_restart_supervised
-        self._installation_id = ""
-        # Contract P17-7: a restart receipt left by the previous process. Its
-        # command never runs again; the after inventory is the stored state
-        # as loaded now, before any listener starts.
-        self._control_pending_report: dict[str, Any] | None = None
-        self._control_after: dict[str, Any] | None = None
-        receipt = self._status.connector_control()
-        if receipt is not None:
-            _CONTROL_COMMANDS_SEEN.add(str(receipt.get("commandId")))
-            if receipt.get("action") == "restart" and receipt.get("phase") == "restarting" \
-                    and isinstance(receipt.get("before"), dict):
-                self._control_pending_report = receipt
-                self._control_after = connector_control_inventory(self._state)
+        self._control_adopt_receipt()
 
     def _fail_closed_on_request(self, binding: RoomBinding, error: RequestNotFormed) -> None:
         """Contract P2c-3a, P7c: the runtime refused to form a request; the loop
@@ -1796,6 +1842,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 secret_isolation.REFUSAL_CODE, ",".join(reasons),
             )
         secret_isolation.remember_secrets(self._state.bindings)
+        self._control_join()
+        holder = self._control_holder()
+        if holder is not None and holder.restarting is not None:
+            # Contract R2-7/R2-8: the gateway is restarting for an owner command;
+            # a connect of this incarnation never resumes the drained Rooms.
+            logger.warning("Room connector not started: the gateway restart for an owner request is under way")
+            return True
         self._stop.clear()
         if any(renewal.eligible(binding) for binding in self._state.bindings):
             if self._renewal_task is None or self._renewal_task.done():
@@ -1841,6 +1894,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._stop.set()
+        self._control_leave()
         link_task = getattr(self, "_link_task", None)
         if link_task is not None:
             link_task.cancel()
@@ -7996,23 +8050,126 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
     # Contract P17: owner connector control ------------------------------
 
-    def _installation_identity(self) -> str:
-        if not getattr(self, "_installation_id", ""):
+    @staticmethod
+    def _control_holder() -> types.ModuleType | None:
+        try:
+            return control_process()
+        except Exception:  # noqa: BLE001 - no process-wide scope: control refuses
+            return None
+
+    def _control_adopt_receipt(self) -> None:
+        """Contract P17-7, R2-7: this process's view of a receipt in our status.json.
+
+        A command in a receipt never runs again. A restart receipt written by
+        another incarnation is reported once by this process; the after
+        inventory is read from every recorded state file now, before the first
+        listener of this process starts. A receipt of this incarnation (a
+        re-created adapter, a reconnect watcher) never completes it.
+        """
+        holder = self._control_holder()
+        if holder is None:
+            return
+        holder.members.add(self)
+        if holder.fenced is not None:
+            self._control_open.clear()
+        receipt = self._status.connector_control()
+        if receipt is None:
+            return
+        command_id = str(receipt.get("commandId"))
+        holder.seen.add(command_id)
+        if not (receipt.get("action") == "restart" and receipt.get("phase") == "restarting"
+                and isinstance(receipt.get("before"), dict)):
+            return
+        if receipt.get("incarnation") == holder.incarnation:
+            return
+        if command_id in holder.reported:
+            self._write_control_receipt(self._reported_receipt(receipt, holder))
+            return
+        if holder.pending is None:
+            holder.pending = receipt
+            holder.after = self._control_after_inventory(receipt)
+
+    def _control_after_inventory(self, receipt: dict[str, Any]) -> dict[str, Any] | None:
+        from pathlib import Path
+
+        files = receipt.get("stateFiles")
+        if not isinstance(files, list) or not files:
+            files = [str(self._state_file)]
+        bindings: list[RoomBinding] = []
+        for name in dict.fromkeys(str(item) for item in files):
             try:
-                target = getattr(self, "_state_file", None) or state_path()
-                self._installation_id = installation_identity(target.parent)
-            except Exception:  # noqa: BLE001 - no identity: not controllable, Room work goes on
-                self._installation_id = ""
-        return self._installation_id
+                bindings.extend(load(Path(name)).bindings)
+            except Exception:  # noqa: BLE001 - an unreadable state: no equal inventory
+                return None
+        return connector_control_inventory(PluginState(bindings=bindings))
+
+    def _control_join(self) -> None:
+        holder = self._control_holder()
+        if holder is None:
+            return
+        holder.adapters.add(self)
+        holder.members.add(self)
+        if holder.fenced is not None:
+            self._control_open.clear()
+
+    def _control_leave(self) -> None:
+        holder = self._control_holder()
+        if holder is not None:
+            holder.adapters.discard(self)
+
+    def _control_adapters(self) -> list["SyntheticSocialityAdapter"]:
+        holder = self._control_holder()
+        adapters = [self]
+        if holder is not None:
+            adapters.extend(item for item in list(holder.adapters) if item is not self)
+        return adapters
+
+    @staticmethod
+    def _control_stored(adapters: list["SyntheticSocialityAdapter"], *, fresh: bool) -> list[PluginState] | None:
+        """Contract P17-4, R2-1: every adapter's stored state, once per state file; None when one is unreadable."""
+        states: dict[str, PluginState] = {}
+        for item in adapters:
+            path = getattr(item, "_state_file", None)
+            if path is None:
+                return None
+            key = os.path.realpath(str(path))
+            if key in states:
+                continue
+            try:
+                states[key] = load(path) if fresh else load_cached(path)
+            except Exception:  # noqa: BLE001
+                return None
+        return list(states.values())
+
+    @staticmethod
+    def _merged_inventory(states: list[PluginState]) -> dict[str, Any]:
+        return connector_control_inventory(PluginState(bindings=[b for state in states for b in state.bindings]))
+
+    def _installation_identity(self) -> str:
+        """Contract R2-1: one id per gateway process, in the process host home."""
+        holder = self._control_holder()
+        if holder is not None and holder.installation_id:
+            return holder.installation_id
+        try:
+            directory = host_store_directory()
+            if not directory.is_dir():
+                assert_state_directory(directory)
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            value = installation_identity(directory)
+        except Exception:  # noqa: BLE001 - no identity: not controllable, Room work goes on
+            value = ""
+        if holder is not None and value:
+            holder.installation_id = value
+        return value
 
     def _control_fenced(self) -> bool:
-        gate = getattr(self, "_control_open", None)
-        return gate is not None and not gate.is_set()
+        holder = self._control_holder()
+        return holder is not None and holder.fenced is not None
 
     async def _control_fence_lifted(self) -> None:
-        gate = getattr(self, "_control_open", None)
-        if gate is not None and not gate.is_set():
-            await gate.wait()
+        while self._control_fenced():
+            self._control_open.clear()
+            await self._control_open.wait()
 
     def _keep_control_task(self, work: Any) -> None:
         tasks = getattr(self, "_control_tasks", None)
@@ -8028,32 +8185,86 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
 
         task.add_done_callback(completed)
 
+    def _close_control_fence(self, command_id: str) -> None:
+        holder = self._control_holder()
+        holder.fenced = command_id
+        for item in list(holder.members):
+            item._control_open.clear()
+
     def _lift_control_fence(self) -> None:
-        """Contract P17-3: lift the fence; durable queued work proceeds."""
-        gate = getattr(self, "_control_open", None)
-        if gate is None or gate.is_set():
+        """Contract P17-3: lift the process-wide fence; durable queued work proceeds.
+
+        Never after an accepted restart (R2-8): that fence ends with the process.
+        """
+        holder = self._control_holder()
+        if holder is None or holder.fenced is None or holder.restarting is not None:
             return
-        gate.set()
-        for room_id, queued in list((getattr(self, "_queued_events", None) or {}).items()):
-            live = self._state.binding(room_id)
-            if queued and live is not None:
-                self._keep_control_task(self._dispatch_next_queued(live))
+        holder.fenced = None
+        for item in list(holder.members):
+            item._control_open.set()
+            for room_id, queued in list((getattr(item, "_queued_events", None) or {}).items()):
+                live = item._state.binding(room_id)
+                if queued and live is not None:
+                    item._keep_control_task(item._dispatch_next_queued(live))
 
     def _observe_connector_control(self, binding: RoomBinding, evidence: dict[str, Any], *,
                                    registered: bool = False) -> None:
-        """Contract P17-2/P17-7: act on a register or heartbeat answer."""
-        raw = evidence.get("connectorControl") if isinstance(evidence, dict) else None
-        command = _connector_control_command(raw)
-        pending = getattr(self, "_control_pending_report", None)
-        if pending is not None and binding.room_id in {
-            str(item.get("roomId")) for item in (pending.get("before") or {}).get("bindings", [])
-            if isinstance(item, dict)
-        } and (registered or (command is not None and command["commandId"] == pending.get("commandId"))):
-            self._keep_control_task(self._report_after_restart(binding))
-        if command is None or command["commandId"] in _CONTROL_COMMANDS_SEEN or command["state"] != "requested":
+        """Contract P17-2/P17-7, R2-3: act on a register or heartbeat answer."""
+        holder = self._control_holder()
+        if holder is None or not isinstance(evidence, dict):
             return
-        _CONTROL_COMMANDS_SEEN.add(command["commandId"])
-        self._keep_control_task(self._run_connector_control(binding, command))
+        self._control_join()
+        command = _connector_control_command(evidence.get("connectorControl"))
+        granted = evidence.get("capabilities")
+        declare = registered and isinstance(granted, list) and CONNECTOR_CONTROL_CAPABILITY in granted
+        pending = holder.pending
+        report = pending is not None and (binding.room_id, binding.membership_id) in {
+            (str(item.get("roomId")), str(item.get("membershipId")))
+            for item in (pending.get("before") or {}).get("bindings", []) if isinstance(item, dict)
+        } and (registered or (command is not None and command["commandId"] == pending.get("commandId")))
+        run = command is not None and command["commandId"] not in holder.seen and command["state"] == "requested"
+        if run:
+            holder.seen.add(command["commandId"])
+        if declare or report or run:
+            self._keep_control_task(self._control_answer(binding, declare, report, command if run else None))
+
+    async def _control_answer(self, binding: RoomBinding, declare: bool, report: bool,
+                              command: dict[str, str] | None) -> None:
+        # The declaration precedes a claim: the Room binds the claim to it (R2-7).
+        if declare:
+            await self._declare_installation(binding)
+        if report:
+            await self._report_after_restart(binding)
+        if command is not None:
+            await self._run_connector_control(binding, command)
+
+    async def _declare_installation(self, binding: RoomBinding) -> None:
+        """Contract R2-3: declare this process's installation through this session."""
+        holder = self._control_holder()
+        installation = self._installation_identity()
+        states = self._control_stored(self._control_adapters(), fresh=False)
+        if holder is None or not installation or states is None:
+            return
+        stored = [item for state in states for item in state.bindings]
+        origin = binding_origin(binding.base_url)
+        origins: dict[str, dict[str, Any]] = {}
+        for item in stored:
+            entry = origins.setdefault(binding_origin(item.base_url), {"bindings": 0, "enabled": 0})
+            entry["bindings"] += 1
+            entry["enabled"] += int(bool(item.enabled and not item.revoked))
+        declaration = {
+            "installationId": installation,
+            "incarnation": holder.incarnation,
+            "memberships": sorted({item.membership_id for item in stored if binding_origin(item.base_url) == origin}),
+            "origins": [{"origin": name, **counts} for name, counts in sorted(origins.items()) if name],
+        }
+        live = self._state.binding(binding.room_id) or binding
+        try:
+            await self._call(live, lambda api: api.declare_installation(
+                live.room_id, live.connector_session_id, declaration))
+        except Exception as error:  # noqa: BLE001 - 404/409/old server: never fatal
+            logger.info("Room %s installation declaration not accepted (%s)", live.room_id,
+                        getattr(error, "code", "") or type(error).__name__)
 
     async def _report_control(self, binding: RoomBinding, command_id: str, report: dict[str, Any]) -> str:
         """Report a phase; "ok", "closed" (409 control_closed) or "error". Never raises."""
@@ -8070,57 +8281,68 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return "error"
         return "ok"
 
-    def _control_work_in_progress(self, stored: PluginState) -> bool:
-        """Contract P17-3: any work of the installation that control would disturb."""
-        if self._active_dispatch_rooms or self._inflight_events or self._renewing_rooms:
-            return True
-        tasks = [*self._submission_tasks.values(), *getattr(self, "_attempt_renewal_tasks", {}).values()]
-        if any(not task.done() for task in tasks):
-            return True
-        # Bindings control starts again: enabled and not revoked. A disabled
-        # binding is neither stopped nor started by reconnect or restart, so
-        # its retained state (fail-closed debt included) never blocks control;
-        # the inventory still covers it.
+    @staticmethod
+    def _control_work_in_progress(adapters: list["SyntheticSocialityAdapter"], stored: list[PluginState]) -> bool:
+        """Contract P17-3, R2-2: work anywhere in the process, every stored binding included."""
+        for item in adapters:
+            if item._active_dispatch_rooms or item._inflight_events or item._renewing_rooms:
+                return True
+            tasks = [*item._submission_tasks.values(), *getattr(item, "_attempt_renewal_tasks", {}).values()]
+            if any(not task.done() for task in tasks):
+                return True
+            if any(binding.credential_rotation or not renewal.quiescent(binding) for binding in item._state.bindings):
+                return True
         return any(binding.credential_rotation or not renewal.quiescent(binding)
-                   for binding in (*stored.bindings, *self._state.bindings)
-                   if binding.enabled and not binding.revoked)
+                   for state in stored for binding in state.bindings)
 
     def _write_control_receipt(self, receipt: dict[str, Any]) -> bool:
         status = getattr(self, "_status", None)
         return bool(status is not None and status.set_connector_control(receipt))
 
+    @staticmethod
+    def _write_receipts(adapters: list["SyntheticSocialityAdapter"], receipt: dict[str, Any]) -> bool:
+        """The receipt goes into every profile's status.json of the process (R2-1)."""
+        return all([item._write_control_receipt(receipt) for item in adapters])
+
+    @staticmethod
+    def _reported_receipt(receipt: dict[str, Any], holder: Any, **fields: Any) -> dict[str, Any]:
+        return {**receipt, "phase": "reported", "reportedAt": local_status._now(), **fields}
+
     async def _run_connector_control(self, binding: RoomBinding, command: dict[str, str]) -> None:
         command_id, action = command["commandId"], command["action"]
+        holder = self._control_holder()
         try:
             await self._call(binding, lambda api: api.claim_connector_control(
                 binding.room_id, binding.connector_session_id, command_id))
         except ProtocolError as error:
-            if error.retryable and not error.code:
-                _CONTROL_COMMANDS_SEEN.discard(command_id)  # asked again with the next answer
+            if (error.retryable and not error.code) or error.code == "control_transition_invalid":
+                holder.seen.discard(command_id)  # asked again with the next answer (after a declaration)
             logger.info("Room %s connector control not claimed (%s)", binding.room_id,
                         error.code or error.status or "error")
             return
         except Exception as error:  # noqa: BLE001
-            _CONTROL_COMMANDS_SEEN.discard(command_id)
+            holder.seen.discard(command_id)
             logger.warning("Room %s connector control claim failed (%s)", binding.room_id, type(error).__name__)
             return
         logger.info("Room %s claimed owner connector control %s (%s)", binding.room_id, command_id, action)
-        # Fence and guard in one step of the event loop: nothing new starts
-        # between them, and work already running refuses at once.
-        if getattr(self, "_control_open", None) is None:
-            self._control_open = asyncio.Event()
-        self._control_open.clear()
+        # Fence and guard in one step of the event loop, over the whole process:
+        # nothing new starts between them, and work already running refuses at once.
+        self._close_control_fence(command_id)
         lift = True
         try:
-            stored = load(self._state_file)
-            if self._control_work_in_progress(stored):
+            adapters = self._control_adapters()
+            stored = self._control_stored(adapters, fresh=True)
+            if stored is None:
+                await self._report_control(binding, command_id, {"phase": "refused", "code": "connector_scope_unknown"})
+                return
+            if self._control_work_in_progress(adapters, stored):
                 await self._report_control(binding, command_id, {"phase": "refused", "code": "work_in_progress"})
                 return
-            before = connector_control_inventory(stored)
+            before = self._merged_inventory(stored)
             if action == "reconnect":
-                await self._control_reconnect(binding, command, before)
+                await self._control_reconnect(binding, command, before, adapters)
             else:
-                lift = await self._control_restart(binding, command, before)
+                lift = await self._control_restart(binding, command, before, adapters)
         finally:
             if lift:
                 self._lift_control_fence()
@@ -8167,19 +8389,41 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 return False
             await asyncio.sleep(0.05)
 
+    @staticmethod
+    async def _reconnect_all(adapters: list["SyntheticSocialityAdapter"]) -> tuple[list[PluginState], list[tuple]]:
+        states: dict[str, PluginState] = {}
+        waits = []
+        for item in adapters:
+            latest, baseline = await item._reconnect_room_listeners()
+            states.setdefault(os.path.realpath(str(item._state_file)), latest)
+            waits.append((item, baseline))
+        return list(states.values()), waits
+
+    @staticmethod
+    async def _await_all_registrations(waits: list[tuple]) -> bool:
+        results = await asyncio.gather(*(item._await_registrations(baseline) for item, baseline in waits))
+        return all(results)
+
+    def _control_receipt(self, command: dict[str, str], phase: str, before: dict[str, Any],
+                         adapters: list["SyntheticSocialityAdapter"]) -> dict[str, Any]:
+        holder = self._control_holder()
+        return {"commandId": command["commandId"], "action": command["action"], "phase": phase,
+                "requestedAt": command["requestedAt"], "startedAt": local_status._now(), "pid": os.getpid(),
+                "incarnation": holder.incarnation,
+                "stateFiles": list(dict.fromkeys(str(item._state_file) for item in adapters)),
+                "before": before}
+
     async def _control_reconnect(self, binding: RoomBinding, command: dict[str, str],
-                                 before: dict[str, Any]) -> None:
+                                 before: dict[str, Any], adapters: list["SyntheticSocialityAdapter"]) -> None:
         command_id = command["commandId"]
         await self._report_control(binding, command_id, {"phase": "reconnecting"})
-        receipt = {"commandId": command_id, "action": "reconnect", "phase": "reconnecting",
-                   "requestedAt": command["requestedAt"], "startedAt": local_status._now(),
-                   "pid": os.getpid(), "before": before}
-        self._write_control_receipt(receipt)
-        latest, baseline = await self._reconnect_room_listeners()
-        after = connector_control_inventory(latest)
+        receipt = self._control_receipt(command, "reconnecting", before, adapters)
+        self._write_receipts(adapters, receipt)
+        latest, waits = await self._reconnect_all(adapters)
+        after = self._merged_inventory(latest)
         match = after["bindings"] == before["bindings"]
         self._lift_control_fence()
-        registered = await self._await_registrations(baseline)
+        registered = await self._await_all_registrations(waits)
         report: dict[str, Any] = {"phase": "completed"}
         if not match:
             report = {"phase": "failed", "code": "inventory_mismatch"}
@@ -8187,14 +8431,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             report = {"phase": "failed", "code": "reconnect_incomplete"}
         report["inventory"] = {"before": before["counts"], "after": after["counts"], "match": match}
         await self._report_control(binding, command_id, report)
-        self._write_control_receipt({**receipt, "phase": "reported", "code": report.get("code", ""),
-                                     "after": {"counts": after["counts"]}, "reportedAt": local_status._now()})
+        self._write_receipts(adapters, self._reported_receipt(
+            receipt, None, code=report.get("code", ""), after={"counts": after["counts"]}))
 
-    async def _control_restart(self, binding: RoomBinding, command: dict[str, str],
-                               before: dict[str, Any]) -> bool:
-        """Contract P17-6. True when the fence lifts (the gateway is not restarting)."""
+    async def _control_restart(self, binding: RoomBinding, command: dict[str, str], before: dict[str, Any],
+                               adapters: list["SyntheticSocialityAdapter"]) -> bool:
+        """Contract P17-6, R2-8. True when the fence lifts (the gateway is not restarting)."""
         command_id = command["commandId"]
-        supervised = False
         try:
             supervised = bool(self._restart_supervised())
         except Exception:  # noqa: BLE001
@@ -8205,32 +8448,43 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             await self._report_control(binding, command_id, {"phase": "failed", "code": "supervisor_unavailable"})
             return True
         await self._report_control(binding, command_id, {"phase": "restarting"})
-        receipt = {"commandId": command_id, "action": "restart", "phase": "restarting",
-                   "requestedAt": command["requestedAt"], "startedAt": local_status._now(),
-                   "pid": os.getpid(), "before": before}
-        if not self._write_control_receipt(receipt):
+        receipt = self._control_receipt(command, "restarting", before, adapters)
+        if not self._write_receipts(adapters, receipt):
             await self._report_control(binding, command_id, {"phase": "failed", "code": "receipt_unavailable"})
             return True
-        # A clean drain as on disconnect; the fence stays held.
-        await self.disconnect()
+        # A clean drain of the whole gateway's Rooms, as on disconnect; the fence stays held.
+        for item in adapters:
+            await item.disconnect()
         try:
             await asyncio.to_thread(self._restart_requester)
         except Exception as error:  # noqa: BLE001
             logger.warning("Room connector restart request failed (%s); reconnecting", type(error).__name__)
-            baseline = await self._restore_after_failed_restart()
+            waits = [(item, await item._restore_after_failed_restart()) for item in adapters]
             self._lift_control_fence()
             # The failure is reported once the restored sessions registered
             # again (the Room accepts a restart outcome only after that).
-            await self._await_registrations(baseline)
+            await self._await_all_registrations(waits)
             await self._report_control(binding, command_id, {"phase": "failed", "code": "supervisor_unavailable"})
-            self._write_control_receipt({**receipt, "phase": "reported", "code": "supervisor_unavailable",
-                                         "reportedAt": local_status._now()})
+            self._write_receipts(adapters, self._reported_receipt(receipt, None, code="supervisor_unavailable"))
             return True
+        # R2-8: accepted. The fence, the receipt and the disconnect stay until
+        # the process ends; a core that never exits leaves the receipt overdue.
+        self._control_holder().restarting = command_id
         logger.info("Room connector asked its supervisor for the gateway restart (%s)", command_id)
+        self._control_watchdog = asyncio.create_task(
+            self._mark_restart_overdue(receipt, adapters), name="synthetic-sociality-restart-overdue")
         return False
+
+    async def _mark_restart_overdue(self, receipt: dict[str, Any], adapters: list["SyntheticSocialityAdapter"]) -> None:
+        """Contract R2-8: no report, no restore; recovery is an operator action."""
+        await asyncio.sleep(float(CONTROL_RESTART_OVERDUE_SECONDS))
+        logger.error("Room connector: the gateway did not restart within %ss after the request (%s); "
+                     "Rooms stay disconnected", CONTROL_RESTART_OVERDUE_SECONDS, receipt["commandId"])
+        self._write_receipts(adapters, {**receipt, "phase": "restart_overdue", "overdueAt": local_status._now()})
 
     async def _restore_after_failed_restart(self) -> dict[str, int]:
         self._stop.clear()
+        self._control_join()
         _latest, baseline = await self._reconnect_room_listeners()
         if any(renewal.eligible(binding) for binding in self._state.bindings):
             if self._renewal_task is None or self._renewal_task.done():
@@ -8242,26 +8496,32 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         return baseline
 
     async def _report_after_restart(self, binding: RoomBinding) -> None:
-        """Contract P17-7: the restarted process reports once, on a snapshot registration."""
-        receipt = getattr(self, "_control_pending_report", None)
-        if receipt is None or getattr(self, "_control_reporting", False):
+        """Contract P17-7, R2-7: a new incarnation reports once, on a snapshot registration."""
+        holder = self._control_holder()
+        receipt = holder.pending if holder is not None else None
+        if receipt is None or holder.reporting:
             return
-        self._control_reporting = True
+        holder.reporting = True
         try:
             before = receipt.get("before") or {}
-            after = self._control_after or {"counts": {}, "bindings": []}
+            after = holder.after or {"counts": {"bindings": 0, "enabled": 0, "disabled": 0}, "bindings": None}
             match = before.get("bindings") == after["bindings"]
             report: dict[str, Any] = {"phase": "completed"} if match else {
                 "phase": "failed", "code": "inventory_mismatch"}
             report["inventory"] = {"before": before.get("counts"), "after": after["counts"], "match": match}
-            outcome = await self._report_control(binding, str(receipt["commandId"]), report)
+            command_id = str(receipt["commandId"])
+            outcome = await self._report_control(binding, command_id, report)
             if outcome in ("ok", "closed"):
-                self._control_pending_report = None
-                self._write_control_receipt({**receipt, "phase": "reported", "code": report.get("code", ""),
-                                             "after": {"counts": after["counts"]},
-                                             "reportedAt": local_status._now()})
+                holder.pending = None
+                holder.reported.add(command_id)
+                reported = self._reported_receipt(receipt, holder, code=report.get("code", ""),
+                                                  after={"counts": after["counts"]})
+                for item in list(holder.members):
+                    own = item._status.connector_control() if getattr(item, "_status", None) else None
+                    if own is not None and str(own.get("commandId")) == command_id:
+                        item._write_control_receipt(reported)
         finally:
-            self._control_reporting = False
+            holder.reporting = False
 
     def _binding(self, room_id: str) -> RoomBinding:
         binding = self._state.binding(room_id)
