@@ -486,6 +486,21 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assertEqual(state_store.load(self.path).binding(ROOM_B).delivery_intents["evt-9"], quarantined)
         self.assertEqual(json.loads(self.path.read_text())["bindings"][1]["inbox"],
                          json.loads(before)["bindings"][1]["inbox"])
+        # A disabled binding is neither stopped nor started by control: its
+        # retained unfinished intent never blocks control and stays untouched.
+        def disable_with_debt(current):
+            stopped = current.binding(ROOM_B)
+            stopped.enabled = False
+            stopped.disabled_reason = "credential_expired"
+            stopped.delivery_intents["evt-9"] = intent
+        state_store.update(disable_with_debt)
+        command = _command("reconnect")
+        self.deliver(ROOM_A, command)
+        await self.settle()
+        self.assertEqual(self.room.phases(command["commandId"])[0], ("reconnecting", ""))
+        stopped = state_store.load(self.path).binding(ROOM_B)
+        self.assertFalse(stopped.enabled)
+        self.assertEqual(stopped.delivery_intents["evt-9"], intent)
 
     # P17-07 ---------------------------------------------------------------
     async def test_fence_blocks_new_dispatch_attempt_claims_and_renewal_during_the_guard(self):

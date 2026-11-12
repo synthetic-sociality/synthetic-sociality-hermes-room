@@ -8077,8 +8077,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         tasks = [*self._submission_tasks.values(), *getattr(self, "_attempt_renewal_tasks", {}).values()]
         if any(not task.done() for task in tasks):
             return True
+        # Bindings control starts again: enabled and not revoked. A disabled
+        # binding is neither stopped nor started by reconnect or restart, so
+        # its retained state (fail-closed debt included) never blocks control;
+        # the inventory still covers it.
         return any(binding.credential_rotation or not renewal.quiescent(binding)
-                   for binding in (*stored.bindings, *self._state.bindings))
+                   for binding in (*stored.bindings, *self._state.bindings)
+                   if binding.enabled and not binding.revoked)
 
     def _write_control_receipt(self, receipt: dict[str, Any]) -> bool:
         status = getattr(self, "_status", None)

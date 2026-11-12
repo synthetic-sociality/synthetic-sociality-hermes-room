@@ -12,19 +12,18 @@ CONTRACT = "docs/delivery-lifecycle-contract-v1.md#p17--owner-connector-control-
 HEADING = "## P17 — Owner connector control (2026-11-12)"
 CLAUSES = [f"- P17-{number} " for number in range(1, 9)]
 CASES = [
-    "P17-01 registration metadata/capability",
-    "P17-02 malformed/absent connectorControl ignored",
-    "P17-03 claim once across bindings, 409 ignored",
-    "P17-04 refusal for active dispatch",
-    "P17-05 refusal for pending renewal/credential_rotation",
-    "P17-06 refusal for an unfinished delivery intent in another Room",
-    "P17-07 fence blocks a new dispatch during the guard",
-    "P17-08 reconnect reloads once, one listener per enabled binding, disabled untouched, "
-    "`_binding(room) is` listener object",
-    "P17-09 reconnect cures the 1.0.101 split: a sibling turn after reconnect is accepted",
-    "P17-10 restart receipt persisted before the requester, simulated supervisor fixture receives the request",
-    "P17-11 requester failure → supervisor_unavailable and listeners restored",
-    "P17-12 post-restart completion/mismatch report, no repeat, state.json bytes unchanged by control",
+    "P17-01 registration carries installation identity, connector version and the control capability",
+    "P17-02 a malformed or absent connectorControl is ignored and never breaks the loop",
+    "P17-03 a command is claimed once across the bindings of one installation and a 409 is ignored",
+    "P17-04 an active dispatch refuses control with work_in_progress",
+    "P17-05 a pending renewal refuses control with work_in_progress",
+    "P17-06 an unfinished delivery intent in another Room refuses control with work_in_progress",
+    "P17-07 the fence blocks a new dispatch while the guard runs",
+    "P17-08 reconnect reloads each binding once and keeps one live binding per enabled Room",
+    "P17-09 after a reconnect a turn in a sibling Room is accepted",
+    "P17-10 restart persists its receipt before the supervisor request with a fixed argv",
+    "P17-11 a supervisor failure reports supervisor_unavailable and restores service",
+    "P17-12 the restarted process reports completion or mismatch once and control leaves state files unchanged",
 ]
 # Each shared case is proven by these Hermes tests (tests/test_connector_control.py).
 CASE_TESTS = {
