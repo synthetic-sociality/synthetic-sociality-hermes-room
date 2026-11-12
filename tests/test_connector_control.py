@@ -82,10 +82,13 @@ SUPERVISOR = textwrap.dedent("""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    ignore = len(sys.argv) > 4 and sys.argv[4] == "ignore"
+
     class Runner:
         def request_restart(self, **kwargs):
             record.write_text(json.dumps(kwargs, sort_keys=True))
-            loop.stop()
+            if not ignore:  # "ignore": a core that never exits (a restart already under way)
+                loop.stop()
 
     namespace["_start_gateway_install_signal_handlers"](
         loop, lambda *_args: loop.stop(), namespace["_start_gateway_make_restart_signal_handler"](Runner()))
@@ -94,6 +97,27 @@ SUPERVISOR = textwrap.dedent("""
     loop.run_forever()
 """)
 RESTART_REQUEST = {"detached": False, "via_service": True}
+# R2-1: the process-global holder every plugin copy of one gateway shares.
+PROCESS_HOLDER = "_synthetic_sociality_room_connector_control"
+ROOM_D, ROOM_E = "room-d", "room-e"
+INCARNATION = r"^[A-Za-z0-9._:-]{8,128}$"
+
+
+def load_second_copy(name: str = "p17_second_profile_copy"):
+    """A second copy of the plugin, as Hermes imports one per served profile
+    under ``gateway.multiplex_profiles`` (the gateway stubs are shared)."""
+    if f"{name}.adapter" not in sys.modules:
+        root = Path(adapter.__file__).resolve().parent
+        spec = importlib.util.spec_from_file_location(name, root / "__init__.py", submodule_search_locations=[str(root)])
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[name] = package
+        package.__path__ = [str(root)]
+        for child_name in ("state", "protocol", "cli", "adapter"):
+            child_spec = importlib.util.spec_from_file_location(f"{name}.{child_name}", root / f"{child_name}.py")
+            child = importlib.util.module_from_spec(child_spec)
+            sys.modules[f"{name}.{child_name}"] = child
+            child_spec.loader.exec_module(child)
+    return sys.modules[f"{name}.adapter"], sys.modules[f"{name}.state"]
 
 
 def _command(action: str, *, state: str = "requested", command_id: str = "") -> dict:
@@ -120,6 +144,9 @@ class FakeRoom:
         self.claim_errors: dict[str, BaseException] = {}
         self.posted: list[tuple[str, str]] = []
         self.during_report = None
+        self.declarations: list[tuple[str, str, dict]] = []
+        self.declare_error: BaseException | None = None
+        self.granted = ["events.long_poll", "events.sse", CAPABILITY]
 
     def phases(self, command_id: str) -> list[tuple[str, str]]:
         return [(report["phase"], report.get("code", "")) for _room, command, report in self.reports
@@ -135,7 +162,13 @@ class FakeRoom:
 
             def register_connector(self, registered_room, _client_instance, metadata):
                 room.registrations.append((registered_room, dict(metadata)))
-                return {"sessionId": f"session-{registered_room}", **ANSWER}
+                return {"sessionId": f"session-{registered_room}", "capabilities": list(room.granted), **ANSWER}
+
+            def declare_installation(self, declared_room, session_id, declaration):
+                room.declarations.append((declared_room, session_id, copy.deepcopy(declaration)))
+                if room.declare_error is not None:
+                    raise room.declare_error
+                return {"accepted": True}
 
             def heartbeat(self, _room, _session):
                 return dict(ANSWER)
@@ -190,6 +223,13 @@ class ConnectorControlFixture(unittest.IsolatedAsyncioTestCase):
         bindings[2].enabled = False
         bindings[2].disabled_reason = "credential_expired"
         state_store.save(adapter.PluginState(bindings=bindings), self.path)
+        # R2-1: the process host home (HERMES_HOME of the process environment).
+        self.host_home = Path(self._directory.name) / "host-home"
+        environment = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.host_home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.new_process()
+        self.addCleanup(self.new_process)
         scope = state_store.state_path_scope(self.path)
         scope.__enter__()
         self.addCleanup(scope.__exit__, None, None, None)
@@ -203,9 +243,19 @@ class ConnectorControlFixture(unittest.IsolatedAsyncioTestCase):
         self.listeners = {binding.room_id: binding for binding in self.instance._state.bindings}
         self.old_tasks = await self._start_listeners(self.instance, [ROOM_A, ROOM_B])
 
-    def _adapter(self):
-        instance = adapter.SyntheticSocialityAdapter(adapter.PlatformConfig())
-        self.assertEqual(instance._state_file, self.path)
+    @staticmethod
+    def new_process():
+        """A new gateway process: no process-global control state survives."""
+        sys.modules.pop(PROCESS_HOLDER, None)
+        getattr(adapter, "_CONTROL_COMMANDS_SEEN", set()).clear()
+
+    def installation_record(self):
+        return self.host_home / "synthetic-sociality-room" / "installation.json"
+
+    def _adapter(self, module=None, path=None):
+        module = module or adapter
+        instance = module.SyntheticSocialityAdapter(module.PlatformConfig())
+        self.assertEqual(instance._state_file, path or self.path)
         room = self.room
 
         async def call(binding, operation, **_options):
@@ -262,6 +312,9 @@ class ConnectorControlFixture(unittest.IsolatedAsyncioTestCase):
     async def _stop_adapter(instance):
         tasks = [*instance._tasks.values(), *instance._heartbeat_tasks.values(),
                  *getattr(instance, "_control_tasks", set())]
+        watchdog = getattr(instance, "_control_watchdog", None)
+        if watchdog is not None:
+            tasks.append(watchdog)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -290,8 +343,8 @@ class ConnectorControlFixture(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(listener.done())
         self.assertEqual(self.watched, {})
 
-    def receipt(self):
-        status = self.path.parent / "status.json"
+    def receipt(self, path=None):
+        status = (path or self.path).parent / "status.json"
         return json.loads(status.read_text()).get("connectorControl") if status.exists() else None
 
     def assert_no_secret(self, value):
@@ -312,6 +365,41 @@ class ConnectorControlFixture(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(key, {"credential", "credential_rotation", "credentialRotation", "secret"})
 
 
+    def _supervisor(self, *, ignore=False):
+        """A simulated supervisor: a child process that records SIGUSR1."""
+        directory = Path(self._directory.name)
+        record, ready = directory / "supervisor-record.txt", directory / "supervisor-ready.txt"
+        sources = json.dumps([
+            core_function("gateway/run.py", "_start_gateway_make_restart_signal_handler"),
+            core_function("gateway/run_bootstrap.py", "_start_gateway_install_signal_handlers"),
+        ])
+        child = subprocess.Popen([sys.executable, "-I", "-c", SUPERVISOR, str(record), str(ready), sources,
+                                  "ignore" if ignore else "stop"],
+                                 cwd=self._directory.name, env={"PATH": os.environ.get("PATH", "")})
+
+        def stop():
+            if child.poll() is None:
+                child.kill()
+            child.wait(10)
+
+        self.addCleanup(stop)
+        deadline = time.monotonic() + 15
+        while not ready.exists():
+            self.assertLess(time.monotonic(), deadline, "simulated supervisor did not start")
+            self.assertIsNone(child.poll())
+            time.sleep(0.02)
+        self.assertNotEqual(child.pid, os.getpid())
+        return child, record
+
+    @staticmethod
+    def _wait_for_record(child, record):
+        deadline = time.monotonic() + 15
+        while not record.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        child.wait(15)
+        return json.loads(record.read_text()) if record.exists() else None
+
+
 class ConnectorControlTests(ConnectorControlFixture):
     # P17-01 ---------------------------------------------------------------
     async def test_registration_reports_installation_identity_version_and_control_capability(self):
@@ -319,8 +407,9 @@ class ConnectorControlTests(ConnectorControlFixture):
         for room_id in (ROOM_A, ROOM_B):
             instance._registered_rooms.discard(room_id)
             await instance._ensure_connector(instance._binding(room_id))
-        record_path = self.path.parent / "installation.json"
+        record_path = self.installation_record()
         self.assertTrue(record_path.is_file(), "installation.json is created at the first registration")
+        self.assertFalse((self.path.parent / "installation.json").exists(), "never per profile (R2-1)")
         record = json.loads(record_path.read_text())
         self.assertRegex(record["installationId"], r"^hermes-inst-[0-9a-f]{32}$")
         self.assertEqual(stat.S_IMODE(record_path.stat().st_mode), 0o600)
@@ -486,18 +575,20 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assertEqual(state_store.load(self.path).binding(ROOM_B).delivery_intents["evt-9"], quarantined)
         self.assertEqual(json.loads(self.path.read_text())["bindings"][1]["inbox"],
                          json.loads(before)["bindings"][1]["inbox"])
-        # A disabled binding is neither stopped nor started by control: its
-        # retained unfinished intent never blocks control and stays untouched.
+        # B-F002 (R2-2): a disabled binding's unfinished intent is work in
+        # progress too: every stored binding is guarded, and it stays untouched.
         def disable_with_debt(current):
             stopped = current.binding(ROOM_B)
             stopped.enabled = False
             stopped.disabled_reason = "credential_expired"
             stopped.delivery_intents["evt-9"] = intent
         state_store.update(disable_with_debt)
-        command = _command("reconnect")
-        self.deliver(ROOM_A, command)
-        await self.settle()
-        self.assertEqual(self.room.phases(command["commandId"])[0], ("reconnecting", ""))
+        for action in ("reconnect", "restart"):
+            with self.subTest(disabled_debt=action):
+                command = _command(action)
+                self.deliver(ROOM_A, command)
+                await self.settle()
+                self.assertEqual(self.room.phases(command["commandId"]), [("refused", "work_in_progress")])
         stopped = state_store.load(self.path).binding(ROOM_B)
         self.assertFalse(stopped.enabled)
         self.assertEqual(stopped.delivery_intents["evt-9"], intent)
@@ -649,39 +740,6 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assertNotEqual(intent.get("last_error_code"), "attempt_authority_missing")
 
     # P17-10 ---------------------------------------------------------------
-    def _supervisor(self):
-        """A simulated supervisor: a child process that records SIGUSR1."""
-        directory = Path(self._directory.name)
-        record, ready = directory / "supervisor-record.txt", directory / "supervisor-ready.txt"
-        sources = json.dumps([
-            core_function("gateway/run.py", "_start_gateway_make_restart_signal_handler"),
-            core_function("gateway/run_bootstrap.py", "_start_gateway_install_signal_handlers"),
-        ])
-        child = subprocess.Popen([sys.executable, "-I", "-c", SUPERVISOR, str(record), str(ready), sources],
-                                 cwd=self._directory.name, env={"PATH": os.environ.get("PATH", "")})
-
-        def stop():
-            if child.poll() is None:
-                child.kill()
-            child.wait(10)
-
-        self.addCleanup(stop)
-        deadline = time.monotonic() + 15
-        while not ready.exists():
-            self.assertLess(time.monotonic(), deadline, "simulated supervisor did not start")
-            self.assertIsNone(child.poll())
-            time.sleep(0.02)
-        self.assertNotEqual(child.pid, os.getpid())
-        return child, record
-
-    @staticmethod
-    def _wait_for_record(child, record):
-        deadline = time.monotonic() + 15
-        while not record.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        child.wait(15)
-        return json.loads(record.read_text()) if record.exists() else None
-
     async def test_restart_persists_the_receipt_before_the_simulated_supervisor_is_asked(self):
         instance = self.instance
         child, record = self._supervisor()
@@ -821,7 +879,7 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assertEqual(self.path.read_bytes(), state_before, "control never writes the state file")
         if between is not None:
             between()
-        getattr(adapter, "_CONTROL_COMMANDS_SEEN", set()).clear()  # a new process
+        self.new_process()
         self.room.reports.clear()
         self.watched.clear()
         successor = self._adapter()
@@ -847,7 +905,7 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assertEqual((receipt["commandId"], receipt["phase"]), (command["commandId"], "reported"))
         self.assert_no_secret(receipt)
         # A third process finds the receipt reported: nothing more.
-        getattr(adapter, "_CONTROL_COMMANDS_SEEN", set()).clear()
+        self.new_process()
         third = self._adapter()
         await third._ensure_connector(third._binding(ROOM_A))
         await self.settle(third)
@@ -865,6 +923,198 @@ class ConnectorControlTests(ConnectorControlFixture):
                          [("failed", "inventory_mismatch")])
         self.assertEqual(reports[0]["inventory"], {"before": COUNTS, "after": COUNTS, "match": False})
         self.assertEqual(self.receipt()["phase"], "reported")
+
+
+class ConnectorControlR2Tests(ConnectorControlFixture):
+    """OP-12 R2 remedies (CONTRACT-R2.md), each test named after its finding."""
+
+    async def second_profile(self, *, register=True):
+        """Profile P2 served by the same gateway process through its own plugin copy."""
+        second, second_state = load_second_copy()
+        path = Path(self._directory.name) / "profile-two" / "synthetic-sociality-room" / "state.json"
+        path.parent.mkdir(parents=True, mode=0o700)
+        served = second.RoomBinding("https://room.example/api", ROOM_D, "member-d", "credential-room-d",
+                                    installation_id="installation-d", cursor=3, acknowledged_cursor=3,
+                                    credential_expires_at="2099-01-01T00:00:00Z", connector_session_id="session-room-d")
+        elsewhere = second.RoomBinding("https://other.example:8443/api", ROOM_E, "member-e", "credential-room-e",
+                                       installation_id="installation-e", enabled=False,
+                                       disabled_reason="credential_expired")
+        second_state.save(second.PluginState(bindings=[served, elsewhere]), path)
+        with second_state.state_path_scope(path):
+            instance = self._adapter(second, path)
+        instance._persist_binding = lambda _binding: True
+        await self._start_listeners(instance, [ROOM_D])
+        if register:
+            instance._note_connected(instance._binding(ROOM_D), dict(ANSWER))
+        return instance, path
+
+    # B-F001 / R2-1 ---------------------------------------------------------
+    async def test_bf001_two_profiles_in_one_process_report_one_installation_id(self):
+        other, other_path = await self.second_profile()
+        self.instance._registered_rooms.discard(ROOM_A)
+        await self.instance._ensure_connector(self.instance._binding(ROOM_A))
+        other._registered_rooms.discard(ROOM_D)
+        await other._ensure_connector(other._binding(ROOM_D))
+        ids = {metadata.get("installationId") for _room, metadata in self.room.registrations}
+        record = json.loads(self.installation_record().read_text())
+        self.assertEqual(ids, {record["installationId"]})
+        for profile in (self.path, other_path):
+            self.assertFalse((profile.parent / "installation.json").exists())
+        self.assertIn(PROCESS_HOLDER, sys.modules, "process-global holder, shared by every plugin copy")
+
+    async def test_bf001_restart_from_one_profile_refuses_while_another_profile_dispatches(self):
+        other, _other_path = await self.second_profile()
+        other._active_dispatch_rooms[ROOM_D] = "dispatch-generation"
+        for action in ("restart", "reconnect"):
+            with self.subTest(action=action):
+                command = _command(action)
+                self.deliver(ROOM_A, command)
+                await self.settle()
+                self.assertEqual(self.room.phases(command["commandId"]), [("refused", "work_in_progress")])
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.room.disconnects, [])
+        self.assertIn(ROOM_D, other._tasks)
+        self.assert_listeners_untouched()
+
+    async def test_bf001_inventory_and_receipt_cover_every_profile_of_the_process(self):
+        other, other_path = await self.second_profile()
+        seen = []
+        self.instance._restart_requester = lambda: seen.append((self.receipt(), self.receipt(other_path)))
+        command = _command("restart")
+        self.deliver(ROOM_A, command)
+        await self.settle()
+        self.assertEqual(self.room.phases(command["commandId"]), [("restarting", "")])
+        self.assertEqual(len(seen), 1)
+        mine, theirs = seen[0]
+        for receipt in (mine, theirs):
+            self.assertIsNotNone(receipt, "the receipt is in every profile's status.json before the request")
+            self.assertEqual(receipt["commandId"], command["commandId"])
+            self.assertEqual(receipt["before"]["counts"], {"bindings": 5, "enabled": 3, "disabled": 2})
+            self.assertEqual(sorted(item["membershipId"] for item in receipt["before"]["bindings"]),
+                             ["member-a", "member-b", "member-c", "member-d", "member-e"])
+            self.assert_no_secret(receipt)
+        self.assertNotIn("credential-room-d", json.dumps(theirs))
+        # The whole gateway drains: every profile's listeners stop.
+        self.assertEqual(sorted(self.room.disconnects), [ROOM_A, ROOM_B, ROOM_D])
+        self.assertEqual((self.instance._tasks, other._tasks), ({}, {}))
+
+    async def test_bf001_unreadable_profile_state_refuses_with_connector_scope_unknown(self):
+        other, other_path = await self.second_profile()
+        other_path.write_text("{not json")
+        for action in ("reconnect", "restart"):
+            with self.subTest(action=action):
+                command = _command(action)
+                self.deliver(ROOM_A, command)
+                await self.settle()
+                self.assertEqual(self.room.phases(command["commandId"]), [("refused", "connector_scope_unknown")])
+        self.assertEqual(self.requests, [])
+        self.assert_listeners_untouched()
+
+    # B-F002 / R2-2 ---------------------------------------------------------
+    async def test_bf002_disabled_binding_with_unfinished_intent_refuses_reconnect_and_restart(self):
+        intent = {"state": "prepared", "delivery_state": "not_started", "lifecycle_state": "not_started"}
+        state_store.update(lambda current: current.binding(ROOM_C).delivery_intents.update({"evt-12": intent}))
+        before = self.path.read_bytes()
+        for action in ("reconnect", "restart"):
+            with self.subTest(action=action):
+                command = _command(action)
+                self.deliver(ROOM_A, command)
+                await self.settle()
+                self.assertEqual(self.room.phases(command["commandId"]), [("refused", "work_in_progress")])
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assert_listeners_untouched()
+
+    # B-F003 / R2-3 ---------------------------------------------------------
+    async def test_bf003_registration_declares_the_installation_with_every_profiles_memberships(self):
+        other, _other_path = await self.second_profile()
+        binding = self.instance._binding(ROOM_A)
+        self.instance._note_connected(binding, {**ANSWER, "sessionId": f"session-{ROOM_A}"}, registered=True)
+        await self.settle()
+        self.assertEqual(self.room.declarations, [], "no declaration unless the Room granted control")
+        granted = {**ANSWER, "sessionId": f"session-{ROOM_A}", "capabilities": [CAPABILITY]}
+        self.instance._note_connected(binding, granted, registered=True)
+        await self.settle()
+        self.assertEqual(len(self.room.declarations), 1)
+        room_id, session_id, declaration = self.room.declarations[0]
+        self.assertEqual((room_id, session_id), (ROOM_A, f"session-{ROOM_A}"))
+        self.assertEqual(sorted(declaration), ["incarnation", "installationId", "memberships", "origins"])
+        self.assertEqual(declaration["installationId"],
+                         json.loads(self.installation_record().read_text())["installationId"])
+        self.assertRegex(declaration["incarnation"], INCARNATION)
+        # Every stored binding of the process at this binding's origin, both profiles, disabled included.
+        self.assertEqual(sorted(declaration["memberships"]), ["member-a", "member-b", "member-c", "member-d"])
+        self.assertEqual(sorted(declaration["origins"], key=lambda item: item["origin"]), [
+            {"origin": "https://other.example:8443", "bindings": 1, "enabled": 0},
+            {"origin": "https://room.example", "bindings": 4, "enabled": 3},
+        ])
+        self.assert_no_secret(declaration)
+        # Every registration declares again; a 404/409 answer never stops the loop or a claim.
+        self.room.declare_error = adapter.ProtocolError("not found", status=404, code="not_found")
+        command = _command("reconnect")
+        self.room.claim_errors[command["commandId"]] = _conflict("control_claimed")
+        self.instance._note_connected(binding, {**granted, "connectorControl": command}, registered=True)
+        await self.settle()
+        self.assertEqual(len(self.room.declarations), 2)
+        self.assertEqual(self.room.claims, [(ROOM_A, f"session-{ROOM_A}", command["commandId"])])
+        self.assertIn(ROOM_D, other._tasks)
+
+    async def test_bf003_protocol_declaration_route(self):
+        with mock.patch.object(room_protocol.RoomProtocol, "request", autospec=True,
+                               return_value={"accepted": True}) as request:
+            room_protocol.RoomProtocol("https://room.example/api", "c").declare_installation(
+                "room a", "session/1", {"installationId": "hermes-inst-x"})
+        self.assertEqual(request.call_args.args[1:4], (
+            "PUT", "/rooms/room%20a/connector/sessions/session%2F1/installation", {"installationId": "hermes-inst-x"}))
+
+    # B-F005 / R2-7 ---------------------------------------------------------
+    async def test_bf005_only_a_new_incarnation_completes_a_restart(self):
+        self.instance._restart_requester = lambda: self.requests.append("restart")
+        command = _command("restart")
+        self.deliver(ROOM_A, command)
+        await self.settle()
+        incarnation = sys.modules[PROCESS_HOLDER].incarnation
+        self.assertRegex(incarnation, INCARNATION)
+        self.assertEqual(self.receipt()["incarnation"], incarnation, "the receipt stores the claim incarnation")
+        self.room.reports.clear()
+        # A re-created adapter of the same gateway process (a reconnect
+        # watcher, a re-attached profile) never completes and never resumes.
+        same = self._adapter()
+        await same._ensure_connector(same._binding(ROOM_A))
+        await self.settle(same)
+        self.assertEqual(self.room.phases(command["commandId"]), [])
+        self.assertEqual(self.receipt()["phase"], "restarting")
+        # The new gateway process completes it, once.
+        self.new_process()
+        successor = self._adapter()
+        self.assertNotEqual(sys.modules[PROCESS_HOLDER].incarnation, incarnation)
+        await successor._ensure_connector(successor._binding(ROOM_A))
+        await self.settle(successor)
+        self.assertEqual(self.room.phases(command["commandId"]), [("completed", "")])
+        self.assertEqual(self.receipt()["phase"], "reported")
+
+    # B-F008 / R2-8 ---------------------------------------------------------
+    async def test_bf008_an_accepted_signal_the_core_ignores_stays_fenced_and_marks_restart_overdue(self):
+        instance = self.instance
+        child, record = self._supervisor(ignore=True)
+        instance._restart_requester = lambda: adapter.signal_supervisor_restart(child.pid)
+        command = _command("restart")
+        with mock.patch.object(adapter, "CONTROL_RESTART_OVERDUE_SECONDS", 0.3, create=True):
+            self.deliver(ROOM_A, command)
+            await self.settle()
+            deadline = time.monotonic() + 5
+            while (self.receipt() or {}).get("phase") != "restart_overdue" and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+        self.assertEqual((self.receipt() or {}).get("phase"), "restart_overdue")
+        deadline = time.monotonic() + 10
+        while not record.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        self.assertEqual(json.loads(record.read_text()), RESTART_REQUEST)
+        self.assertIsNone(child.poll(), "the simulated core ignored the signal and still runs")
+        self.assertEqual(self.room.phases(command["commandId"]), [("restarting", "")], "nothing more is reported")
+        self.assertEqual(self.watched, {}, "no listener is restored")
+        self.assertEqual(instance._tasks, {})
+        self.assertTrue(instance._control_fenced(), "the fence stays held")
 
 
 if __name__ == "__main__":
