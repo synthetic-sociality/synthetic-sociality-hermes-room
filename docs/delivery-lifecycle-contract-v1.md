@@ -1510,8 +1510,9 @@ command and delivers it to the installation's live controllable sessions
   synthetic-sociality-room/installation.json`), so under
   `gateway.multiplex_profiles` every served profile's plugin copy reports the
   same id; OpenClaw keeps it next to `status.json`. Process-wide control state
-  (the live adapters, the fence, the command ids taken up, the incarnation and
-  the restart receipt owner) is shared by every plugin copy of the process
+  (every adapter constructed in the process and the joined ones among them,
+  the fence, the command ids taken up, the incarnation and the restart receipt
+  owner) is shared by every plugin copy of the process
   (Hermes: one holder in `sys.modules` without a per-home key; OpenClaw:
   `globalThis`). Every registration reports the id as `metadata.installationId`,
   the plugin version as `metadata.connectorVersion`, and requests the capability
@@ -1557,10 +1558,16 @@ command and delivers it to the installation's live controllable sessions
   cursor, acknowledged cursor, delivery-intent keys and states, inbox and
   pending counts and quarantined seqs. No credential, credential hash or secret.
   Counts are `{bindings, enabled, disabled}`; two inventories are equal when
-  every field of every binding, enabled and disabled, is equal.
+  every field of every binding, enabled and disabled, is equal. The guard, the
+  inventory, the receipts and the declaration cover every adapter constructed
+  in the process, including a served profile whose adapter is disconnected or
+  never joined (OP-12 B-F001); an unreadable state of any of them refuses with
+  `connector_scope_unknown`.
 - P17-5 Reconnect. Report `reconnecting`; stop and await every Room listener,
-  heartbeat and enrollment task of every adapter of the process (other channels
-  untouched); reload each state file once; apply each loaded binding to the existing live object (one live
+  heartbeat and enrollment task of every joined adapter of the process (other
+  channels untouched; an adapter that is disconnected or never joined is never
+  started by control, and its state file is read for the after-inventory);
+  reload each state file once; apply each loaded binding to the existing live object (one live
   object per Room, P16); start exactly one listener per enabled binding;
   disabled bindings stay disabled; force re-registration; compare the
   inventory; lift the fence; when every enabled binding registered again within

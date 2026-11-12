@@ -8154,11 +8154,26 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             holder.adapters.discard(self)
 
     def _control_adapters(self) -> list["SyntheticSocialityAdapter"]:
+        """The joined adapters (connected or registered): the ones control stops and starts again."""
         holder = self._control_holder()
         adapters = [self]
         if holder is not None:
             adapters.extend(item for item in list(holder.adapters) if item is not self)
         return adapters
+
+    def _control_members(self) -> list["SyntheticSocialityAdapter"]:
+        """Contract R2-1, R2-2 (OP-12 B-F001): every adapter constructed in this gateway process.
+
+        A served profile whose adapter is disconnected or never joined is still
+        restarted with the process, so its stored bindings belong to the guard,
+        the inventory, the receipts and the declaration. Joined adapters come
+        first; control never starts a member that was not joined.
+        """
+        members = self._control_adapters()
+        holder = self._control_holder()
+        if holder is not None:
+            members.extend(item for item in list(holder.members) if item not in members)
+        return members
 
     @staticmethod
     def _control_stored(adapters: list["SyntheticSocialityAdapter"], *, fresh: bool) -> list[PluginState] | None:
@@ -8278,7 +8293,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         """Contract R2-3: declare this process's installation through this session."""
         holder = self._control_holder()
         installation = self._installation_identity()
-        states = self._control_stored(self._control_adapters(), fresh=False)
+        states = self._control_stored(self._control_members(), fresh=False)
         if holder is None or not installation or states is None:
             return
         stored = [item for state in states for item in state.bindings]
@@ -8367,18 +8382,19 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         lift = True
         try:
             adapters = self._control_adapters()
-            stored = self._control_stored(adapters, fresh=True)
+            members = self._control_members()
+            stored = self._control_stored(members, fresh=True)
             if stored is None:
                 await self._report_control(binding, command_id, {"phase": "refused", "code": "connector_scope_unknown"})
                 return
-            if self._control_work_in_progress(adapters, stored):
+            if self._control_work_in_progress(members, stored):
                 await self._report_control(binding, command_id, {"phase": "refused", "code": "work_in_progress"})
                 return
             before = self._merged_inventory(stored)
             if action == "reconnect":
-                await self._control_reconnect(binding, command, before, adapters)
+                await self._control_reconnect(binding, command, before, adapters, members)
             else:
-                lift = await self._control_restart(binding, command, before, adapters)
+                lift = await self._control_restart(binding, command, before, adapters, members)
         finally:
             if lift:
                 self._lift_control_fence()
@@ -8441,23 +8457,27 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         return all(results)
 
     def _control_receipt(self, command: dict[str, str], phase: str, before: dict[str, Any],
-                         adapters: list["SyntheticSocialityAdapter"]) -> dict[str, Any]:
+                         members: list["SyntheticSocialityAdapter"]) -> dict[str, Any]:
         holder = self._control_holder()
         return {"commandId": command["commandId"], "action": command["action"], "phase": phase,
                 "requestedAt": command["requestedAt"], "startedAt": local_status._now(), "pid": os.getpid(),
                 "incarnation": holder.incarnation,
-                "stateFiles": list(dict.fromkeys(str(item._state_file) for item in adapters)),
+                "stateFiles": list(dict.fromkeys(str(item._state_file) for item in members)),
                 "before": before}
 
     async def _control_reconnect(self, binding: RoomBinding, command: dict[str, str],
-                                 before: dict[str, Any], adapters: list["SyntheticSocialityAdapter"]) -> None:
+                                 before: dict[str, Any], adapters: list["SyntheticSocialityAdapter"],
+                                 members: list["SyntheticSocialityAdapter"]) -> None:
         command_id = command["commandId"]
         await self._report_control(binding, command_id, {"phase": "reconnecting"})
-        receipt = self._control_receipt(command, "reconnecting", before, adapters)
-        self._write_receipts(adapters, receipt)
+        receipt = self._control_receipt(command, "reconnecting", before, members)
+        self._write_receipts(members, receipt)
+        # Only joined adapters stop and start again; members that were not
+        # joined stay as they were and are read for the after-inventory.
         latest, waits = await self._reconnect_all(adapters)
-        after = self._merged_inventory(latest)
-        match = after["bindings"] == before["bindings"]
+        resting = self._control_stored([item for item in members if item not in adapters], fresh=True)
+        after = self._merged_inventory(latest + (resting or []))
+        match = resting is not None and after["bindings"] == before["bindings"]
         self._lift_control_fence()
         registered = await self._await_all_registrations(waits)
         report: dict[str, Any] = {"phase": "completed"}
@@ -8467,11 +8487,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             report = {"phase": "failed", "code": "reconnect_incomplete"}
         report["inventory"] = {"before": before["counts"], "after": after["counts"], "match": match}
         await self._report_control(binding, command_id, report)
-        self._write_receipts(adapters, self._reported_receipt(
+        self._write_receipts(members, self._reported_receipt(
             receipt, None, code=report.get("code", ""), after={"counts": after["counts"]}))
 
     async def _control_restart(self, binding: RoomBinding, command: dict[str, str], before: dict[str, Any],
-                               adapters: list["SyntheticSocialityAdapter"]) -> bool:
+                               adapters: list["SyntheticSocialityAdapter"],
+                               members: list["SyntheticSocialityAdapter"]) -> bool:
         """Contract P17-6, R2-8. True when the fence lifts (the gateway is not restarting)."""
         command_id = command["commandId"]
         try:
@@ -8485,8 +8506,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return True
         within = restart_within_seconds()
         await self._report_control(binding, command_id, {"phase": "restarting", "restartWithinSeconds": within})
-        receipt = {**self._control_receipt(command, "restarting", before, adapters), "restartWithinSeconds": within}
-        if not self._write_receipts(adapters, receipt):
+        receipt = {**self._control_receipt(command, "restarting", before, members), "restartWithinSeconds": within}
+        if not self._write_receipts(members, receipt):
             await self._report_control(binding, command_id, {"phase": "failed", "code": "receipt_unavailable"})
             return True
         # A clean drain of the whole gateway's Rooms, as on disconnect; the fence stays held.
@@ -8502,14 +8523,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # again (the Room accepts a restart outcome only after that).
             await self._await_all_registrations(waits)
             await self._report_control(binding, command_id, {"phase": "failed", "code": "supervisor_unavailable"})
-            self._write_receipts(adapters, self._reported_receipt(receipt, None, code="supervisor_unavailable"))
+            self._write_receipts(members, self._reported_receipt(receipt, None, code="supervisor_unavailable"))
             return True
         # R2-8: accepted. The fence, the receipt and the disconnect stay until
         # the process ends; a core that never exits leaves the receipt overdue.
         self._control_holder().restarting = command_id
         logger.info("Room connector asked its supervisor for the gateway restart (%s)", command_id)
         self._control_watchdog = asyncio.create_task(
-            self._mark_restart_overdue(receipt, adapters), name="synthetic-sociality-restart-overdue")
+            self._mark_restart_overdue(receipt, members), name="synthetic-sociality-restart-overdue")
         return False
 
     async def _mark_restart_overdue(self, receipt: dict[str, Any], adapters: list["SyntheticSocialityAdapter"]) -> None:
