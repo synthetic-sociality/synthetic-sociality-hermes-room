@@ -5499,7 +5499,7 @@ class ConnectorEnrollmentTests(unittest.TestCase):
                     class Protocol:
                         def connector_enrollments(self, installation_id):
                             calls.append(("list", installation_id))
-                            return [{"invitationId": "invite-2"}]
+                            return [{"invitationId": "invite-2", "roomId": "room-2"}]
 
                         def claim_connector_enrollment(self, invitation_id, installation_id):
                             calls.append(("claim", invitation_id, installation_id))

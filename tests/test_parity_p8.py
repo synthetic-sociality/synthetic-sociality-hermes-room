@@ -366,7 +366,7 @@ class P8IdleCadenceTests(unittest.TestCase):
         async def during(instance, room, clock, bindings):
             await clock.run_until(START + 200)
             # The owner approves a new Room for lineage A, and mutes a2.
-            room.pending["inst-A"] = [{"invitationId": "invite-new"}]
+            room.pending["inst-A"] = [{"invitationId": "invite-new", "roomId": "a4"}]
             room.claims["invite-new"] = {"roomId": "a4", "membershipId": "member-a4", "credential": "credential-a4",
                                          "headSeq": 0}
             room.muted.add("a2")

@@ -1683,18 +1683,36 @@ def env_enablement() -> dict[str, Any] | None:
     return {} if validate_config(None) else None
 
 
-def _stale_inert_binding(binding: RoomBinding) -> bool:
-    """Owner 2026-11-12: a binding a re-admission may replace.
+# Inbox outcomes that carry no open or quarantined work (same set as the
+# OpenClaw connector's settled terminal evidence, OP-12 R5 B-F010).
+_SETTLED_INBOX = frozenset({"posted", "skipped", "superseded", "ignored", "cancelled"})
+_STALE_REASONS = frozenset({"credential_expired", "credential_revoked"})
 
-    Stale: revoked or disabled. Inert: it holds no delivery intent, delivery
-    lifecycle, quarantined or pending inbox entry, recovery closure or
-    credential rotation, so replacing it loses no evidence. An active binding,
-    or a stale one that holds evidence, is never replaced automatically.
+
+def _credential_expired(binding: RoomBinding, now: float | None = None) -> bool:
+    try:
+        expires = datetime.fromisoformat(str(binding.credential_expires_at).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return False
+    return expires <= (time.time() if now is None else now)
+
+
+def _stale_inert_binding(binding: RoomBinding) -> bool:
+    """Owner 2026-11-12, OP-12 R5 B-F010: a binding a re-admission may replace.
+
+    Stale: revoked, stopped for an expired or revoked credential, or holding an
+    expired credential. A binding disabled for any other reason (an operator's
+    manual disable) is not stale and is never enabled by a re-admission. Inert:
+    no delivery intent, delivery lifecycle, pending entry, recovery closure or
+    credential rotation, and only settled inbox outcomes, so replacing it loses
+    no evidence. Parity with the OpenClaw connector's staleInertState.
     """
-    if binding.enabled and not binding.revoked:
+    stale = binding.revoked or binding.disabled_reason in _STALE_REASONS or _credential_expired(binding)
+    if not stale:
         return False
     return not (binding.delivery_intents or binding.delivery_lifecycle or binding.recovery_closures
-                or binding.credential_rotation or binding.pending_since or binding.inbox)
+                or binding.credential_rotation or binding.pending_since
+                or any(value not in _SETTLED_INBOX for value in binding.inbox.values()))
 
 
 class SyntheticSocialityAdapter(BasePlatformAdapter):
@@ -4668,6 +4686,20 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             code="connector_enrollment_malformed",
                             retryable=False,
                         )
+                    # OP-12 R5 B-F009: the listed Room decides before the claim.
+                    # A claim consumes the invitation and re-admits the
+                    # membership, so an already bound Room whose binding may not
+                    # be replaced, or a listing without a valid roomId, is left
+                    # unclaimed: the invitation and the removed membership stay.
+                    listed_room = enrollment.get("roomId")
+                    if not isinstance(listed_room, str) or not listed_room.strip():
+                        logger.warning("Room connector skipped enrollment %s: the listing names no Room", invitation_id)
+                        continue
+                    held = self._state.binding(listed_room.strip())
+                    if held is not None and not _stale_inert_binding(held):
+                        logger.warning("Room %s is already bound and its binding is not replaceable; enrollment %s left unclaimed",
+                                       listed_room.strip(), invitation_id)
+                        continue
                     claimed = await self._call(
                         source,
                         lambda api, invitation_id=invitation_id: api.claim_connector_enrollment(
