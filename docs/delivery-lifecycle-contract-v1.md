@@ -1552,7 +1552,10 @@ command and delivers it to the installation's live controllable sessions
   revoked-but-stored, running or not): any active dispatch, event in flight,
   submission, attempt renewal, pending or non-quiescent renewal (renewing Room,
   `credential_rotation`, renewal journal) or unfinished delivery intent or
-  delivery lifecycle (not plain quarantined or terminal) makes the connector
+  delivery lifecycle (not plain quarantined or terminal), or a received event
+  not yet processed (Hermes: an inbox value outside terminal and quarantined,
+  or a `pending_since`; OpenClaw 0.2.80: a receive-ledger entry still
+  `received`), makes the connector
   report `refused` / `work_in_progress` at once and lift the fence, without
   waiting. No owner waiver exists for disabled bindings: an installation whose
   disabled binding holds fail-closed unfinished intents refuses both controls
