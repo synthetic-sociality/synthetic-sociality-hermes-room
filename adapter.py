@@ -202,14 +202,32 @@ def host_store_directory() -> Any:
     return home / "synthetic-sociality-room"
 
 
+def _safe_load_yaml(text: str) -> Any:
+    """OP-12 105 H105-F006: parse YAML the way core does, without importing core startup code.
+
+    Core's shared reader ``hermes_yaml.safe_load`` (what ``utils.fast_safe_load``
+    uses) comes first: production PM generations ship ruamel, not PyYAML. An
+    older core without ``hermes_yaml`` falls back to ``yaml.safe_load``. With
+    neither importable this raises ImportError, and the caller keeps its default.
+    """
+    try:
+        import hermes_yaml
+    except ImportError:
+        import yaml
+
+        return yaml.safe_load(text)
+    return hermes_yaml.safe_load(text)
+
+
 def restart_within_seconds() -> int:
     """Contract R2-8b: how long the accepted gateway restart may take, in seconds.
 
     The effective core ``restart_after_turn_timeout`` (as core's loader reads
     it: ``HERMES_RESTART_AFTER_TURN_TIMEOUT`` when set, else ``agent.
     restart_after_turn_timeout`` of the process host home's ``config.yaml``)
-    plus 300 s. Read only; no core startup code is imported. Unreadable or
-    invalid: the core default of 1800 s. Bounded to the wire range 60..86400.
+    plus 300 s. Read only, parsed with core's shared YAML reader (``_safe_load_yaml``);
+    no core startup code is imported. Unreadable or invalid: the core default of
+    1800 s. Bounded to the wire range 60..86400.
     """
     timeout = CORE_RESTART_AFTER_TURN_DEFAULT_SECONDS
     try:
@@ -218,9 +236,7 @@ def restart_within_seconds() -> int:
             raw = None
             config = host_store_directory().parent / "config.yaml"
             if config.is_file() and not config.is_symlink():
-                import yaml
-
-                data = yaml.safe_load(config.read_text(encoding="utf-8"))
+                data = _safe_load_yaml(config.read_text(encoding="utf-8"))
                 agent = data.get("agent") if isinstance(data, dict) else None
                 raw = agent.get("restart_after_turn_timeout") if isinstance(agent, dict) else None
         if raw is not None and not isinstance(raw, bool) and str(raw).strip() != "":
