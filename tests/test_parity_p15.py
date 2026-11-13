@@ -722,3 +722,78 @@ class MutedHeartbeatHoldTests(unittest.TestCase):
         self.assertEqual(len(room.times('register', 'm1')), 1, room.calls)  # one _watch pass, one stream
         self.assertEqual(observed['consumed'], [(True, 7)], room.calls)
         self.assertTrue(observed['routing'])
+
+
+class Op12RecoveryBudgetTests(unittest.TestCase):
+    """H107-P-002 (1.0.107 r3): a startup muted pause never retires recovery.
+
+    Adapted from the independent OP-12 review (Mac2024) RED tests and their
+    negative controls: the real participation gate, `_call` and closure path.
+    """
+
+    def closure_probe(self, *, mute):
+        import tempfile
+        from pathlib import Path
+        from test_parity_p8 import REAL_SLEEP, binding_for
+        observed = {'calls': [], 'completed': []}
+
+        async def body(directory):
+            instance = object.__new__(adapter.SyntheticSocialityAdapter)
+            binding = binding_for('review', 'review-install')
+            binding.acknowledged_cursor = 4
+            instance._state_file = Path(directory) / 'state.json'
+            instance._persist_binding = lambda _binding: True
+            record = {'recordDigest': 'review-digest', 'seq': 5, 'reason': 'epoch_closed',
+                      'evidenceRef': 'epoch:old', 'eventId': 'evt-5', 'operator': 'review'}
+            calls = observed['calls']
+
+            async def raw(_b, operation):
+                if mute and not calls:
+                    calls.append('proof-denied')  # the proof refused: the gate probes the roster
+                    raise adapter.ProtocolError('not allowed', status=403)
+                if mute and instance._membership_gate(binding).status != 'active':
+                    calls.append('roster-muted')
+                    return {'roster': [{'membershipId': binding.membership_id, 'status': 'muted'}]}
+                calls.append('proof')
+                return operation(types.SimpleNamespace())
+            instance._raw_call = raw
+
+            async def complete(_b, seq, **_kwargs):
+                observed['completed'].append(seq)
+                binding.acknowledged_cursor = seq
+            instance._complete_event = complete
+            with mock.patch.object(adapter.recovery, 'read_records_cached', return_value=[record]), \
+                    mock.patch.object(adapter.recovery, 'closures_for', return_value={5: record}), \
+                    mock.patch.object(adapter.recovery, 'prior_state'), \
+                    mock.patch.object(adapter.recovery, 'server_proof', return_value={'eventId': 'evt-5'}):
+                startup = asyncio.create_task(instance._muted_fail_fast(binding, instance._apply_recovery_closures))
+                for _ in range(30):
+                    await REAL_SLEEP(0)
+                if mute:
+                    observed['refused'] = set(getattr(instance, '_refused_closures', set()))
+                    # A real unmute: the own-roster probe answers active.
+                    await instance._membership_gate(binding).active(
+                        lambda: REAL_SLEEP(0, result='active'), refresh=True, force=True)
+                    instance._inactive_rooms().clear()
+                await asyncio.wait_for(startup, 2)
+                await instance._apply_recovery_closures(binding)
+            observed['acknowledged'] = binding.acknowledged_cursor
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(body(directory))
+        return observed
+
+    @time_limit(30)
+    def test_h107_p002_closure_muted_at_start_is_retried_after_the_unmute(self):
+        observed = self.closure_probe(mute=True)
+        self.assertEqual(observed['calls'][:2], ['proof-denied', 'roster-muted'], observed)
+        self.assertEqual(observed['refused'], set(), 'a participation pause is no final proof refusal')
+        self.assertEqual(observed['completed'], [5], observed)
+        self.assertEqual(observed['acknowledged'], 5)
+
+    @time_limit(30)
+    def test_h107_p002_active_closure_proves_and_completes_once(self):
+        observed = self.closure_probe(mute=False)
+        self.assertEqual(observed['calls'], ['proof'], observed)
+        self.assertEqual(observed['completed'], [5])
+        self.assertEqual(observed['acknowledged'], 5)
