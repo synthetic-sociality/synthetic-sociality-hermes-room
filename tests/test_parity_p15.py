@@ -584,7 +584,7 @@ class MutedHeartbeatHoldTests(unittest.TestCase):
     """
 
     def run_room(self, *, until, mute_at=None, pre_paused=False, listing_refuses=True,
-                 gated_routing=False, unread_state=()):
+                 gated_routing=False, unread_state=(), real_routing=False, unmute_at=None, event_at=None):
         from test_parity_p8 import IdleRoom, REAL_SLEEP, START, STREAM_PASS, VirtualClock, binding_for, idle_instance, simulated, start, stop
         clock = VirtualClock()
         room = IdleRoom(clock)
@@ -620,10 +620,24 @@ class MutedHeartbeatHoldTests(unittest.TestCase):
                 return operation(room.api(b))
             instance._raw_call = raw
 
+            async def consumed(b, event):
+                # Dispatch needs epoch session routing (_session_thread_for_epoch).
+                observed.setdefault('consumed', []).append((b.epoch_session_routing_initialized, event['seq']))
+
             async def stream_pass(b):
-                room.calls.append((clock.now, 'stream', b.room_id))
-                await asyncio.sleep(STREAM_PASS)
+                while True:
+                    room.calls.append((clock.now, 'stream', b.room_id))
+                    if event_at is not None and clock.now >= START + event_at and 'consumed' not in observed:
+                        # The next event on the same long-lived stream after the unmute.
+                        await instance._consume(b, {'seq': 7, 'type': 'message.created'})
+                    await asyncio.sleep(STREAM_PASS)
+                    if event_at is None:
+                        return  # else one SSE pass that stays open (keepalives)
             instance._transport_cycle = stream_pass
+            if real_routing:
+                del instance._ensure_epoch_session_routing  # the production routing read
+            if event_at is not None:
+                instance._consume_locked = consumed
             if gated_routing:
                 # The startup routing read is a gated background contact whose
                 # roster answer pauses the gate as muted (P15-2).
@@ -638,8 +652,13 @@ class MutedHeartbeatHoldTests(unittest.TestCase):
             if mute_at:
                 await clock.run_until(START + mute_at)
                 room.muted.add('m1')
+            if unmute_at is not None:
+                await clock.run_until(START + unmute_at)
+                observed['routing_while_muted'] = binding.epoch_session_routing_initialized
+                room.muted.discard('m1')
             await clock.run_until(START + until)
             observed['gate'] = instance._membership_gate(binding)
+            observed['routing'] = binding.epoch_session_routing_initialized
             observed['heartbeat_task'] = 'm1' in instance._heartbeat_tasks
             observed['watching'] = not instance._tasks['m1'].done()
             await stop(instance)
@@ -690,3 +709,16 @@ class MutedHeartbeatHoldTests(unittest.TestCase):
         self.assertTrue(observed['watching'])
         self.assertGreaterEqual(len(room.times('stream', 'm1')), 2, room.calls)
         self.assertEqual([call for call in room.calls if call[1].startswith('activity')], [], room.calls)
+
+    @time_limit(30)
+    def test_h107_event_after_unmute_on_the_same_stream_has_routing(self):
+        # H107-P-001: a muted start skips epoch session routing; after the
+        # heartbeat probe reopens the gate, the next event on the same stream
+        # gets routing before dispatch (no ValueError in _session_thread_for_epoch).
+        room, observed, start_at = self.run_room(until=400, pre_paused=True, real_routing=True,
+                                                 unmute_at=200, event_at=300)
+        self.assertFalse(observed['gate'].paused)
+        self.assertFalse(observed['routing_while_muted'])
+        self.assertEqual(len(room.times('register', 'm1')), 1, room.calls)  # one _watch pass, one stream
+        self.assertEqual(observed['consumed'], [(True, 7)], room.calls)
+        self.assertTrue(observed['routing'])
