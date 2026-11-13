@@ -1541,7 +1541,8 @@ command and delivers it to the installation's live controllable sessions
   and old-server answers are not fatal.
 - P17-2 Delivery and claim. A command arrives as `connectorControl`
   (`{commandId, action: reconnect|restart, state, requestedAt, expiresAt}`) in a
-  register or heartbeat answer. The connector dedupes by `commandId` per process
+  register or heartbeat answer. A `commandId` outside `^[A-Za-z0-9_-]{1,128}$`
+  is ignored (both connectors, OpenClaw from 0.2.80). The connector dedupes by `commandId` per process
   (in memory and in the status receipt), claims a `requested` command once
   through the session of the binding that received it
   (`POST /rooms/{roomId}/connector/sessions/{sessionId}/control/{commandId}/claim`)
@@ -1603,7 +1604,9 @@ command and delivers it to the installation's live controllable sessions
   (Hermes: SIGUSR1 to its own gateway process, the core's drain-aware
   `hermes gateway restart` path, `request_restart(detached=False,
   via_service=True)`, exit 75; OpenClaw: `openclaw gateway restart --safe` with
-  fixed argv). A failed request is reported `failed` /
+  fixed argv). A receipt that cannot be persisted is reported `failed` /
+  `receipt_unavailable` at once: nothing is drained and no supervisor is asked
+  (both connectors, OpenClaw from 0.2.80). A failed request is reported `failed` /
   `supervisor_unavailable`, then the connector reconnects to restore service.
   Once the request was accepted the fence, the receipt and the disconnect stay
   until the process ends; a connect of the same incarnation starts no Room.
