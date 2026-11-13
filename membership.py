@@ -9,6 +9,9 @@ import time
 
 
 TURN_CONTACT = ContextVar("room_turn_contact", default=False)
+# P2c-3b (1.0.107 r1): startup Room work of a muted membership fails fast
+# instead of waiting, so it never holds the heartbeat or the event stream.
+MUTED_FAIL_FAST = ContextVar("room_muted_fail_fast", default=False)
 
 
 def turn_contacts(operation):

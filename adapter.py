@@ -36,7 +36,7 @@ from .photos import PHOTO_TYPES, append_photo_context, effective_photos, host_im
 from . import share_file, artcraft
 from . import cli, local_status, profile_home, recovery, renewal, secret_isolation
 from . import link as device_link
-from .membership import MembershipGate, TURN_CONTACT, turn_contacts
+from .membership import MembershipGate, MUTED_FAIL_FAST, TURN_CONTACT, turn_contacts
 from .context import canonical_room_context as _canonical_room_context
 from .context import parse_reply_marker as _parse_reply_marker
 from .context import discussion_handover_context as _discussion_handover_context
@@ -4039,6 +4039,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         background=True,
                     )
             except ProtocolError as error:
+                if error.code == "membership_inactive":
+                    raise  # muted during the start: the work stays pending for active (P2c-3b)
                 if error.code in {"cycle_superseded", "turn_not_active", "turn_expired", "turns_not_used"}:
                     self._record_lifecycle_complete(binding, source_id)
                     continue
@@ -4098,20 +4100,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     connector = await self._ensure_connector(binding)
                     await self._accept_connector_enrollments(binding)
                     await self._wait_membership_active(binding, presence=True)
-                    muted = self._membership_gate(binding).paused
-                    if not muted:
-                        await self._ensure_epoch_session_routing(binding)
-                        await self._repair_pending_lifecycles(binding)
-                    if binding.room_id not in self._heartbeat_tasks:
+                    started = binding.room_id not in self._heartbeat_tasks
+                    if started:
                         # The server owns the cadence.  Sending at half its
                         # advertised interval turns a reconnect into a rate
                         # limit storm, especially while an SSE connection is
                         # being re-established. Contract P8-1: at most 60 s.
+                        # P2c-3b (1.0.107 r1): it starts before any gated
+                        # startup contact, so a pause meanwhile never holds it.
                         interval = self._heartbeat_interval(binding.room_id, connector)
                         self._heartbeat_tasks[binding.room_id] = asyncio.create_task(
                             self._heartbeat_loop(binding, interval),
                             name=f"synthetic-sociality-heartbeat:{binding.room_id}",
                         )
+                    if not self._membership_gate(binding).paused:
+                        await self._muted_fail_fast(binding, self._ensure_epoch_session_routing)
+                        await self._muted_fail_fast(binding, self._repair_pending_lifecycles)
+                    muted = self._membership_gate(binding).paused
+                    if started:
                         # Durable connector sessions are the authority for
                         # roster presence.  Mirror that freshly accepted
                         # signal into the bounded activity relay so an open
@@ -4119,14 +4125,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         # for a canonical room refresh.
                         if not muted:
                             self._room_map("_idle_frame_at")[binding.room_id] = _clock()
-                            await self._publish(
-                                binding,
-                                f"presence:{binding.room_id}",
+                            await self._muted_fail_fast(binding, lambda target: self._publish(
+                                target,
+                                f"presence:{target.room_id}",
                                 "heartbeat",
                                 suppress_errors=True,
-                            )
-                    if not muted:
-                        await self._apply_recovery_closures(binding)
+                            ))
+                    if not self._membership_gate(binding).paused:
+                        await self._muted_fail_fast(binding, self._apply_recovery_closures)
                     await self._transport_cycle(binding)
                     self._report_ledger(binding)
                     self._persist_binding(binding)
@@ -4370,7 +4376,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         """Negotiate this binding's write dialect through one read-only GET."""
         if binding.room_id in self._message_contract_checked:
             return
-        report = await self._call(binding, lambda api: api.status(), background=True)
+        # Read-only precondition of the registration: a presence contact (P2c-3b).
+        report = await self._call(binding, lambda api: api.status(), background=True, presence=True)
         raw_capabilities = report.get("protocolCapabilities")
         if raw_capabilities is None:
             capabilities: list[str] = []  # legacy server: explicit safe v1
@@ -4701,6 +4708,18 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             getattr(self, "_stream_generations", {}).pop(binding.room_id, None)
         self._status_room(binding, connection="inactive", inactive=True, error_code="connector_not_active")
         logger.info("Room %s membership participation paused; all Room watchers wait for a membership change", binding.room_id)
+
+    async def _muted_fail_fast(self, binding: RoomBinding, work: Callable) -> None:
+        """P2c-3b (1.0.107 r1): startup work that pauses the gate as muted stops; it waits for active."""
+        token = MUTED_FAIL_FAST.set(True)
+        try:
+            await work(binding)
+        except ProtocolError as error:
+            gate = self._membership_gate(binding)
+            if error.code != "membership_inactive" or not gate.paused or not gate.presence_open():
+                raise
+        finally:
+            MUTED_FAIL_FAST.reset(token)
 
     async def _wait_membership_active(self, binding: RoomBinding, *, presence=False) -> None:
         while True:
@@ -8363,6 +8382,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         presence = presence and background
         while True:
             if background:
+                gate = self._membership_gate(binding)
+                if not presence and MUTED_FAIL_FAST.get() and gate.paused and gate.presence_open():
+                    raise self._membership_inactive_error(gate.status)
                 await self._wait_membership_active(binding, presence=presence)
             elif self._membership_gate(binding).paused:
                 raise self._membership_inactive_error(self._membership_gate(binding).status)

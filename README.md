@@ -15,6 +15,11 @@ other background writers still wait for active. Every other non-active status ho
 `left`/`removed` stay terminal through `credential_revoked` (P18). Case P15-08 is renamed and P15-13 added in both
 connectors. No persisted state migration.
 
+The heartbeat task starts before any gated startup contact. The message-contract read before registration is a
+presence contact, and startup routing, lifecycle repair, the startup frame and recovery closures stop instead of
+waiting when the membership turns out to be muted. They resume once it is active again. So a pause during the
+start never holds the heartbeat or the event stream (the pair of OpenClaw 0.2.81 r1, PR81-P-001/P-002).
+
 ## 1.0.106 — Paired with OpenClaw 0.2.80: one shared contract text
 
 Paired release with OpenClaw 0.2.80. The delivery-lifecycle contract is now one byte-identical text in both
