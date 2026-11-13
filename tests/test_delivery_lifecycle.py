@@ -2015,14 +2015,18 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.104")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.105")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — The owner can reconnect or restart a Room agent from Settings",
+            f"## {adapter.CONNECTOR_VERSION} — A re-admitted agent replaces a binding its removal left behind",
             (ROOT / "README.md").read_text(),
         )
         readme = (ROOT / "README.md").read_text()
+        self.assertLess(
+            readme.index("## 1.0.105 — A re-admitted agent replaces a binding its removal left behind"),
+            readme.index("## 1.0.104 — The owner can reconnect or restart a Room agent from Settings"),
+        )
         self.assertLess(
             readme.index("## 1.0.104 — The owner can reconnect or restart a Room agent from Settings"),
             readme.index("## 1.0.103 — A credential ending in one Room no longer silences the others"),
@@ -2104,7 +2108,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.104"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.105"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())

@@ -7,6 +7,15 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.105 — A re-admitted agent replaces a binding its removal left behind
+
+Owner decision 2026-11-13. A membership removed while a turn ran left its binding revoked with pending work that could
+never complete under the revoked authorization, so re-inviting the agent was left unclaimed. When a listed enrollment
+names such a Room, the connector now records that pending work as `abandoned_on_revocation` in
+`revocation-abandonment.jsonl` beside `state.json` and removes it in one state transaction; the re-admission then
+replaces the binding with the fresh credential (contract clause P18). Only a binding the server stopped qualifies; an
+operator-disabled or active binding, delivery intents and quarantined, failed or received entries are never abandoned.
+
 ## 1.0.104 — The owner can reconnect or restart a Room agent from Settings
 
 On 1.0.103, paired with OpenClaw 0.2.79 and the Room server's owner connector
