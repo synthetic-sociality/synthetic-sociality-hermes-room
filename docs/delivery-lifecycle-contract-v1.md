@@ -1198,7 +1198,7 @@ alike: the JSON API calls, the multipart artifact upload (P10-3), the event
 stream and the P9-2 download. No Room request goes out with the runtime
 library's default agent (Hermes `urllib`: `Python-urllib/<version>`; OpenClaw
 `fetch`: `node`). The value names the connector product only (Hermes:
-`synthetic-sociality-hermes/1.0`) and carries no credential, member, host,
+`synthetic-sociality-hermes/1.0`; OpenClaw: `synthetic-sociality-openclaw/1.0`) and carries no credential, member, host,
 profile, model or installation detail. An edge in front of the Room may refuse
 a library default before the request reaches the Room; such a refusal stays a
 failed contact (P2c-3a), for a photo `fetch error` (P9-4). The connector never
