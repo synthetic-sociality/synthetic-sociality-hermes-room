@@ -1189,6 +1189,8 @@ edge acceptance or independent review.
 
 ## P11b — Connector User-Agent on every Room request (2026-10-25)
 
+OpenClaw implements P11b from 0.2.80.
+
 P11b-1 Product User-Agent. Every connector HTTP request to the Room carries the
 connector's product `User-Agent`; the photo download included. The value comes
 from one shared constant of the connector and is set on each request kind
@@ -1259,6 +1261,8 @@ These local checks do not replace live host acceptance or independent review.
 
 ## P13 — Agent replies address Room members by @DisplayName (2026-10-27)
 
+OpenClaw implements P13 from 0.2.80.
+
 P13-1 Client-side recipient intent. Both connectors apply the same rule to normal
 replies and standalone posts. Only active participant_agent and room_master
 memberships are eligible, as accepted by the server today. Human names stay prose.
@@ -1317,6 +1321,8 @@ do not replace the Go gate, host tests or independent/live acceptance.
 - P13-10 both plugins use Unicode lowercase name matching
 
 ## P14 — ArtCraft agent tools
+
+OpenClaw does not implement P14 yet; until it does, the P14 cases are Hermes-only.
 
 The paired releases are Hermes 1.0.98 and OpenClaw 0.2.77, including P13.
 The five tool names, descriptions and JSON parameter schemas are pinned by
@@ -1407,6 +1413,8 @@ Shared cases:
 - P14-13 transport failures return a fixed upstream error
 
 ## P15 — Ask sources and membership watcher pause
+
+OpenClaw implements P15 from 0.2.80.
 
 P15-1 A cycle attempt promotes its exact canonical `sourceEventId` from either
 `message.posted` or `human.command`, in the loaded page or the existing bounded
@@ -1639,19 +1647,105 @@ Both conformance files pin `parityP17Contract` and these identical case names:
 - P17-11 a supervisor failure reports supervisor_unavailable and restores service
 - P17-12 the restarted process reports completion or mismatch once and control leaves state files unchanged
 
+OpenClaw host branch (OpenClaw 0.2.79, kept in 0.2.80). The clauses above are shared; the OpenClaw text of
+P17-6, P17-7 and P17-8 and its R2 paragraphs follow verbatim. Where they name an OpenClaw host behaviour they
+apply to OpenClaw only; where they restate a shared rule the shared clause above governs.
+
+- P17-6 Restart. Report `restarting`; write the receipt to `status.json` key
+  `connectorControl` = `{commandId, action, phase: "restarting",
+  requestedAt, claimedAt, startedAt, pid, before: {counts, bindings}}`
+  before the supervisor is asked; drain cleanly (listeners stop as on a
+  disconnect, fence held); ask the installation's own supervisor through its
+  supported lifecycle only. Hermes: the gateway's drain-aware restart
+  (SIGUSR1 to its own process, the `hermes gateway restart` path). OpenClaw:
+  `openclaw gateway restart --safe --json` with the fixed argv `["gateway",
+  "restart", "--safe", "--json"]` through the resolved `openclaw` binary,
+  never a shell.
+  In OpenClaw 2026.7.1-2 `--safe` is the CLI option of `gateway restart`
+  (`dist/register-service-commands-CPkm3CFI.js:72`); it calls the running
+  gateway's `gateway.restart.request` (`dist/lifecycle-yIOsvBfe.js:209-235`,
+  dispatched at `:301`), which schedules the SIGUSR1 restart after a preflight
+  of active queue, reply and task work and answers `deferred` while work is
+  active (`dist/restart-DJLfBy-X.js:96-139`); the gateway then restarts as a
+  full process with a fresh pid, or in process when respawn is unavailable
+  (`dist/run-CSvF3r1e.js:370-398`). With `--json` the CLI prints `{ok: true,
+  result, message, preflight, restart, warnings}`
+  (`dist/lifecycle-yIOsvBfe.js:221-229`), `result` being `scheduled`,
+  `deferred` or `coalesced` (`dist/restart-DJLfBy-X.js:107`); a failure
+  throws and the CLI exits non-zero. A host deferral is bounded by
+  `gateway.reload.deferralTimeoutMs` (default 300 s) and may then force the
+  restart. The `restarting` report carries `restartWithinSeconds` (R2-8b):
+  OpenClaw `gateway.reload.deferralTimeoutMs / 1000 + 300`, read from the
+  host's runtime config, `300 + 300` when absent or unreadable
+  (`dist/restart-BF68zBs3.js:117`, `:401-405`), 86400 when the host waits
+  indefinitely (0 or less); Hermes the effective `restart_after_turn_timeout`
+  + 300. The Room server's `restarting` deadline is that window clamped to
+  600..7200 s. Outcomes: `scheduled`, `deferred` or `coalesced` is accepted: the
+  fence, the drained listeners and the `restarting` receipt stay, nothing is
+  reported and no timeout gives up; completion is the next incarnation's
+  (P17-7). An explicit error answer, a non-zero exit without an accepted
+  status, or a spawn error is not accepted: report `failed` /
+  `supervisor_unavailable`, then a reconnect (P17-5, without its reports)
+  restores service. A CLI that does not finish within 60 s is killed and the
+  outcome is unconfirmed (a restart may be armed): the fence stays, the
+  receipt becomes `restart_unconfirmed`, nothing is reported and the Room
+  server's deadline ends the command (`did_not_come_back`); an exit 0 without
+  a status is treated the same way. Hermes keeps the fence and receipt after
+  an accepted SIGUSR1 likewise and marks the receipt `restart_overdue` after
+  the server's window. Tests use a simulated subprocess only, never a real
+  gateway or host restart.
+- P17-7 After a restart. The receipt holds the claiming incarnation (one
+  opaque token per plugin load in a process: a random value plus the pid).
+  Only a different incarnation completes: the new gateway reads the receipt,
+  computes the after inventory from the state files before any listener
+  starts, and on the first authenticated registration of a binding in the
+  receipt's snapshot reports `completed` (inventory equal) or `failed` /
+  `inventory_mismatch`, with the counts. A runtime of the claiming
+  incarnation (a presence fallback, a host channel restart, a re-attached
+  account) never completes and never resumes the drained listeners. The receipt is then marked
+  `reported`; a repeated or closed answer marks it reported too. A receipt
+  never causes a second restart or claim.
+- P17-8 Control never edits cursors, journals, quarantined deliveries,
+  recovery fences or credentials. Control changes no account state file (a
+  forced re-registration saves the same content); it writes only
+  `status.json` (`connectorControl`) and, once, `installation.json`.
+
+Installation declaration (R2). After a registration in which the Room granted
+`connector.control.v1` (old servers never grant it), the connector sends
+`PUT /rooms/{roomId}/connector/sessions/{sessionId}/installation` with
+`{installationId, incarnation, memberships, origins}`: the membership ids of
+every stored binding of the process whose base URL origin equals this
+binding's origin, and per origin (scheme://host[:port] only) the counts of
+stored and enabled bindings over every configured account. No credential,
+path or query. A 404, 409 or failed contact is not fatal.
+
+OpenClaw process scope and incarnation (R2). The controller (registry of
+account runtimes, fence, seen command ids, receipt owner, incarnation) lives
+on `globalThis` under `Symbol.for("synthetic-sociality-room.connector-control.v1")`,
+so a second evaluation of the plugin module in the same process shares it.
+Node caches an ES module per URL, so a second load of the same entry returns
+the same module; a loader that evaluates it again finds the holder. The
+incarnation therefore does not change on re-import. It changes when the
+process starts and at every `gateway_stop` the host runs: every gateway
+close runs those hooks, the in-process restart included
+(`dist/server.impl-qYPVZMND.js:2810-2822`), so the runtimes the restarted
+gateway starts belong to a new incarnation, and the restart this
+incarnation armed ends its fence there. Presence-fallback runtimes and
+per-account channel restarts keep the token.
+
 ## P18 — Abandon the pending work of a revoked binding on re-admission (2026-11-13)
 
-Hermes 1.0.105 (owner decision 2026-11-13, Hermes only). A membership removed while a turn ran leaves its binding revoked with pending work that can never complete under the revoked authorization (the Real `duev8o1h936bl9f` binding: a blocked `cycle_conflict` lifecycle entry, inbox `2646` pending with `pending_since`). Without this clause such a binding is not inert, so a re-admission of the same membership stays unclaimed (P17 adoption, R5 B-F009).
+Hermes 1.0.105, OpenClaw 0.2.80 (owner decision 2026-11-13; OpenClaw by the paired brief 2026-11-13). A membership removed while a turn ran leaves its binding revoked with pending work that can never complete under the revoked authorization (the Real `duev8o1h936bl9f` binding: a blocked `cycle_conflict` lifecycle entry, inbox `2646` pending with `pending_since`). Without this clause such a binding is not inert, so a re-admission of the same membership stays unclaimed (P17 adoption, R5 B-F009).
 
-- P18-1 Eligibility. Only a binding that is stopped (not enabled) and either `revoked` or stopped by the server with `disabled_reason` `credential_revoked`/`credential_expired`. An enabled binding whose credential merely expired is the renewal case: its work is never abandoned (it may still be adopted later only when it holds no work at all). A binding an operator disabled (any other non-empty `disabled_reason`) is never abandoned or replaced, whatever its other flags.
-- P18-2 Scope. Only delivery lifecycle entries in `pending` or `blocked`, inbox entries in `pending`/`retryable`/`failed-retryable`, and their `pending_since` and `pending_retries`. Delivery intents, quarantined, failed and received entries, recovery closures, a credential rotation and terminal evidence are not abandoned; any of them keeps the binding non-replaceable.
-- P18-3 Audit. Every abandoned entry is appended, before the state changes, to `revocation-abandonment.jsonl` beside `state.json` (0600, fsync): `reason` `abandoned_on_revocation`, Room, membership, installation, entry kind and id, the verbatim original record (no credential or session value is ever part of these records), the revocation evidence and `abandoned_at`. The file is separate from the binding, so the audit survives the replacement, every load and save, and a rollback to 1.0.104. Each entry carries a deterministic `auditId`; a replay appends nothing twice. The journal is opened without following a link, must be a regular file with one link, and every record is written completely or the abandonment fails closed (nothing removed, no claim). A torn last line left by an interrupted earlier write is kept unchanged as its own line; new records start on a fresh line. The state changes only after every `recorded` entry reads back as an intact line with exactly the expected evidence; otherwise nothing is removed and nothing is claimed. A crash after the state transaction and before the `applied` marker leaves a `recorded` entry without an outcome: the stored binding is then the authority (the entries are gone from it), and the missing marker is not repaired after the fact.
+- P18-1 Eligibility. Only a binding that is stopped (not enabled) and either `revoked` or stopped by the server with `disabled_reason` `credential_revoked`/`credential_expired`. OpenClaw: an account state with `revoked: true` and a `revokedReason` that is absent or one of those two codes (a retired account is never restarted); `enabled: false` without a revocation is an operator's disable. An enabled binding whose credential merely expired is the renewal case: its work is never abandoned (it may still be adopted later only when it holds no work at all). A binding an operator disabled (any other non-empty `disabled_reason`) is never abandoned or replaced, whatever its other flags.
+- P18-2 Scope. Only delivery lifecycle entries in `pending` or `blocked`, inbox entries in `pending`/`retryable`/`failed-retryable`, and their `pending_since` and `pending_retries`. Delivery intents, quarantined, failed and received entries, recovery closures, a credential rotation and terminal evidence are not abandoned; any of them keeps the binding non-replaceable. A settled terminal delivery intent (P3-2: posted with its lifecycle done, superseded or skipped) and settled terminal evidence or inbox outcomes (posted, skipped, superseded, ignored, cancelled) carry no open work: they are neither abandoned nor block a replacement (Hermes 1.0.106, OpenClaw 0.2.80). OpenClaw has no inbox or `pending_since` ledger: it keeps unfinished post-delivery lifecycle work as delivery intents with status `lifecycle_pending` or `lifecycle_blocked`, and those intents are its only abandonable entries; an unsettled receive-ledger entry (`received`, `quarantined`, `failed`) and an applied recovery closure keep its account non-replaceable.
+- P18-3 Audit. Every abandoned entry is appended, before the state changes, to `revocation-abandonment.jsonl` beside the state file (Hermes `state.json`, OpenClaw the account's state file; 0600, fsync): `reason` `abandoned_on_revocation`, Room, membership, installation, entry kind and id, the verbatim original record (no credential or session value is ever part of these records), the revocation evidence and `abandoned_at`. The file is separate from the binding, so the audit survives the replacement, every load and save, and a rollback to the previous release. OpenClaw names the installation by the account's `clientInstanceId`. Each entry carries a deterministic `auditId`; a replay appends nothing twice. The journal is opened without following a link, must be a regular file with one link, and every record is written completely or the abandonment fails closed (nothing removed, no claim). A torn last line left by an interrupted earlier write is kept unchanged as its own line; new records start on a fresh line. The state changes only after every `recorded` entry reads back as an intact line with exactly the expected evidence; otherwise nothing is removed and nothing is claimed. A crash after the state transaction and before the `applied` marker leaves a `recorded` entry without an outcome: the stored binding is then the authority (the entries are gone from it), and the missing marker is not repaired after the fact.
 - P18-4 Atomicity. One state transaction removes exactly the audited entries, and only while the stored binding is still eligible and holds exactly those entries; otherwise nothing changes. Cursors, acknowledgement, credentials and every other field stay as stored.
 - P18-5 Order. Abandonment runs only while a listed enrollment names that Room, before the claim, and only when the binding is inert afterwards; the claim follows the unchanged P17/R5 path (no claim before eligibility, post-claim re-check, one live binding object, exactly one listener). The old credential is never re-enabled.
 
 Cases:
 
-- P18-01 the live Real binding is left unclaimed on 1.0.104 and replaced by the fresh credential with one listener on 1.0.105
+- P18-01 the live Real binding is left unclaimed before P18 and replaced by the fresh credential with one listener (Hermes 1.0.105, OpenClaw 0.2.80)
 - P18-02 the abandonment journal records every abandoned entry with reason, Room, membership, ids and timestamps and survives replacement and reload
 - P18-03 an active binding with pending work is untouched and unclaimed
 - P18-04 an operator-disabled binding with pending work is untouched and unclaimed

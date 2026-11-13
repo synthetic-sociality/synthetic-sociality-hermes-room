@@ -1620,7 +1620,7 @@
   ],
   "parityP18Contract": "docs/delivery-lifecycle-contract-v1.md#p18--abandon-the-pending-work-of-a-revoked-binding-on-re-admission-2026-11-13",
   "parityP18Cases": [
-    "P18-01 the live Real binding is left unclaimed on 1.0.104 and replaced by the fresh credential with one listener on 1.0.105",
+    "P18-01 the live Real binding is left unclaimed before P18 and replaced by the fresh credential with one listener (Hermes 1.0.105, OpenClaw 0.2.80)",
     "P18-02 the abandonment journal records every abandoned entry with reason, Room, membership, ids and timestamps and survives replacement and reload",
     "P18-03 an active binding with pending work is untouched and unclaimed",
     "P18-04 an operator-disabled binding with pending work is untouched and unclaimed",
