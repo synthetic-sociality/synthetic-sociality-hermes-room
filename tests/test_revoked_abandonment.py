@@ -217,6 +217,17 @@ if __name__ == "__main__":
 class RevokedAbandonmentRemedyTests(RevokedAbandonmentTests):
     """OP-12 105 R1 remedies: H105-F001 (abandonment eligibility) and H105-F004 (journal open/write safety)."""
 
+    async def test_settled_terminal_intents_neither_block_nor_are_abandoned(self):
+        """Hermes 1.0.106 / OpenClaw 0.2.80 parity: a settled terminal intent (P3-2) is not open work."""
+        real = copy.deepcopy(REAL)
+        real["delivery_intents"] = {"evt-settled": {"state": "posted", "delivery_state": "posted", "lifecycle_state": "complete",
+                                                    "canonical_event": {"id": "ev-settled", "seq": 2600, "ts": "2026-11-11T18:00:00Z"}}}
+        _instance, path, _live, claims, watched, _before = await self.run_claim(real)
+        self.assertEqual(claims, [FRESH["invitationId"]])
+        self.assertEqual(state_store.load(path).binding(ROOM).credential, "credential-fresh")
+        self.assertEqual(len(watched), 1)
+        self.assertNotIn("evt-settled", json.dumps([line.get("entry") for line in self.journal(path)]))
+
     async def test_h105_f001_an_enabled_binding_whose_credential_merely_expired_is_not_abandoned(self):
         renewable = copy.deepcopy(REAL)
         renewable.update(enabled=True, revoked=False, disabled_reason="", credential_expires_at="2026-01-01T00:00:00Z")

@@ -218,5 +218,31 @@ class StaleBindingAdoptionRaceTests(StaleBindingAdoptionTests):
         self.assertEqual(watched, [])
 
 
+class SettledTerminalIntentTests(StaleBindingAdoptionTests):
+    """Hermes 1.0.106 / OpenClaw 0.2.80 (P18-2, decided for parity): a settled terminal intent (contract P3-2:
+    posted with its lifecycle done, superseded or skipped) carries no open work, so it neither blocks a
+    re-admission nor is abandoned; a quarantined or open intent still blocks."""
+
+    SETTLED = {"evt-1": {"state": "posted", "delivery_state": "posted", "lifecycle_state": "complete",
+                         "canonical_event": {"id": "ev-1", "seq": 5, "ts": "2026-11-01T00:00:00Z"}},
+               "evt-2": {"state": "skipped", "delivery_state": "skipped", "lifecycle_state": "not_required"}}
+
+    async def test_settled_terminal_intents_do_not_block_readmission(self):
+        existing = self.stored(enabled=False, revoked=True, disabled_reason="credential_revoked",
+                               delivery_intents=dict(self.SETTLED))
+        instance, path, live, watched, _cancelled, _before = await self.claim(existing)
+        self.assertEqual(self.claims, ["invite-9"])
+        self.assertEqual(state_store.load(path).binding("room-2").credential, "credential-fresh")
+        self.assertEqual(len(watched), 1)
+
+    async def test_a_quarantined_intent_still_blocks(self):
+        quarantined = {"evt-1": {"state": "quarantined", "delivery_state": "quarantined", "lifecycle_state": "not_started"}}
+        _instance, path, _live, watched, _cancelled, before = await self.claim(
+            self.stored(enabled=False, revoked=True, disabled_reason="credential_revoked", delivery_intents=quarantined))
+        self.assertEqual(self.claims, [])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(watched, [])
+
+
 if __name__ == "__main__":
     unittest.main()
