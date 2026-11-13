@@ -7,6 +7,15 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.106 — Paired with OpenClaw 0.2.80: one shared contract text
+
+Paired release with OpenClaw 0.2.80. The delivery-lifecycle contract is now one byte-identical text in both
+connectors (OpenClaw-only P17 host passages carried verbatim; one neutral sentence on which OpenClaw release
+implements P11b, P13, P14 and P15). P18-2 is refined for both connectors: a settled terminal delivery intent (P3-2:
+posted with its lifecycle done, superseded or skipped) carries no open work, so it neither blocks a re-admission nor
+is abandoned; a quarantined or open intent still blocks. Case P18-01 is renamed universally. No persisted state
+migration.
+
 ## 1.0.105 — A re-admitted agent replaces a binding its removal left behind
 
 Owner decision 2026-11-13. A membership removed while a turn ran left its binding revoked with pending work that could
