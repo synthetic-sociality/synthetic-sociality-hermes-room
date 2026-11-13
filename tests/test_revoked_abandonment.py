@@ -292,3 +292,97 @@ class RevokedAbandonmentRemedyTests(RevokedAbandonmentTests):
                 adapter._append_journal(Path(directory.name) / "second.jsonl", records)
         finally:
             adapter.os.write = original
+
+
+class JournalDurabilityTests(RevokedAbandonmentTests):
+    """OP-12 105 R2 precheck H105-F007: a torn journal tail never corrupts a new record, and the state is cleared
+    only after every recorded entry reads back intact with its expected evidence."""
+
+    async def run_with_append(self, wrapper):
+        original = adapter._append_journal
+        adapter._append_journal = lambda journal, records: wrapper(original, journal, records)
+        try:
+            return await self.run_claim(REAL)
+        finally:
+            adapter._append_journal = original
+
+    def lines(self, path):
+        target = path.parent / JOURNAL
+        return target.read_bytes().splitlines() if target.exists() else []
+
+    def journal(self, path, phase="recorded"):
+        parsed = []
+        for line in self.lines(path):
+            try:
+                parsed.append(json.loads(line))
+            except ValueError:
+                continue  # a torn line kept as evidence
+        return parsed if phase is None else [line for line in parsed if line.get("phase") == phase]
+
+    async def assert_torn_tail_is_isolated(self, tail):
+        seeded = {"done": False}
+
+        def seed(original, journal, records):
+            if not seeded["done"]:
+                seeded["done"] = True
+                with open(journal, "ab") as handle:
+                    handle.write(tail)
+            return original(journal, records)
+
+        _instance, path, _live, claims, watched, _before = await self.run_with_append(seed)
+        self.assertEqual(claims, [FRESH["invitationId"]])
+        lines = self.lines(path)
+        self.assertEqual(lines[0], tail, "the torn fragment is kept as its own line, unchanged")
+        recorded = {(r["entry"]["kind"], r["entry"]["id"]): r["entry"] for r in self.journal(path)}
+        self.assertEqual(recorded[("delivery_lifecycle", "joss0s11rj0vhre")]["record"],
+                         REAL["delivery_lifecycle"]["joss0s11rj0vhre"])
+        self.assertEqual(recorded[("inbox", "2646")]["record"]["state"], "pending")
+        self.assertEqual(len(self.journal(path, "applied")), 2)
+        self.assertEqual(len(watched), 1)
+
+    async def test_h105_f007_an_unrelated_torn_tail_is_isolated(self):
+        await self.assert_torn_tail_is_isolated(b'{"phase": "recorded", "auditId": "deadbeef", "reason": "abandoned_on_revoc')
+
+    async def test_h105_f007_a_torn_partial_of_the_same_record_is_isolated(self):
+        await self.assert_torn_tail_is_isolated(b'{"abandonedAt": "2026-11-13T00:00:00.000000Z", "auditId": "')
+
+    async def test_h105_f007_a_replay_over_a_torn_journal_appends_no_duplicate(self):
+        _instance, path, _live, _claims, _watched, _before = await self.run_claim(REAL)
+        entries = self.journal(path)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        again = Path(directory.name) / "state.json"
+        state_store.save(state_store.PluginState(bindings=[source_binding(), state_store.RoomBinding.from_dict(REAL)]), again)
+        (again.parent / JOURNAL).write_bytes(
+            b'{"torn": ' + b"\n" + b"".join(json.dumps(e, sort_keys=True).encode() + b"\n" for e in entries) + b'{"also torn')
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        instance._state = state_store.load(again)
+        instance._state_file = again
+        original_update = adapter.update
+        adapter.update = lambda mutator: state_store.update(mutator, again)
+        try:
+            self.assertTrue(instance._abandon_revoked_pending_work(instance._state.binding(ROOM)))
+        finally:
+            adapter.update = original_update
+        self.assertEqual(self.journal(again), entries, "no duplicate recorded entry")
+        self.assertIn(b'{"also torn', self.lines(again))
+
+    async def test_h105_f007_a_recorded_entry_missing_on_read_back_fails_closed(self):
+        def drop_recorded(original, journal, records):
+            return original(journal, [r for r in records if r.get("phase") != "recorded"])
+
+        _instance, path, _live, claims, watched, before = await self.run_with_append(drop_recorded)
+        self.assertEqual(claims, [])
+        self.assertEqual(path.read_bytes(), before, "state byte-identical when evidence cannot be verified")
+        self.assertEqual(watched, [])
+
+    async def test_h105_f007_a_record_with_the_right_audit_id_but_other_evidence_fails_closed(self):
+        def tamper(original, journal, records):
+            forged = [dict(r, entry={**r["entry"], "record": {"forged": True}}) if r.get("phase") == "recorded" else r
+                      for r in records]
+            return original(journal, forged)
+
+        _instance, path, _live, claims, watched, before = await self.run_with_append(tamper)
+        self.assertEqual(claims, [])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(watched, [])
