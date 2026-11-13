@@ -7,6 +7,14 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.107 — Paired with OpenClaw 0.2.81: a muted membership keeps its heartbeat
+
+Paired release with OpenClaw 0.2.81 (contract P2c-3b, P15-2). A muted membership keeps registering, heartbeating
+and reading its event stream, so its Room lease no longer expires; its enrollment listing, activity frames and the
+other background writers still wait for active. Every other non-active status holds these contacts as before, and
+`left`/`removed` stay terminal through `credential_revoked` (P18). Case P15-08 is renamed and P15-13 added in both
+connectors. No persisted state migration.
+
 ## 1.0.106 — Paired with OpenClaw 0.2.80: one shared contract text
 
 Paired release with OpenClaw 0.2.80. The delivery-lifecycle contract is now one byte-identical text in both

@@ -43,6 +43,10 @@ class MembershipGate:
         self.status = status
         self.checked_at = self.clock()
 
+    def presence_open(self):
+        """P2c-3b (1.0.107): a muted membership keeps its registration, heartbeat and event stream."""
+        return not self.paused or self.status == "muted"
+
     async def active(self, probe, *, refresh=False, force=False):
         if not self.paused and not refresh:
             return True

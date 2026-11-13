@@ -350,7 +350,7 @@ class P7aTests(unittest.TestCase):
             self.assertTrue(outcome["reached"])
             registrations, enrollments, state_reads, heartbeats = observed["muted"]
             self.assertEqual(registrations, 1)  # no registration again
-            self.assertEqual(heartbeats, 0)  # P15: every watcher pauses, including heartbeat
+            self.assertGreater(heartbeats, 0)  # P2c-3b (1.0.107): a muted membership keeps heartbeating
             self.assertEqual(enrollments, 1)  # no listing while muted
             self.assertLessEqual(state_reads, 1 + 1.0 / 0.4 + 1)  # one read, then the slow re-check
             self.assertEqual((observed["status_muted"]["connection"], observed["status_muted"]["lastErrorCode"]),

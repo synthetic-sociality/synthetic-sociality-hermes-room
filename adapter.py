@@ -111,7 +111,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.106"
+CONNECTOR_VERSION = "1.0.107"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -4083,7 +4083,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 try:
                     if not await self._refresh_binding(binding):
                         return
-                    await self._wait_membership_active(binding)
+                    # P2c-3b (1.0.107): a muted membership registers, beats and
+                    # reads its event stream; its other Room work waits for active.
+                    await self._wait_membership_active(binding, presence=True)
                     await self._expire_stale_pending(binding)
                     orphaned = self._overtaken_delivery_intents(binding)
                     if orphaned:
@@ -4095,9 +4097,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         )
                     connector = await self._ensure_connector(binding)
                     await self._accept_connector_enrollments(binding)
-                    await self._wait_membership_active(binding)
-                    await self._ensure_epoch_session_routing(binding)
-                    await self._repair_pending_lifecycles(binding)
+                    await self._wait_membership_active(binding, presence=True)
+                    muted = self._membership_gate(binding).paused
+                    if not muted:
+                        await self._ensure_epoch_session_routing(binding)
+                        await self._repair_pending_lifecycles(binding)
                     if binding.room_id not in self._heartbeat_tasks:
                         # The server owns the cadence.  Sending at half its
                         # advertised interval turns a reconnect into a rate
@@ -4113,14 +4117,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         # signal into the bounded activity relay so an open
                         # Room tab can show it immediately instead of waiting
                         # for a canonical room refresh.
-                        self._room_map("_idle_frame_at")[binding.room_id] = _clock()
-                        await self._publish(
-                            binding,
-                            f"presence:{binding.room_id}",
-                            "heartbeat",
-                            suppress_errors=True,
-                        )
-                    await self._apply_recovery_closures(binding)
+                        if not muted:
+                            self._room_map("_idle_frame_at")[binding.room_id] = _clock()
+                            await self._publish(
+                                binding,
+                                f"presence:{binding.room_id}",
+                                "heartbeat",
+                                suppress_errors=True,
+                            )
+                    if not muted:
+                        await self._apply_recovery_closures(binding)
                     await self._transport_cycle(binding)
                     self._report_ledger(binding)
                     self._persist_binding(binding)
@@ -4216,7 +4222,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         page = await self._call(
             binding,
             lambda api: valid_event_page(api.events(binding.room_id, self._read_frontier(binding), 8, all_epochs=True)),
-            background=True,
+            background=True, presence=True,
         )
         for event in page.get("events") or []:
             await self._consume(binding, event)
@@ -4265,7 +4271,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 heartbeat = await self._call(
                     binding,
                     lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
-                    background=True,
+                    background=True, presence=True,
                 )
                 self._note_connected(binding, heartbeat)
                 return heartbeat
@@ -4295,7 +4301,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         installation = self._installation_identity()
         if installation:
             metadata["installationId"] = installation
-        session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata), background=True)
+        session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata),
+                                   background=True, presence=True)
         binding.connector_session_id = session["sessionId"]
         registered.add(binding.room_id)
         counts = getattr(self, "_registrations", None)
@@ -4406,7 +4413,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if not await self._refresh_binding(binding) or not binding.enabled or binding.revoked:
                     return  # Contract P2c-3: none after a revocation or expiry either.
                 try:
-                    if not await self._membership_active(binding):
+                    # P2c-3b (1.0.107): a muted membership keeps beating; its
+                    # listing and idle activity frame wait for active.
+                    active = await self._membership_active(binding)
+                    if not active and not self._membership_gate(binding).presence_open():
                         continue
                     registered_now = False
                     if binding.room_id not in getattr(self, "_registered_rooms", {binding.room_id}):
@@ -4420,17 +4430,19 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         heartbeat = await self._call(
                             binding,
                             lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
-                            background=True,
+                            background=True, presence=True,
                         )
                         if not binding.enabled or binding.revoked:
                             return  # ended meanwhile (P2c-3): its status stays stopped
                         self._note_connected(binding, heartbeat)
                     # Contract P8-2 beside the beat (1.0.99): the heartbeat
                     # never waits for the enrollment listing or its lock.
-                    self._start_enrollment_listing(binding)
+                    muted = self._membership_gate(binding).paused
+                    if not muted:
+                        self._start_enrollment_listing(binding)
                     # Contract P8-4: an idle frame after a registration, else
                     # at most once per idle_activity_frame_interval().
-                    if registered_now or self._idle_frame_due(binding.room_id):
+                    if not muted and (registered_now or self._idle_frame_due(binding.room_id)):
                         self._room_map("_idle_frame_at")[binding.room_id] = _clock()
                         await self._publish(
                             binding,
@@ -4684,11 +4696,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         self._inactive_rooms()[binding.room_id] = time.monotonic()
         # Existing streams stop at their next callback; no new stream starts.
-        getattr(self, "_stream_generations", {}).pop(binding.room_id, None)
+        # P2c-3b (1.0.107): a muted membership keeps its event stream.
+        if not gate.presence_open():
+            getattr(self, "_stream_generations", {}).pop(binding.room_id, None)
         self._status_room(binding, connection="inactive", inactive=True, error_code="connector_not_active")
         logger.info("Room %s membership participation paused; all Room watchers wait for a membership change", binding.room_id)
 
-    async def _wait_membership_active(self, binding: RoomBinding) -> None:
+    async def _wait_membership_active(self, binding: RoomBinding, *, presence=False) -> None:
         while True:
             stop = getattr(self, "_stop", None)
             if (stop is not None and stop.is_set()) or not binding.enabled or binding.revoked:
@@ -4696,6 +4710,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if await self._membership_active(binding):
                 return
             gate = self._membership_gate(binding)
+            if presence and gate.presence_open():
+                return  # P2c-3b (1.0.107): muted keeps registration, heartbeat and events
             waits = [asyncio.create_task(gate.resumed.wait())]
             if stop is not None:
                 waits.append(asyncio.create_task(stop.wait()))
@@ -5135,7 +5151,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         if _is_assigned_event(event, binding.membership_id):
             await self._membership_active(binding, refresh=True, force=True)
+        muted = self._membership_gate(binding).paused
         await self._wait_membership_active(binding)
+        if muted:
+            # P2c-3b (1.0.107): a muted pass of _watch skipped the routing set-up.
+            await self._ensure_epoch_session_routing(binding)
         receive_locks = getattr(self, "_receive_locks", None)
         if receive_locks is None:
             receive_locks = {}
@@ -8329,15 +8349,21 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _membership_inactive_error(status: str) -> ProtocolError:
         return ProtocolError(f"Room membership inactive ({status or 'muted'}); turn call refused", code="membership_inactive")
 
-    async def _call(self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any], *, background=False) -> Any:
-        return await self._membership_contact(binding, lambda: self._raw_call(binding, operation), background=background)
+    async def _call(self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any], *, background=False,
+                    presence=False) -> Any:
+        return await self._membership_contact(binding, lambda: self._raw_call(binding, operation),
+                                              background=background, presence=presence)
 
-    async def _membership_contact(self, binding: RoomBinding, contact: Callable, *, background=False) -> Any:
+    async def _membership_contact(self, binding: RoomBinding, contact: Callable, *, background=False,
+                                  presence=False) -> Any:
         # Reply scopes include nested background helpers (status/ack/settle).
         background = background and not TURN_CONTACT.get()
+        # P2c-3b (1.0.107): presence contacts (registration, heartbeat, event
+        # stream) of a muted membership do not wait; every other status holds them.
+        presence = presence and background
         while True:
             if background:
-                await self._wait_membership_active(binding)
+                await self._wait_membership_active(binding, presence=presence)
             elif self._membership_gate(binding).paused:
                 raise self._membership_inactive_error(self._membership_gate(binding).status)
             try:
@@ -8347,6 +8373,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if denied or error.code == "connector_not_active":
                     await self._membership_active(binding, refresh=True)
                     if self._membership_gate(binding).paused:
+                        if presence and self._membership_gate(binding).presence_open():
+                            raise  # a muted presence contact keeps its own retry schedule
                         if background:
                             continue
                         raise self._membership_inactive_error(self._membership_gate(binding).status) from None
@@ -8357,6 +8385,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         and member.get("membershipId") == binding.membership_id), None) if isinstance(roster, list) else None
             if own and own.get("status") and own["status"] != "active":
                 self._pause_membership(binding, own["status"])
+                if presence and own["status"] == "muted":
+                    return answer
                 if background:
                     continue
                 raise self._membership_inactive_error(own["status"])
@@ -8375,7 +8405,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _stream_call(
         self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any],
     ) -> Any:
-        return await self._membership_contact(binding, lambda: self._raw_stream_call(binding, operation), background=True)
+        return await self._membership_contact(binding, lambda: self._raw_stream_call(binding, operation),
+                                              background=True, presence=True)
 
     async def _raw_stream_call(
         self, binding: RoomBinding, operation: Callable[[RoomProtocol], Any],
