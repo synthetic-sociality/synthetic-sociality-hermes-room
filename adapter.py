@@ -5170,10 +5170,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         if _is_assigned_event(event, binding.membership_id):
             await self._membership_active(binding, refresh=True, force=True)
-        muted = self._membership_gate(binding).paused
         await self._wait_membership_active(binding)
-        if muted:
-            # P2c-3b (1.0.107): a muted pass of _watch skipped the routing set-up.
+        if not binding.epoch_session_routing_initialized and binding.room_id in getattr(self, "_tasks", {}):
+            # P2c-3b (1.0.107 r2, H107-P-001): a muted pass of _watch skipped
+            # the routing set-up, and the unmute may come while the same
+            # stream stays open; any event of a watched Room gets routing
+            # before it is processed, whatever the gate was as it arrived.
             await self._ensure_epoch_session_routing(binding)
         receive_locks = getattr(self, "_receive_locks", None)
         if receive_locks is None:
