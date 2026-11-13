@@ -4010,6 +4010,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     error_code="invalid_lifecycle_state",
                 )
                 continue
+            gate = self._membership_gate(binding)
+            if MUTED_FAIL_FAST.get() and gate.paused and gate.presence_open():
+                # P2c-3b (1.0.107 r3, H107-P-005): _call would refuse without any
+                # lifecycle I/O, so a startup muted pause never spends an attempt.
+                raise self._membership_inactive_error(gate.status)
             try:
                 # Persist the increment before authenticated I/O so a crash or
                 # ambiguous response cannot reset the automatic retry budget.
@@ -4115,6 +4120,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         )
                     if not self._membership_gate(binding).paused:
                         await self._muted_fail_fast(binding, self._ensure_epoch_session_routing)
+                    # P2c-3b (1.0.107 r3, H107-P-005): routing may discover the mute;
+                    # repair then waits for active instead of spending an attempt.
+                    if not self._membership_gate(binding).paused:
                         await self._muted_fail_fast(binding, self._repair_pending_lifecycles)
                     muted = self._membership_gate(binding).paused
                     if started:

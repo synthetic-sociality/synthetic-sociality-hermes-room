@@ -27,6 +27,9 @@ its missing epoch session routing before it is processed, whatever the membershi
 A recovery closure whose proof stops because the membership turned out muted during the start stays pending. It is
 proved again once the membership is active, instead of being retired as a refused proof (H107-P-002).
 
+When startup routing discovers the mute, lifecycle repair waits for active and spends no durable retry attempt
+without contacting the Room, so a few muted starts no longer block pending work (H107-P-005).
+
 ## 1.0.106 — Paired with OpenClaw 0.2.80: one shared contract text
 
 Paired release with OpenClaw 0.2.80. The delivery-lifecycle contract is now one byte-identical text in both
