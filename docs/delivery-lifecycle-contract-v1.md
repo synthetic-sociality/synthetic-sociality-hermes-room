@@ -1435,7 +1435,12 @@ P15-2 Background Room watchers share one participation gate per authenticated
 membership: event stream/long poll, registration/heartbeat, enrollment,
 activity/status writers, document/photo context, acknowledgement retries,
 attempt maintenance, recovery and credential discovery. Only background
-requests explicitly opt into waiting (`background=true`); the enrollment claim
+requests explicitly opt into waiting (`background=true`). Exception (OpenClaw
+0.2.81, matching P2c-3b): while the own status is `muted`, registration,
+heartbeat and the event stream/long poll do not wait; a muted membership keeps
+its session, lease and event stream, and only the enrollment, activity and the
+other background writers wait. Every other non-active status holds them too;
+`left` and `removed` stay terminal through `credential_revoked`. The enrollment claim
 itself never waits (a claim refused while paused is asked again at the next
 listing), while credential renewal and recovery reads of the Room state wait. Model-turn tools
 (ArtCraft, documents and share_file) and reply/posting calls fail fast with a
@@ -1472,11 +1477,12 @@ Both conformance files pin `parityP15Contract` and these identical case names:
 - P15-05 unread missing and other memberships cannot resume participation
 - P15-06 credential failures stay terminal and shutdown cancels paused work
 - P15-07 sibling memberships continue while one pauses
-- P15-08 inactive enrollment pauses heartbeat and event watchers
+- P15-08 muted enrollment pauses enrollment and activity watchers, not heartbeat or the event stream
 - P15-09 muted turn tools and replies fail fast
 - P15-10 active member photo download refusal surfaces
 - P15-11 a turn offer probes promptly and coalesces concurrent offers
 - P15-12 denied background contacts probe before pausing
+- P15-13 muted membership keeps heartbeat and event stream
 
 ## P16 — One live binding per Room (2026-11-11)
 

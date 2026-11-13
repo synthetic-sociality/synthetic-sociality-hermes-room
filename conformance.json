@@ -1589,11 +1589,12 @@
     "P15-05 unread missing and other memberships cannot resume participation",
     "P15-06 credential failures stay terminal and shutdown cancels paused work",
     "P15-07 sibling memberships continue while one pauses",
-    "P15-08 inactive enrollment pauses heartbeat and event watchers",
+    "P15-08 muted enrollment pauses enrollment and activity watchers, not heartbeat or the event stream",
     "P15-09 muted turn tools and replies fail fast",
     "P15-10 active member photo download refusal surfaces",
     "P15-11 a turn offer probes promptly and coalesces concurrent offers",
-    "P15-12 denied background contacts probe before pausing"
+    "P15-12 denied background contacts probe before pausing",
+    "P15-13 muted membership keeps heartbeat and event stream"
   ],
   "parityP16Contract": "docs/delivery-lifecycle-contract-v1.md#p16--one-live-binding-per-room-2026-11-11",
   "parityP16Cases": [
@@ -1643,5 +1644,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "205b0dae17fb732e9cb32fb7fa3f10cecd35b5029a5b3ac0aedce79ddd23a692"
+  "contractSha256": "d915d47bdbcc848142c178cbedaa2b021b49e6873b4fbc6a631d8d8499f57a60"
 }

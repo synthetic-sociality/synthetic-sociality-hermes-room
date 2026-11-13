@@ -18,11 +18,12 @@ CASES = [
     'P15-05 unread missing and other memberships cannot resume participation',
     'P15-06 credential failures stay terminal and shutdown cancels paused work',
     'P15-07 sibling memberships continue while one pauses',
-    'P15-08 inactive enrollment pauses heartbeat and event watchers',
+    'P15-08 muted enrollment pauses enrollment and activity watchers, not heartbeat or the event stream',
     'P15-09 muted turn tools and replies fail fast',
     'P15-10 active member photo download refusal surfaces',
     'P15-11 a turn offer probes promptly and coalesces concurrent offers',
     'P15-12 denied background contacts probe before pausing',
+    'P15-13 muted membership keeps heartbeat and event stream',
 ]
 
 
@@ -185,6 +186,8 @@ class P15Tests(unittest.TestCase):
         asyncio.run(run())
 
     def test_08(self):
+        # 1.0.107 (P2c-3b): a muted membership keeps its heartbeat and event
+        # stream; only enrollment, activity and the other writers wait.
         async def run():
             instance,binding,gate,clock,state,api=setup()
             async def raw(_binding,op):return op(api)
@@ -193,14 +196,40 @@ class P15Tests(unittest.TestCase):
             await settle()
             self.assertTrue(gate.paused);self.assertEqual(gate.status,'muted')
             self.assertEqual(state['calls'],['enrollment'])
-            # Both transports consult the same contact gate; no SSE work starts.
-            async def stream(_binding,op):self.fail('SSE opened while muted')
+            activity=asyncio.create_task(instance._call(binding,lambda _:api.contact('activity'),background=True))
+            async def stream(_binding,op):return op(api)
             instance._raw_stream_call=stream
-            stream_task=asyncio.create_task(instance._stream_call(binding,lambda _:None))
-            heartbeat_task=asyncio.create_task(instance._call(binding,lambda _:api.contact('heartbeat'),background=True))
-            await settle();self.assertEqual(state['calls'],['enrollment'])
+            self.assertEqual(await asyncio.wait_for(instance._stream_call(binding,lambda _:api.contact('stream')),1),'stream')
+            self.assertEqual(await asyncio.wait_for(instance._call(
+                binding,lambda _:api.contact('heartbeat'),background=True,presence=True),1),'heartbeat')
+            await settle();self.assertEqual(state['calls'],['enrollment','stream','heartbeat'])
+            self.assertFalse(task.done());self.assertFalse(activity.done())
             instance._stop.set()
-            await asyncio.gather(task,stream_task,heartbeat_task,return_exceptions=True)
+            await asyncio.gather(task,activity,return_exceptions=True)
+        asyncio.run(run())
+
+    def test_pr107_controls_other_statuses_hold_presence_contacts(self):
+        # Every other non-active status still holds registration, heartbeat
+        # and the event stream; active is unchanged.
+        async def run():
+            for status in ['removed','left','suspended']:
+                instance,binding,gate,clock,state,api=setup()
+                state['status']=status
+                instance._pause_membership(binding,status)
+                async def raw(_binding,op):return op(api)
+                instance._raw_call=raw;instance._raw_stream_call=raw
+                held=[asyncio.create_task(instance._stream_call(binding,lambda _:api.contact('stream'))),
+                      asyncio.create_task(instance._call(binding,lambda _:api.contact('heartbeat'),background=True,presence=True))]
+                await settle();self.assertEqual(state['calls'],[],status)
+                self.assertFalse(any(task.done() for task in held),status)
+                instance._stop.set();await asyncio.gather(*held,return_exceptions=True)
+            instance,binding,gate,clock,state,api=setup()
+            state['status']='active'
+            async def raw(_binding,op):return op(api)
+            instance._raw_call=raw;instance._raw_stream_call=raw
+            self.assertEqual(await instance._call(binding,lambda _:api.contact('activity'),background=True),'activity')
+            self.assertEqual(await instance._stream_call(binding,lambda _:api.contact('stream')),'stream')
+            self.assertFalse(gate.paused)
         asyncio.run(run())
 
     def test_09(self):
@@ -410,8 +439,8 @@ class MutedEnrollmentLockTests(unittest.TestCase):
     `_call` path run here; only the Room transport is a double (P8 idle Room).
     """
 
-    def run_rooms(self, *, mute_at, until, hang=None):
-        from test_parity_p8 import IdleRoom, REAL_SLEEP, START, VirtualClock, binding_for, idle_instance, simulated, start, stop
+    def run_rooms(self, *, mute_at, until, hang=None, lose_session_at=None):
+        from test_parity_p8 import IdleRoom, REAL_SLEEP, START, STREAM_PASS, VirtualClock, binding_for, idle_instance, simulated, start, stop
         clock = VirtualClock()
         room = IdleRoom(clock)
         active, other = binding_for('a1', 'inst-A'), binding_for('m1', 'inst-A')
@@ -436,6 +465,11 @@ class MutedEnrollmentLockTests(unittest.TestCase):
                         await released.wait()
                 return operation(room.api(binding))
             instance._raw_call = raw
+
+            async def stream_pass(binding):
+                room.calls.append((clock.now, 'stream', binding.room_id))
+                await asyncio.sleep(STREAM_PASS)
+            instance._transport_cycle = stream_pass
             # The active Room runs (registration, listing, heartbeats) before
             # the other one starts, as in the live gateway.
             await start(instance, [active])
@@ -446,6 +480,10 @@ class MutedEnrollmentLockTests(unittest.TestCase):
             if mute_at:
                 await clock.run_until(START + mute_at)
                 room.muted.add('m1')
+            if lose_session_at is not None:
+                await clock.run_until(START + lose_session_at)
+                # The Room lost m1's session (P2c-3): the next beat registers.
+                instance._registered_rooms.discard('m1')
             await clock.run_until(START + until)
             observed['gate'] = instance._membership_gate(other)
             observed['watching'] = not instance._tasks['m1'].done()
@@ -473,7 +511,8 @@ class MutedEnrollmentLockTests(unittest.TestCase):
                 self.assertTrue(observed['gate'].paused)
                 self.assertEqual(observed['gate'].status, 'muted')
                 self.assertTrue(observed['watching'])
-                self.assertEqual(room.times('heartbeat', 'm1', since=muted_listing[0] + 1), [])
+                # 1.0.107 (P2c-3b): ... and keeps its heartbeat meanwhile.
+                self.assertGreaterEqual(len(room.times('heartbeat', 'm1', since=muted_listing[0] + 1)), 15)
                 # ... outside the lock: a1 keeps its heartbeat and the lineage's listing.
                 self.assertFalse(observed['lock_held'])
                 self.assert_beats(room, 'a1', start_at + 15, start_at + 400)
@@ -488,3 +527,23 @@ class MutedEnrollmentLockTests(unittest.TestCase):
         self.assertTrue(observed['lock_held'])
         self.assert_beats(room, 'a1', start_at + 15, start_at + 400)
         self.assert_beats(room, 'm1', start_at + 45, start_at + 400)
+
+    def test_13(self):
+        # P15-13 (1.0.107, P2c-3b): a muted membership heartbeats on every
+        # tick, registers again after a lost session and keeps its event
+        # stream; its enrollment listing and activity frames wait for active.
+        for label, mute_at in [('muted before start', 0), ('muted while running', 100)]:
+            with self.subTest(label):
+                room, observed, start_at = self.run_rooms(mute_at=mute_at, until=400, lose_session_at=250)
+                muted_listing = room.times('enrollments', 'm1', since=start_at + mute_at)
+                self.assertEqual(len(muted_listing), 1, room.calls)
+                self.assertTrue(observed['gate'].paused)
+                self.assertEqual(observed['gate'].status, 'muted')
+                beats = room.times('heartbeat', 'm1', since=muted_listing[0] + 1)
+                self.assertGreaterEqual(len(beats), 15, room.calls)
+                self.assertLessEqual(max(later - earlier for earlier, later in zip(beats, beats[1:])), 30.0, beats)
+                self.assertEqual(len(room.times('register', 'm1', since=start_at + 250)), 1, room.calls)
+                self.assertGreaterEqual(len(room.times('stream', 'm1', since=muted_listing[0] + 1)), 2, room.calls)
+                self.assertEqual([call for call in room.calls if call[2] == 'm1' and call[1].startswith('activity')
+                                  and call[0] > muted_listing[0]], [])
+                self.assertEqual(room.times('claim', 'm1'), [])
