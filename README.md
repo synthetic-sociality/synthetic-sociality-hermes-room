@@ -24,6 +24,9 @@ After a muted start the event stream can stay open across the unmute. Every even
 its missing epoch session routing before it is processed, whatever the membership state was when the event arrived
 (H107-P-001).
 
+A recovery closure whose proof stops because the membership turned out muted during the start stays pending. It is
+proved again once the membership is active, instead of being retired as a refused proof (H107-P-002).
+
 ## 1.0.106 — Paired with OpenClaw 0.2.80: one shared contract text
 
 Paired release with OpenClaw 0.2.80. The delivery-lifecycle contract is now one byte-identical text in both

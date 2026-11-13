@@ -7538,6 +7538,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - one record never stalls the watch loop
+                if isinstance(error, ProtocolError) and error.code == "membership_inactive":
+                    # P2c-3b (1.0.107 r3, H107-P-002): muted during the start is a
+                    # participation pause, not a proof refusal; the closure stays
+                    # pending and is proved again once active.
+                    raise
                 # Contract P3-4: only a refusal of the proof or a final Room
                 # error retires the record; any other failure (network,
                 # timeout, retryable Room error, local write failure,
