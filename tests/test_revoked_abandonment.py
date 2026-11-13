@@ -83,9 +83,10 @@ class RevokedAbandonmentTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
         return instance, path, live, claims, watched, before
 
-    def journal(self, path):
+    def journal(self, path, phase="recorded"):
         target = path.parent / JOURNAL
-        return [json.loads(line) for line in target.read_text().splitlines()] if target.exists() else []
+        lines = [json.loads(line) for line in target.read_text().splitlines()] if target.exists() else []
+        return lines if phase is None else [line for line in lines if line["phase"] == phase]
 
     def assert_untouched(self, path, before, claims, watched):
         self.assertEqual(claims, [], "the enrollment must not be claimed")
@@ -125,10 +126,13 @@ class RevokedAbandonmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_kind["delivery_lifecycle"]["record"], REAL["delivery_lifecycle"]["joss0s11rj0vhre"])
         self.assertEqual(by_kind["inbox"]["record"], {"state": "pending", "pendingSince": REAL["pending_since"]["2646"],
                                                       "pendingRetries": REAL["pending_retries"]["2646"]})
+        self.assertEqual(sorted(line["auditId"] for line in self.journal(path, "applied")),
+                         sorted(entry["auditId"] for entry in entries), "every recorded entry was applied")
         self.assertEqual(oct((path.parent / JOURNAL).stat().st_mode & 0o777), "0o600")
         # Survives the replacement and any later load/save of the state.
         state_store.save(state_store.load(path), path)
         self.assertEqual(self.journal(path), entries)
+        self.assertEqual(len(self.journal(path, None)), 4)
 
     async def test_p18_03_an_active_binding_with_pending_work_is_untouched_and_unclaimed(self):
         active = copy.deepcopy(REAL)
@@ -152,6 +156,7 @@ class RevokedAbandonmentTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(directory.cleanup)
         again = Path(directory.name) / "state.json"
         state_store.save(state_store.PluginState(bindings=[source_binding(), state_store.RoomBinding.from_dict(REAL)]), again)
+        # Only the recorded entries reached the journal before the crash.
         (again.parent / JOURNAL).write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in entries))
         instance = object.__new__(adapter.SyntheticSocialityAdapter)
         instance._state = state_store.load(again)
@@ -160,9 +165,12 @@ class RevokedAbandonmentTests(unittest.IsolatedAsyncioTestCase):
         adapter.update = lambda mutator: state_store.update(mutator, again)
         try:
             self.assertTrue(instance._abandon_revoked_pending_work(instance._state.binding(ROOM)))
+            # The work is gone now: a further call records nothing.
+            self.assertFalse(instance._abandon_revoked_pending_work(instance._state.binding(ROOM)))
         finally:
             adapter.update = original_update
-        self.assertEqual(self.journal(again), entries)
+        self.assertEqual(self.journal(again), entries, "no duplicate recorded entry")
+        self.assertEqual(len(self.journal(again, "applied")), len(entries))
         self.assertEqual(state_store.load(again).binding(ROOM).inbox, {})
 
     async def test_p18_06_a_binding_changed_before_the_transaction_is_kept_and_unclaimed(self):
@@ -189,6 +197,8 @@ class RevokedAbandonmentTests(unittest.IsolatedAsyncioTestCase):
         stored = state_store.load(path).binding(ROOM)
         self.assertEqual(stored.credential, "credential-old-redacted")
         self.assertEqual(sorted(stored.inbox), ["2646", "2647"], "nothing removed from a binding that changed")
+        self.assertEqual(len(self.journal(path, "not_applied")), 2)
+        self.assertEqual(self.journal(path, "applied"), [])
 
     async def test_p18_07_a_revoked_binding_with_an_intent_or_quarantine_is_not_abandoned(self):
         intent = {"state": "prepared", "delivery_state": "not_started", "lifecycle_state": "not_started"}

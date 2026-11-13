@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import platform
 import re
 import secrets
@@ -1697,6 +1698,52 @@ def _credential_expired(binding: RoomBinding, now: float | None = None) -> bool:
     return expires <= (time.time() if now is None else now)
 
 
+def _server_stopped(binding: RoomBinding) -> bool:
+    """P18-1: the server stopped this binding (revoked, or an expired or revoked credential).
+
+    A binding an operator disabled (any other non-empty disabled_reason) is
+    never treated as stopped by the server, whatever its other flags say.
+    """
+    if binding.disabled_reason and binding.disabled_reason not in _STALE_REASONS:
+        return False
+    return binding.revoked or binding.disabled_reason in _STALE_REASONS or _credential_expired(binding)
+
+
+# P18-2: the only work a revoked binding's re-admission may abandon.
+_ABANDONABLE_LIFECYCLE = frozenset({"pending", "blocked"})
+_ABANDONABLE_INBOX = frozenset({"pending", "retryable", "failed-retryable"})
+REVOCATION_ABANDONMENT_JOURNAL = "revocation-abandonment.jsonl"
+
+
+def _abandonable_entries(binding: RoomBinding) -> list[dict[str, Any]] | None:
+    """P18-2: the pending work a server-stopped binding holds that can never complete, or None.
+
+    None when the binding is not stopped by the server, holds nothing to abandon,
+    or holds anything else (delivery intents, recovery closures, a credential
+    rotation, a lifecycle entry in another state, a quarantined, failed or
+    received inbox entry, a pending marker without its inbox entry).
+    """
+    if not _server_stopped(binding) or binding.delivery_intents or binding.recovery_closures or binding.credential_rotation:
+        return None
+    entries: list[dict[str, Any]] = []
+    for source_id, record in sorted(binding.delivery_lifecycle.items()):
+        if not isinstance(record, dict) or record.get("lifecycle_state") not in _ABANDONABLE_LIFECYCLE:
+            return None
+        entries.append({"kind": "delivery_lifecycle", "id": source_id, "record": copy.deepcopy(record)})
+    abandoned_keys = set()
+    for key, value in sorted(binding.inbox.items()):
+        if value in _SETTLED_INBOX:
+            continue
+        if value not in _ABANDONABLE_INBOX:
+            return None
+        abandoned_keys.add(key)
+        entries.append({"kind": "inbox", "id": key, "record": {
+            "state": value, "pendingSince": binding.pending_since.get(key), "pendingRetries": binding.pending_retries.get(key)}})
+    if set(binding.pending_since) - abandoned_keys or set(binding.pending_retries) - abandoned_keys:
+        return None
+    return entries or None
+
+
 def _stale_inert_binding(binding: RoomBinding) -> bool:
     """Owner 2026-11-12, OP-12 R5 B-F010: a binding a re-admission may replace.
 
@@ -1707,12 +1754,55 @@ def _stale_inert_binding(binding: RoomBinding) -> bool:
     credential rotation, and only settled inbox outcomes, so replacing it loses
     no evidence. Parity with the OpenClaw connector's staleInertState.
     """
-    stale = binding.revoked or binding.disabled_reason in _STALE_REASONS or _credential_expired(binding)
-    if not stale:
+    if not _server_stopped(binding):
         return False
     return not (binding.delivery_intents or binding.delivery_lifecycle or binding.recovery_closures
                 or binding.credential_rotation or binding.pending_since
                 or any(value not in _SETTLED_INBOX for value in binding.inbox.values()))
+
+
+def _remove_entries(binding: RoomBinding, entries: list[dict[str, Any]]) -> None:
+    for entry in entries:
+        if entry["kind"] == "delivery_lifecycle":
+            binding.delivery_lifecycle.pop(entry["id"], None)
+        else:
+            binding.inbox.pop(entry["id"], None)
+            binding.pending_since.pop(entry["id"], None)
+            binding.pending_retries.pop(entry["id"], None)
+
+
+def _journal_phases(journal: Path) -> set[tuple[str, str]]:
+    try:
+        lines = journal.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return set()
+    phases = set()
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            phases.add((str(record.get("auditId")), str(record.get("phase"))))
+    return phases
+
+
+def _append_journal(journal: Path, records: list[dict[str, Any]]) -> None:
+    """Append records to the P18 journal: 0600, fsync of the file and its directory."""
+    if not records:
+        return
+    descriptor = os.open(journal, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.write(descriptor, "".join(json.dumps(record, sort_keys=True) + "\n" for record in records).encode("utf-8"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory = os.open(journal.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 class SyntheticSocialityAdapter(BasePlatformAdapter):
@@ -4696,6 +4786,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         logger.warning("Room connector skipped enrollment %s: the listing names no Room", invitation_id)
                         continue
                     held = self._state.binding(listed_room.strip())
+                    if held is not None and not _stale_inert_binding(held) and self._abandon_revoked_pending_work(held):
+                        logger.warning("Room %s: pending work of the revoked binding abandoned on re-admission (P18)",
+                                       listed_room.strip())
                     if held is not None and not _stale_inert_binding(held):
                         logger.warning("Room %s is already bound and its binding is not replaceable; enrollment %s left unclaimed",
                                        listed_room.strip(), invitation_id)
@@ -4837,6 +4930,52 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         invitation_id,
                         error,
                     )
+
+    def _abandon_revoked_pending_work(self, held: RoomBinding) -> bool:
+        """P18: record and remove the pending work of a server-stopped binding that can never complete.
+
+        The audit record of every entry is appended (0600, fsync) to the journal
+        beside state.json before one state transaction removes exactly those
+        entries, and only while the stored binding still holds exactly them; the
+        journal then records ``applied`` or ``not_applied``. Deterministic audit
+        ids keep a replay from appending a record twice. True when applied.
+        """
+        entries = _abandonable_entries(held)
+        if not entries:
+            return False
+        state_file = getattr(self, "_state_file", None) or state_path()
+        journal = Path(state_file).parent / REVOCATION_ABANDONMENT_JOURNAL
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        records = []
+        for entry in entries:
+            identity = {"roomId": held.room_id, "membershipId": held.membership_id, "entry": entry}
+            audit_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+            records.append({"phase": "recorded", "auditId": audit_id, "reason": "abandoned_on_revocation",
+                            "roomId": held.room_id, "membershipId": held.membership_id,
+                            "installationId": held.installation_id, "entry": entry,
+                            "revocation": {"revoked": bool(held.revoked), "disabledReason": held.disabled_reason},
+                            "abandonedAt": now})
+        known = _journal_phases(journal)
+        _append_journal(journal, [record for record in records if (record["auditId"], "recorded") not in known])
+        expected = json.dumps(entries, sort_keys=True)
+
+        def remove(current):
+            stored = current.binding(held.room_id)
+            if stored is None or stored.membership_id != held.membership_id or \
+                    json.dumps(_abandonable_entries(stored), sort_keys=True) != expected:
+                raise StateUnchanged(False)
+            _remove_entries(stored, entries)
+
+        try:
+            update(remove)
+        except StateUnchanged:
+            _append_journal(journal, [{"phase": "not_applied", "auditId": record["auditId"], "at": now,
+                                       "why": "stored_binding_changed"} for record in records])
+            return False
+        _append_journal(journal, [{"phase": "applied", "auditId": record["auditId"], "at": now}
+                                  for record in records if (record["auditId"], "applied") not in known])
+        _remove_entries(held, entries)
+        return True
 
     async def _stop_room_tasks(self, room_id: str) -> None:
         """Cancel and await one Room's listener, heartbeat and enrollment tasks (a stale binding being replaced)."""
