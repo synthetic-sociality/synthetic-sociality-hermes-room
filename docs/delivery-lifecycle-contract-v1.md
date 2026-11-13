@@ -1638,3 +1638,23 @@ Both conformance files pin `parityP17Contract` and these identical case names:
 - P17-10 restart persists its receipt before the supervisor request with a fixed argv
 - P17-11 a supervisor failure reports supervisor_unavailable and restores service
 - P17-12 the restarted process reports completion or mismatch once and control leaves state files unchanged
+
+## P18 — Abandon the pending work of a revoked binding on re-admission (2026-11-13)
+
+Hermes 1.0.105 (owner decision 2026-11-13, Hermes only). A membership removed while a turn ran leaves its binding revoked with pending work that can never complete under the revoked authorization (the Real `duev8o1h936bl9f` binding: a blocked `cycle_conflict` lifecycle entry, inbox `2646` pending with `pending_since`). Without this clause such a binding is not inert, so a re-admission of the same membership stays unclaimed (P17 adoption, R5 B-F009).
+
+- P18-1 Eligibility. Only a binding the server stopped: `revoked`, or `disabled_reason` `credential_revoked`/`credential_expired`, or an expired credential. A binding an operator disabled (any other non-empty `disabled_reason`) is never abandoned or replaced, whatever its other flags; an enabled, non-revoked binding is never abandoned.
+- P18-2 Scope. Only delivery lifecycle entries in `pending` or `blocked`, inbox entries in `pending`/`retryable`/`failed-retryable`, and their `pending_since` and `pending_retries`. Delivery intents, quarantined, failed and received entries, recovery closures, a credential rotation and terminal evidence are not abandoned; any of them keeps the binding non-replaceable.
+- P18-3 Audit. Every abandoned entry is appended, before the state changes, to `revocation-abandonment.jsonl` beside `state.json` (0600, fsync): `reason` `abandoned_on_revocation`, Room, membership, installation, entry kind and id, the verbatim original record (no credential or session value is ever part of these records), the revocation evidence and `abandoned_at`. The file is separate from the binding, so the audit survives the replacement, every load and save, and a rollback to 1.0.104. Each entry carries a deterministic `auditId`; a replay appends nothing twice.
+- P18-4 Atomicity. One state transaction removes exactly the audited entries, and only while the stored binding is still eligible and holds exactly those entries; otherwise nothing changes. Cursors, acknowledgement, credentials and every other field stay as stored.
+- P18-5 Order. Abandonment runs only while a listed enrollment names that Room, before the claim, and only when the binding is inert afterwards; the claim follows the unchanged P17/R5 path (no claim before eligibility, post-claim re-check, one live binding object, exactly one listener). The old credential is never re-enabled.
+
+Cases:
+
+- P18-01 the live Real binding is left unclaimed on 1.0.104 and replaced by the fresh credential with one listener on 1.0.105
+- P18-02 the abandonment journal records every abandoned entry with reason, Room, membership, ids and timestamps and survives replacement and reload
+- P18-03 an active binding with pending work is untouched and unclaimed
+- P18-04 an operator-disabled binding with pending work is untouched and unclaimed
+- P18-05 a replay appends no duplicate audit entry
+- P18-06 a stored binding that changed before the transaction is kept and unclaimed
+- P18-07 a revoked binding with a delivery intent or quarantined entry is not abandoned and stays unclaimed

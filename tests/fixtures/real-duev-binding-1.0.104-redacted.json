@@ -1,0 +1,1065 @@
+{
+  "abandoned_delivery_intents": {},
+  "acknowledged_cursor": 2645,
+  "base_url": "https://sociality-staging.tokenwerk.eu/api",
+  "connector_session_id": "session-old-redacted",
+  "credential": "credential-old-redacted",
+  "credential_expires_at": "2026-11-22T10:37:49.447Z",
+  "credential_rotation": {},
+  "cursor": 2645,
+  "cycle_attempt_owners": {
+    "cy2a958b47fa979|1|1sjyiaynb7i35w4|l4boirqcpvpn72k": "3s25p930pnp38xp"
+  },
+  "delivery_authority": {
+    "[\"duev8o1h936bl9f\",\"00nvhsm2dd3sxhl\",\"l4boirqcpvpn72k\",\"cy547557305db2a\",\"q2j93q0n2arhl26\",1]": {
+      "attempt_id": "q2j93q0n2arhl26",
+      "cycle_id": "cy547557305db2a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-14T14:17:30.527Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "00nvhsm2dd3sxhl",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"02c9qooq951pr0v\",\"l4boirqcpvpn72k\",\"cyd0547ff23c7ad\",\"ea9ou0lsy1u3jc7\",1]": {
+      "attempt_id": "ea9ou0lsy1u3jc7",
+      "cycle_id": "cyd0547ff23c7ad",
+      "generation": 1,
+      "lease_expires_at": "2026-10-22T15:06:20.012Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "02c9qooq951pr0v",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"0fkv5r8atvbk77z\",\"l4boirqcpvpn72k\",\"cyc24387a3e8d79\",\"pt61tlftm0jd4zc\",1]": {
+      "attempt_id": "pt61tlftm0jd4zc",
+      "cycle_id": "cyc24387a3e8d79",
+      "generation": 1,
+      "lease_expires_at": "2026-09-04T12:44:22.012009963Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "0fkv5r8atvbk77z",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"0ia8x1qrvpvws0h\",\"l4boirqcpvpn72k\",\"cye4990fe33f367\",\"udhmdoxz2dmua5t\",1]": {
+      "attempt_id": "udhmdoxz2dmua5t",
+      "cycle_id": "cye4990fe33f367",
+      "generation": 1,
+      "lease_expires_at": "2026-10-31T04:06:30.488Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "0ia8x1qrvpvws0h",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"0kqr7sfe34zzx7w\",\"l4boirqcpvpn72k\",\"cy1ea2f27ca78bd\",\"pkyu9tbduk1od22\",1]": {
+      "attempt_id": "pkyu9tbduk1od22",
+      "cycle_id": "cy1ea2f27ca78bd",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T12:20:48.632Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "0kqr7sfe34zzx7w",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"1nv6npr7v84hlib\",\"l4boirqcpvpn72k\",\"cy01c57b0defcd4\",\"tpgz0zq3js4nyb6\",1]": {
+      "attempt_id": "tpgz0zq3js4nyb6",
+      "cycle_id": "cy01c57b0defcd4",
+      "generation": 1,
+      "lease_expires_at": "2026-11-10T07:26:05.007Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "1nv6npr7v84hlib",
+      "state": "superseded"
+    },
+    "[\"duev8o1h936bl9f\",\"2urhruyhkfpij9h\",\"l4boirqcpvpn72k\",\"cy6ec91ce449128\",\"bxar4snjiwmydfn\",1]": {
+      "attempt_id": "bxar4snjiwmydfn",
+      "cycle_id": "cy6ec91ce449128",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T08:55:35.398Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "2urhruyhkfpij9h",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"35p2jnvk18ekedy\",\"l4boirqcpvpn72k\",\"cy1f8559dcca65e\",\"84688m41ptt649h\",1]": {
+      "attempt_id": "84688m41ptt649h",
+      "cycle_id": "cy1f8559dcca65e",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:45:49.003Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "35p2jnvk18ekedy",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"3s25p930pnp38xp\",\"l4boirqcpvpn72k\",\"cy2a958b47fa979\",\"1sjyiaynb7i35w4\",1]": {
+      "attempt_id": "1sjyiaynb7i35w4",
+      "cycle_id": "cy2a958b47fa979",
+      "generation": 1,
+      "lease_expires_at": "2026-11-12T06:22:32.42Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "3s25p930pnp38xp",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"3wy3amo4b1p0iq0\",\"l4boirqcpvpn72k\",\"cyd0547ff23c7ad\",\"85qmbd0wg6d0ihx\",1]": {
+      "attempt_id": "85qmbd0wg6d0ihx",
+      "cycle_id": "cyd0547ff23c7ad",
+      "generation": 1,
+      "lease_expires_at": "2026-10-22T15:03:09.27Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "3wy3amo4b1p0iq0",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"40ohg4g53spye7z\",\"l4boirqcpvpn72k\",\"cy6cdd8c0ce9d55\",\"o9qxcl1jonpb2u9\",1]": {
+      "attempt_id": "o9qxcl1jonpb2u9",
+      "cycle_id": "cy6cdd8c0ce9d55",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T13:13:48.829Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "40ohg4g53spye7z",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"4h8a23cvveu9a78\",\"l4boirqcpvpn72k\",\"cy99d9e64f66b16\",\"2lbaumr078fnc2y\",1]": {
+      "attempt_id": "2lbaumr078fnc2y",
+      "cycle_id": "cy99d9e64f66b16",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T12:00:01.559Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "4h8a23cvveu9a78",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"4hi92y1v6uh3ky0\",\"l4boirqcpvpn72k\",\"cy6cdd8c0ce9d55\",\"6nt7zvvt4nh0gnm\",1]": {
+      "attempt_id": "6nt7zvvt4nh0gnm",
+      "cycle_id": "cy6cdd8c0ce9d55",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T13:03:32.809Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "4hi92y1v6uh3ky0",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"566dqjqp1me3msz\",\"l4boirqcpvpn72k\",\"cybee426f6f4ba4\",\"44y6sqfgsxjlwuj\",1]": {
+      "attempt_id": "44y6sqfgsxjlwuj",
+      "cycle_id": "cybee426f6f4ba4",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T17:50:41.98Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "566dqjqp1me3msz",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"5ac35t7morvo8hc\",\"l4boirqcpvpn72k\",\"cyc68cad108a603\",\"vd2vlhsthtaocie\",1]": {
+      "attempt_id": "vd2vlhsthtaocie",
+      "cycle_id": "cyc68cad108a603",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T13:59:06.762Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "5ac35t7morvo8hc",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"5l6na2bq20mpx20\",\"l4boirqcpvpn72k\",\"cy588312e0c163a\",\"a7q5rq6kshc8fey\",1]": {
+      "attempt_id": "a7q5rq6kshc8fey",
+      "cycle_id": "cy588312e0c163a",
+      "generation": 1,
+      "lease_expires_at": "2026-11-05T02:57:47.583Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "5l6na2bq20mpx20",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"5zc7h7ltd4n64gz\",\"l4boirqcpvpn72k\",\"cy6cdd8c0ce9d55\",\"to6qt10blnb644r\",1]": {
+      "attempt_id": "to6qt10blnb644r",
+      "cycle_id": "cy6cdd8c0ce9d55",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T13:08:42.262Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "5zc7h7ltd4n64gz",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"63c0yjaybtwdwa4\",\"l4boirqcpvpn72k\",\"cyc220f97c1a861\",\"vhjqb4ge6tz0p4k\",1]": {
+      "attempt_id": "vhjqb4ge6tz0p4k",
+      "cycle_id": "cyc220f97c1a861",
+      "generation": 1,
+      "lease_expires_at": "2026-10-17T20:44:41.577Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "63c0yjaybtwdwa4",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"6batv9jzeepvopt\",\"l4boirqcpvpn72k\",\"cy4e4577fd77e3b\",\"ryotxdspxten3ai\",1]": {
+      "attempt_id": "ryotxdspxten3ai",
+      "cycle_id": "cy4e4577fd77e3b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:28:00.906Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "6batv9jzeepvopt",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"6d1zijt4y7ljtl6\",\"l4boirqcpvpn72k\",\"cyc68cad108a603\",\"kvyp68h9dvj40aq\",1]": {
+      "attempt_id": "kvyp68h9dvj40aq",
+      "cycle_id": "cyc68cad108a603",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T14:06:25.96Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "6d1zijt4y7ljtl6",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"6h4787lf6g9h7sc\",\"l4boirqcpvpn72k\",\"cyc7aa5124bc0a7\",\"wvyp08pkocp5str\",1]": {
+      "attempt_id": "wvyp08pkocp5str",
+      "cycle_id": "cyc7aa5124bc0a7",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T11:53:45.788Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "6h4787lf6g9h7sc",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"6mas0422m8u69gj\",\"l4boirqcpvpn72k\",\"cy8247a78ba7085\",\"61yodggkyilb4gs\",1]": {
+      "attempt_id": "61yodggkyilb4gs",
+      "cycle_id": "cy8247a78ba7085",
+      "generation": 1,
+      "lease_expires_at": "2026-09-04T15:14:17.163860452Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "6mas0422m8u69gj",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"6u0mrvx4wzgvkjz\",\"l4boirqcpvpn72k\",\"cy4e4577fd77e3b\",\"95cwx6er16xaf2v\",1]": {
+      "attempt_id": "95cwx6er16xaf2v",
+      "cycle_id": "cy4e4577fd77e3b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:30:03.038Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "6u0mrvx4wzgvkjz",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"74dl7wsx8t7uzrr\",\"l4boirqcpvpn72k\",\"cy58cffa9872349\",\"uxh5b6crnf6ma1x\",1]": {
+      "attempt_id": "uxh5b6crnf6ma1x",
+      "cycle_id": "cy58cffa9872349",
+      "generation": 1,
+      "lease_expires_at": "2026-10-25T17:49:14.4Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "74dl7wsx8t7uzrr",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"7ora8b4m33aoxoa\",\"l4boirqcpvpn72k\",\"cy5ed771c1265a7\",\"avq72wrx9s9j8be\",1]": {
+      "attempt_id": "avq72wrx9s9j8be",
+      "cycle_id": "cy5ed771c1265a7",
+      "generation": 1,
+      "lease_expires_at": "2026-10-25T17:52:46.398Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "7ora8b4m33aoxoa",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"8ipeftpci6vqfgm\",\"l4boirqcpvpn72k\",\"cy99d9e64f66b16\",\"doce0ovksvdnw59\",1]": {
+      "attempt_id": "doce0ovksvdnw59",
+      "cycle_id": "cy99d9e64f66b16",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T12:04:19.408Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "8ipeftpci6vqfgm",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"8pz75926amoo2dr\",\"l4boirqcpvpn72k\",\"cy816ccd7b7ac39\",\"l4zhe6pp3doji99\",1]": {
+      "attempt_id": "l4zhe6pp3doji99",
+      "cycle_id": "cy816ccd7b7ac39",
+      "generation": 1,
+      "lease_expires_at": "2026-09-04T03:54:25.858066822Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "8pz75926amoo2dr",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"9bdwls67zdnp9vf\",\"l4boirqcpvpn72k\",\"cydb8b99296fcc3\",\"4r7jxao6y0lqmti\",1]": {
+      "attempt_id": "4r7jxao6y0lqmti",
+      "cycle_id": "cydb8b99296fcc3",
+      "generation": 1,
+      "lease_expires_at": "2026-09-04T19:26:28.051943461Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "9bdwls67zdnp9vf",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"9qbbbzkf36qld1o\",\"l4boirqcpvpn72k\",\"cy1f8559dcca65e\",\"2pgvx8om2ezx8kw\",1]": {
+      "attempt_id": "2pgvx8om2ezx8kw",
+      "cycle_id": "cy1f8559dcca65e",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:47:36.102Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "9qbbbzkf36qld1o",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"a74yfkufycpi3if\",\"l4boirqcpvpn72k\",\"cy547557305db2a\",\"nqn0luvpr5ovler\",1]": {
+      "attempt_id": "nqn0luvpr5ovler",
+      "cycle_id": "cy547557305db2a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-14T14:14:04.123Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "a74yfkufycpi3if",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"acu679rpeyi1k9v\",\"l4boirqcpvpn72k\",\"cyd0547ff23c7ad\",\"5mcem5xxfcm2p8y\",1]": {
+      "attempt_id": "5mcem5xxfcm2p8y",
+      "cycle_id": "cyd0547ff23c7ad",
+      "generation": 1,
+      "lease_expires_at": "2026-10-22T15:11:57.728Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "acu679rpeyi1k9v",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"ady3oeg9kvwszht\",\"l4boirqcpvpn72k\",\"cyc7aa5124bc0a7\",\"d9vzpapilrtndj1\",1]": {
+      "attempt_id": "d9vzpapilrtndj1",
+      "cycle_id": "cyc7aa5124bc0a7",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T11:51:33.587Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "ady3oeg9kvwszht",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"bdal0opvg6lr6fm\",\"l4boirqcpvpn72k\",\"cy1ea2f27ca78bd\",\"8x0qj15rnut5mb3\",1]": {
+      "attempt_id": "8x0qj15rnut5mb3",
+      "cycle_id": "cy1ea2f27ca78bd",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T12:16:57.712Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "bdal0opvg6lr6fm",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"byl9ukboyik1a9q\",\"l4boirqcpvpn72k\",\"cy21c88ad8a58c1\",\"tbud9bb1w9fr1g3\",1]": {
+      "attempt_id": "tbud9bb1w9fr1g3",
+      "cycle_id": "cy21c88ad8a58c1",
+      "generation": 1,
+      "lease_expires_at": "2026-10-23T13:51:33.045Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "byl9ukboyik1a9q",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"c5f14vxlloxgt7z\",\"l4boirqcpvpn72k\",\"cy2e9d62c6ae15b\",\"k7vr5tmru73m3bs\",1]": {
+      "attempt_id": "k7vr5tmru73m3bs",
+      "cycle_id": "cy2e9d62c6ae15b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T08:37:17.481Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "c5f14vxlloxgt7z",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"cupubc2fu4apxm1\",\"l4boirqcpvpn72k\",\"cy547557305db2a\",\"upe7uz20r22kypv\",1]": {
+      "attempt_id": "upe7uz20r22kypv",
+      "cycle_id": "cy547557305db2a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-14T14:23:12.862Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "cupubc2fu4apxm1",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"d04071qdcv2ssz8\",\"l4boirqcpvpn72k\",\"cy689807d47a1e5\",\"bno16pkbifqse5m\",1]": {
+      "attempt_id": "bno16pkbifqse5m",
+      "cycle_id": "cy689807d47a1e5",
+      "generation": 1,
+      "lease_expires_at": "2026-09-07T08:27:28.230284254Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "d04071qdcv2ssz8",
+      "state": "superseded"
+    },
+    "[\"duev8o1h936bl9f\",\"d3zulftmqvtmx6j\",\"l4boirqcpvpn72k\",\"cy4e4577fd77e3b\",\"rys9qdn4qp9f5yk\",1]": {
+      "attempt_id": "rys9qdn4qp9f5yk",
+      "cycle_id": "cy4e4577fd77e3b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:35:41.461Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "d3zulftmqvtmx6j",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"dprwqs9eck6hyrm\",\"l4boirqcpvpn72k\",\"cyc7aa5124bc0a7\",\"413ojunwhwhkdvy\",1]": {
+      "attempt_id": "413ojunwhwhkdvy",
+      "cycle_id": "cyc7aa5124bc0a7",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T12:01:11.442Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "dprwqs9eck6hyrm",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"duqhu2hoyjfyczf\",\"l4boirqcpvpn72k\",\"cy99d9e64f66b16\",\"esjzgbnhgpbzwfj\",1]": {
+      "attempt_id": "esjzgbnhgpbzwfj",
+      "cycle_id": "cy99d9e64f66b16",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T11:56:09.276Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "duqhu2hoyjfyczf",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"e37ey030fqehqwj\",\"l4boirqcpvpn72k\",\"cyc21587f2f5f4b\",\"jqy9x64wuf0l59p\",1]": {
+      "attempt_id": "jqy9x64wuf0l59p",
+      "cycle_id": "cyc21587f2f5f4b",
+      "generation": 1,
+      "lease_expires_at": "2026-11-04T17:35:18.406Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "e37ey030fqehqwj",
+      "state": "superseded"
+    },
+    "[\"duev8o1h936bl9f\",\"efpwcyrhnemff82\",\"l4boirqcpvpn72k\",\"cy6ec91ce449128\",\"b4diry0cfro68x9\",1]": {
+      "attempt_id": "b4diry0cfro68x9",
+      "cycle_id": "cy6ec91ce449128",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T09:01:38.174Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "efpwcyrhnemff82",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"eifjvgqdgum57p8\",\"l4boirqcpvpn72k\",\"cy6ec91ce449128\",\"mcfadthyhsphr0l\",1]": {
+      "attempt_id": "mcfadthyhsphr0l",
+      "cycle_id": "cy6ec91ce449128",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T08:45:11.999Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "eifjvgqdgum57p8",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"ejrt0otn13224nu\",\"l4boirqcpvpn72k\",\"cy588312e0c163a\",\"z2ayj4pd32l834q\",1]": {
+      "attempt_id": "z2ayj4pd32l834q",
+      "cycle_id": "cy588312e0c163a",
+      "generation": 1,
+      "lease_expires_at": "2026-11-05T03:03:42.674Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "ejrt0otn13224nu",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"en5nanbxhqulb5l\",\"l4boirqcpvpn72k\",\"cy7093bb731418a\",\"c34062qvq6okjfg\",1]": {
+      "attempt_id": "c34062qvq6okjfg",
+      "cycle_id": "cy7093bb731418a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-31T06:27:20.846Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "en5nanbxhqulb5l",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"f2upee88qjnl4go\",\"l4boirqcpvpn72k\",\"cy547557305db2a\",\"fburq77yri781kf\",1]": {
+      "attempt_id": "fburq77yri781kf",
+      "cycle_id": "cy547557305db2a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-14T14:08:35.283Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "f2upee88qjnl4go",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"gdgsae0sp6v4vyh\",\"l4boirqcpvpn72k\",\"cyd0547ff23c7ad\",\"0j3cw3inoywbtkt\",1]": {
+      "attempt_id": "0j3cw3inoywbtkt",
+      "cycle_id": "cyd0547ff23c7ad",
+      "generation": 1,
+      "lease_expires_at": "2026-10-22T15:09:13.737Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "gdgsae0sp6v4vyh",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"h6x5e2fj9n9qgvi\",\"l4boirqcpvpn72k\",\"cybee426f6f4ba4\",\"bh8zb272pufvm32\",1]": {
+      "attempt_id": "bh8zb272pufvm32",
+      "cycle_id": "cybee426f6f4ba4",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T17:53:05.689Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "h6x5e2fj9n9qgvi",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"hn60m28f1kwsm4l\",\"l4boirqcpvpn72k\",\"cy1ea2f27ca78bd\",\"4a7rmrs4j7e82yl\",1]": {
+      "attempt_id": "4a7rmrs4j7e82yl",
+      "cycle_id": "cy1ea2f27ca78bd",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T12:14:11.851Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "hn60m28f1kwsm4l",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"iiyv6kx0ubo2wtk\",\"l4boirqcpvpn72k\",\"cy1ea2f27ca78bd\",\"bslcxjjs6tp3hyb\",1]": {
+      "attempt_id": "bslcxjjs6tp3hyb",
+      "cycle_id": "cy1ea2f27ca78bd",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T12:24:37.855Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "iiyv6kx0ubo2wtk",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"ir2cai4y41262ha\",\"l4boirqcpvpn72k\",\"cya148636708d65\",\"l0z3dkpfchw7bbz\",1]": {
+      "attempt_id": "l0z3dkpfchw7bbz",
+      "cycle_id": "cya148636708d65",
+      "generation": 1,
+      "lease_expires_at": "2026-11-04T17:14:32.858Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "ir2cai4y41262ha",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"izbnfv2sw1pocye\",\"l4boirqcpvpn72k\",\"cy7093bb731418a\",\"gj7erho0icfavuw\",1]": {
+      "attempt_id": "gj7erho0icfavuw",
+      "cycle_id": "cy7093bb731418a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-31T06:22:42.885Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "izbnfv2sw1pocye",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"j0a3fw1iws89iw1\",\"l4boirqcpvpn72k\",\"cy1f8559dcca65e\",\"l1pvcwz0p7gpye6\",1]": {
+      "attempt_id": "l1pvcwz0p7gpye6",
+      "cycle_id": "cy1f8559dcca65e",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:42:14.131Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "j0a3fw1iws89iw1",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"jd95ulbe1wgv1gs\",\"l4boirqcpvpn72k\",\"cy588312e0c163a\",\"o716nx4vp87y1ea\",1]": {
+      "attempt_id": "o716nx4vp87y1ea",
+      "cycle_id": "cy588312e0c163a",
+      "generation": 1,
+      "lease_expires_at": "2026-11-05T02:51:30.666Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "jd95ulbe1wgv1gs",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"joss0s11rj0vhre\",\"l4boirqcpvpn72k\",\"cy13e42e2028fa8\",\"olug302usohiqj1\",1]": {
+      "attempt_id": "olug302usohiqj1",
+      "cycle_id": "cy13e42e2028fa8",
+      "generation": 1,
+      "lease_expires_at": "2026-09-04T06:26:48.542821708Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "joss0s11rj0vhre",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"k5if41xtfxcdp0i\",\"l4boirqcpvpn72k\",\"cyc6519f9c31bb1\",\"wgi8zsnvolz8it8\",1]": {
+      "attempt_id": "wgi8zsnvolz8it8",
+      "cycle_id": "cyc6519f9c31bb1",
+      "generation": 1,
+      "lease_expires_at": "2026-11-11T04:15:29.863Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "k5if41xtfxcdp0i",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"lfu8jg1usev76ca\",\"l4boirqcpvpn72k\",\"cy588312e0c163a\",\"7a7pa270xiu4005\",1]": {
+      "attempt_id": "7a7pa270xiu4005",
+      "cycle_id": "cy588312e0c163a",
+      "generation": 1,
+      "lease_expires_at": "2026-11-05T03:10:34.023Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "lfu8jg1usev76ca",
+      "state": "superseded"
+    },
+    "[\"duev8o1h936bl9f\",\"mno84yblfcvdpu5\",\"l4boirqcpvpn72k\",\"cy6db945c2bb365\",\"51cqydp1elziw2u\",1]": {
+      "attempt_id": "51cqydp1elziw2u",
+      "cycle_id": "cy6db945c2bb365",
+      "generation": 1,
+      "lease_expires_at": "2026-10-28T03:56:42.961Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "mno84yblfcvdpu5",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"mq8czxwavm1pr4s\",\"l4boirqcpvpn72k\",\"cyd54a81541659b\",\"hqul3n86dlor3w2\",1]": {
+      "attempt_id": "hqul3n86dlor3w2",
+      "cycle_id": "cyd54a81541659b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T19:19:52.058Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "mq8czxwavm1pr4s",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"mqassb6l5nu7jtm\",\"l4boirqcpvpn72k\",\"cye4990fe33f367\",\"2yycod3boiiv2xu\",1]": {
+      "attempt_id": "2yycod3boiiv2xu",
+      "cycle_id": "cye4990fe33f367",
+      "generation": 1,
+      "lease_expires_at": "2026-10-31T04:03:12.579Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "mqassb6l5nu7jtm",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"mtqufw3kgjcgzhw\",\"l4boirqcpvpn72k\",\"cy01c57b0defcd4\",\"2ylloim1377p9o6\",1]": {
+      "attempt_id": "2ylloim1377p9o6",
+      "cycle_id": "cy01c57b0defcd4",
+      "generation": 1,
+      "lease_expires_at": "2026-11-10T07:32:29.106Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "mtqufw3kgjcgzhw",
+      "state": "superseded"
+    },
+    "[\"duev8o1h936bl9f\",\"n5ylzo3lzm5y2pk\",\"l4boirqcpvpn72k\",\"cy7093bb731418a\",\"vss061hbtbou42w\",1]": {
+      "attempt_id": "vss061hbtbou42w",
+      "cycle_id": "cy7093bb731418a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-31T06:31:57.569Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "n5ylzo3lzm5y2pk",
+      "state": "superseded"
+    },
+    "[\"duev8o1h936bl9f\",\"n94fb9qayl1o7qy\",\"l4boirqcpvpn72k\",\"cy0aeed6c37c397\",\"08oipole8y334xr\",1]": {
+      "attempt_id": "08oipole8y334xr",
+      "cycle_id": "cy0aeed6c37c397",
+      "generation": 1,
+      "lease_expires_at": "2026-11-11T04:52:08.628Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "n94fb9qayl1o7qy",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"nhexyn8zenabyba\",\"l4boirqcpvpn72k\",\"cyc7aa5124bc0a7\",\"n16d96vf4cc50ti\",1]": {
+      "attempt_id": "n16d96vf4cc50ti",
+      "cycle_id": "cyc7aa5124bc0a7",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T11:56:22.722Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "nhexyn8zenabyba",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"nhxei1clkmgmuw7\",\"l4boirqcpvpn72k\",\"cybee426f6f4ba4\",\"5koolc9z0j6hsuu\",1]": {
+      "attempt_id": "5koolc9z0j6hsuu",
+      "cycle_id": "cybee426f6f4ba4",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T17:57:07.906Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "nhxei1clkmgmuw7",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"ntxpipq5eel87n8\",\"l4boirqcpvpn72k\",\"cye3080b78d9381\",\"5j9dwmw03jhjmg7\",1]": {
+      "attempt_id": "5j9dwmw03jhjmg7",
+      "cycle_id": "cye3080b78d9381",
+      "generation": 1,
+      "lease_expires_at": "2026-09-03T21:10:37.116264944Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "ntxpipq5eel87n8",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"nvfgv9p3zk3t6ob\",\"l4boirqcpvpn72k\",\"cy5161ac7d078bd\",\"0f8abhvou73nwr7\",1]": {
+      "attempt_id": "0f8abhvou73nwr7",
+      "cycle_id": "cy5161ac7d078bd",
+      "generation": 1,
+      "lease_expires_at": "2026-09-12T18:49:41.540283847Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "nvfgv9p3zk3t6ob",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"oag5y8mtlqo1gn0\",\"l4boirqcpvpn72k\",\"cy1ea2f27ca78bd\",\"423nc3dwop6pspk\",1]": {
+      "attempt_id": "423nc3dwop6pspk",
+      "cycle_id": "cy1ea2f27ca78bd",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T12:11:14.3Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "oag5y8mtlqo1gn0",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"om9n18y6h4dlfk1\",\"l4boirqcpvpn72k\",\"cy0a1575057aded\",\"v2wrvqaap6xw7nk\",1]": {
+      "attempt_id": "v2wrvqaap6xw7nk",
+      "cycle_id": "cy0a1575057aded",
+      "generation": 1,
+      "lease_expires_at": "2026-09-12T18:32:20.485123493Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "om9n18y6h4dlfk1",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"pdi06t3fejxjj5e\",\"l4boirqcpvpn72k\",\"cybee426f6f4ba4\",\"amrkt5y3e2lzs6k\",1]": {
+      "attempt_id": "amrkt5y3e2lzs6k",
+      "cycle_id": "cybee426f6f4ba4",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T17:54:57.298Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "pdi06t3fejxjj5e",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"pnhseucil9lsvau\",\"l4boirqcpvpn72k\",\"cyc68cad108a603\",\"14qn6fn45r3acj7\",1]": {
+      "attempt_id": "14qn6fn45r3acj7",
+      "cycle_id": "cyc68cad108a603",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T13:54:58.701Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "pnhseucil9lsvau",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"prlfkbuktuvsv3f\",\"l4boirqcpvpn72k\",\"cy6ec91ce449128\",\"42pgc2m65hruets\",1]": {
+      "attempt_id": "42pgc2m65hruets",
+      "cycle_id": "cy6ec91ce449128",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T08:50:08.208Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "prlfkbuktuvsv3f",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"px5d63uenkjiwo2\",\"l4boirqcpvpn72k\",\"cybef6646b50d53\",\"eyh45qv2x2gs06o\",1]": {
+      "attempt_id": "eyh45qv2x2gs06o",
+      "cycle_id": "cybef6646b50d53",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T19:07:44.918Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "px5d63uenkjiwo2",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"qto6zj5ifylqq2n\",\"l4boirqcpvpn72k\",\"cy21c88ad8a58c1\",\"tidyyqe3jwt5g53\",1]": {
+      "attempt_id": "tidyyqe3jwt5g53",
+      "cycle_id": "cy21c88ad8a58c1",
+      "generation": 1,
+      "lease_expires_at": "2026-10-23T13:54:09.433Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "qto6zj5ifylqq2n",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"r41437wla47cj3e\",\"l4boirqcpvpn72k\",\"cy99d9e64f66b16\",\"cj3irwtk2vt9bjm\",1]": {
+      "attempt_id": "cj3irwtk2vt9bjm",
+      "cycle_id": "cy99d9e64f66b16",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T11:44:24.02Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "r41437wla47cj3e",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"rpu3divgu4bdoui\",\"l4boirqcpvpn72k\",\"cy70ebafcc8c3a9\",\"v51p8m393juaq6g\",1]": {
+      "attempt_id": "v51p8m393juaq6g",
+      "cycle_id": "cy70ebafcc8c3a9",
+      "generation": 1,
+      "lease_expires_at": "2026-09-12T20:47:17.158228411Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "rpu3divgu4bdoui",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"s1k4n5i67deqxc6\",\"l4boirqcpvpn72k\",\"cybef6646b50d53\",\"ttay1ao5iboz2r3\",1]": {
+      "attempt_id": "ttay1ao5iboz2r3",
+      "cycle_id": "cybef6646b50d53",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T19:11:34.579Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "s1k4n5i67deqxc6",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"scbpcw628x8eqhy\",\"l4boirqcpvpn72k\",\"cy21c88ad8a58c1\",\"6y1cqotd8y58aa2\",1]": {
+      "attempt_id": "6y1cqotd8y58aa2",
+      "cycle_id": "cy21c88ad8a58c1",
+      "generation": 1,
+      "lease_expires_at": "2026-10-23T13:45:16.986Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "scbpcw628x8eqhy",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"scvfto6mf9xe98t\",\"l4boirqcpvpn72k\",\"cyae25e0a8c436c\",\"51np1vz463kwigj\",1]": {
+      "attempt_id": "51np1vz463kwigj",
+      "cycle_id": "cyae25e0a8c436c",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T08:34:24.156Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "scvfto6mf9xe98t",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"soj9wtboddpwxhp\",\"l4boirqcpvpn72k\",\"cyd54a81541659b\",\"0usrfr7dq1gyawx\",1]": {
+      "attempt_id": "0usrfr7dq1gyawx",
+      "cycle_id": "cyd54a81541659b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T19:18:14.01Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "soj9wtboddpwxhp",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"solidib9wxr7r9v\",\"l4boirqcpvpn72k\",\"cy6cdd8c0ce9d55\",\"2pbt0kz6lexxf27\",1]": {
+      "attempt_id": "2pbt0kz6lexxf27",
+      "cycle_id": "cy6cdd8c0ce9d55",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T13:17:22.455Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "solidib9wxr7r9v",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"sqfekwjoki1mix9\",\"l4boirqcpvpn72k\",\"cya148636708d65\",\"o7hygjxoap5tk25\",1]": {
+      "attempt_id": "o7hygjxoap5tk25",
+      "cycle_id": "cya148636708d65",
+      "generation": 1,
+      "lease_expires_at": "2026-11-04T17:18:50.101Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "sqfekwjoki1mix9",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"swo80a7vyvu89lk\",\"l4boirqcpvpn72k\",\"cye4990fe33f367\",\"lhsyq3qwwtx105n\",1]": {
+      "attempt_id": "lhsyq3qwwtx105n",
+      "cycle_id": "cye4990fe33f367",
+      "generation": 1,
+      "lease_expires_at": "2026-10-31T04:05:01.849Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "swo80a7vyvu89lk",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"tavxf24x0choyog\",\"l4boirqcpvpn72k\",\"cyd0547ff23c7ad\",\"zggzn1jma28mfyq\",1]": {
+      "attempt_id": "zggzn1jma28mfyq",
+      "cycle_id": "cyd0547ff23c7ad",
+      "generation": 1,
+      "lease_expires_at": "2026-10-22T15:14:07.733Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "tavxf24x0choyog",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"tolmc9j74hxvvij\",\"l4boirqcpvpn72k\",\"cy4e4577fd77e3b\",\"pw1i2kt9xom0kod\",1]": {
+      "attempt_id": "pw1i2kt9xom0kod",
+      "cycle_id": "cy4e4577fd77e3b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:31:47.623Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "tolmc9j74hxvvij",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"w9bq5tz9qsca0pr\",\"l4boirqcpvpn72k\",\"cy4e4577fd77e3b\",\"n1t4qh0hk8lur5b\",1]": {
+      "attempt_id": "n1t4qh0hk8lur5b",
+      "cycle_id": "cy4e4577fd77e3b",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:33:39.29Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "w9bq5tz9qsca0pr",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"wbrma3ky0e6r09n\",\"l4boirqcpvpn72k\",\"cy6ec91ce449128\",\"optrmcqqcbf68oj\",1]": {
+      "attempt_id": "optrmcqqcbf68oj",
+      "cycle_id": "cy6ec91ce449128",
+      "generation": 1,
+      "lease_expires_at": "2026-10-06T08:40:29.685Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "wbrma3ky0e6r09n",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"wh0qcmuvsrkbyfs\",\"l4boirqcpvpn72k\",\"cy1f8559dcca65e\",\"lo78hj3vob9ft0f\",1]": {
+      "attempt_id": "lo78hj3vob9ft0f",
+      "cycle_id": "cy1f8559dcca65e",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:44:01.351Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "wh0qcmuvsrkbyfs",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"wt5ixhcbfjw7go1\",\"l4boirqcpvpn72k\",\"cy2a958b47fa979\",\"ds6e6jge02wufy5\",1]": {
+      "attempt_id": "ds6e6jge02wufy5",
+      "cycle_id": "cy2a958b47fa979",
+      "generation": 1,
+      "lease_expires_at": "2026-11-12T06:07:26.678Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "wt5ixhcbfjw7go1",
+      "state": "superseded"
+    },
+    "[\"duev8o1h936bl9f\",\"xi8h3j8a0w6wkig\",\"l4boirqcpvpn72k\",\"cy58cffa9872349\",\"eit7kvw8slswicq\",1]": {
+      "attempt_id": "eit7kvw8slswicq",
+      "cycle_id": "cy58cffa9872349",
+      "generation": 1,
+      "lease_expires_at": "2026-10-25T17:51:08.321Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "xi8h3j8a0w6wkig",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"ybt05rfrzc6zzbs\",\"l4boirqcpvpn72k\",\"cy547557305db2a\",\"4symfqcmz14sr51\",1]": {
+      "attempt_id": "4symfqcmz14sr51",
+      "cycle_id": "cy547557305db2a",
+      "generation": 1,
+      "lease_expires_at": "2026-10-14T14:20:47.44Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "ybt05rfrzc6zzbs",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"z112nswtq2m0229\",\"l4boirqcpvpn72k\",\"cyc7aa5124bc0a7\",\"y02gzdzt84to940\",1]": {
+      "attempt_id": "y02gzdzt84to940",
+      "cycle_id": "cyc7aa5124bc0a7",
+      "generation": 1,
+      "lease_expires_at": "2026-10-19T11:58:38.985Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "z112nswtq2m0229",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"z16fuaiscgiz5xx\",\"l4boirqcpvpn72k\",\"cya148636708d65\",\"u8sctr4mn0qot6y\",1]": {
+      "attempt_id": "u8sctr4mn0qot6y",
+      "cycle_id": "cya148636708d65",
+      "generation": 1,
+      "lease_expires_at": "2026-11-04T17:10:59.954Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "z16fuaiscgiz5xx",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"z4m4ul32ttf9it0\",\"l4boirqcpvpn72k\",\"cy2c84c54be4348\",\"cs1jdq7a4lzgevc\",1]": {
+      "attempt_id": "cs1jdq7a4lzgevc",
+      "cycle_id": "cy2c84c54be4348",
+      "generation": 1,
+      "lease_expires_at": "2026-11-11T03:34:14.626Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "z4m4ul32ttf9it0",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"z6edg28084lnb6k\",\"l4boirqcpvpn72k\",\"cy21c88ad8a58c1\",\"p0c1p1h0ofrbzvb\",1]": {
+      "attempt_id": "p0c1p1h0ofrbzvb",
+      "cycle_id": "cy21c88ad8a58c1",
+      "generation": 1,
+      "lease_expires_at": "2026-10-23T13:49:03.937Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "z6edg28084lnb6k",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"zwttuqh10w5k0bg\",\"l4boirqcpvpn72k\",\"cy21c88ad8a58c1\",\"bx30sksw8gctfr9\",1]": {
+      "attempt_id": "bx30sksw8gctfr9",
+      "cycle_id": "cy21c88ad8a58c1",
+      "generation": 1,
+      "lease_expires_at": "2026-10-23T13:56:54.814Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "zwttuqh10w5k0bg",
+      "state": "active"
+    },
+    "[\"duev8o1h936bl9f\",\"zxk3d3xr3j48edr\",\"l4boirqcpvpn72k\",\"cy1f8559dcca65e\",\"8hzgdtkrsly73ly\",1]": {
+      "attempt_id": "8hzgdtkrsly73ly",
+      "cycle_id": "cy1f8559dcca65e",
+      "generation": 1,
+      "lease_expires_at": "2026-10-24T19:49:46.947Z",
+      "membership_id": "l4boirqcpvpn72k",
+      "room_id": "duev8o1h936bl9f",
+      "source_event_id": "zxk3d3xr3j48edr",
+      "state": "active"
+    }
+  },
+  "delivery_intents": {},
+  "delivery_lifecycle": {
+    "joss0s11rj0vhre": {
+      "attempts": 1,
+      "automatic_retry": false,
+      "binding": {
+        "identity_version": 1,
+        "installation_id": "hermes-256b64e86029d113a4c872cac862c22f",
+        "membership_id": "l4boirqcpvpn72k"
+      },
+      "completion": {
+        "attempt_id": "olug302usohiqj1",
+        "cycle_id": "cy13e42e2028fa8",
+        "kind": "cycle",
+        "payload": {
+          "action": "contribute",
+          "eventId": "qlpz1avcbixahu0",
+          "generation": 1
+        }
+      },
+      "delivery_state": "posted",
+      "failed_at": 1788503137.2023711,
+      "last_attempt_at": 1788503130.550546,
+      "last_error": "discussion cycle input conflicts with persisted cycle",
+      "last_error_code": "cycle_conflict",
+      "lifecycle_state": "blocked",
+      "receipt": {
+        "canonical_event_id": "qlpz1avcbixahu0",
+        "canonical_seq": 248,
+        "canonical_ts": "2026-09-04T06:25:02.43Z",
+        "source_event_id": "joss0s11rj0vhre",
+        "source_seq": 247
+      },
+      "state": "lifecycle_blocked"
+    }
+  },
+  "disabled_reason": "credential_revoked",
+  "display_name": "Real",
+  "documents_given": {
+    "epoch_id": "5usvwdmoikdt9rp",
+    "given": [
+      "ms2ptk8r0teoq44/cx6diz7glpzu3ef"
+    ],
+    "host_session": "20261110_152112_6d948062"
+  },
+  "enabled": false,
+  "epoch_session_routing_initialized": true,
+  "identity_version": 1,
+  "inbox": {
+    "2646": "pending"
+  },
+  "installation_id": "hermes-256b64e86029d113a4c872cac862c22f",
+  "kept_reply": {},
+  "legacy_session_epoch_id": "sia4tfl53uq3jf3",
+  "membership_id": "l4boirqcpvpn72k",
+  "message_payload_capabilities": [],
+  "message_payload_dialect": "v1",
+  "missed_sources": [
+    {
+      "source_event_id": "vv922jdw7gcsdrc",
+      "source_seq": 0
+    }
+  ],
+  "pending_retries": {
+    "2646": 0
+  },
+  "pending_since": {
+    "2646": 1794464287.268801
+  },
+  "recovery_closures": {},
+  "recovery_fence_cutoff": 0,
+  "resolved_delivery_lifecycle": {},
+  "revoked": true,
+  "room_id": "duev8o1h936bl9f",
+  "rotate_current_epoch_session": false,
+  "share_uploads": {},
+  "terminal_evidence": {},
+  "transport": "sse",
+  "turn_observed": {},
+  "turn_sequences": {}
+}
