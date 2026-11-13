@@ -2,7 +2,9 @@
 from __future__ import annotations
 import asyncio
 import copy
+import functools
 import json
+import signal
 import types
 import unittest
 from unittest import mock
@@ -52,6 +54,25 @@ def setup():
             raise adapter.ProtocolError('inactive', status=401, code='connector_not_active')
     api = API()
     return instance, binding, gate, clock, state, api
+
+
+
+def time_limit(seconds):
+    """PR81-P-003 parity: a held muted path fails the test instead of hanging the suite."""
+    def decorate(test):
+        @functools.wraps(test)
+        def run(*args, **kwargs):
+            def expired(_signum, _frame):
+                raise TimeoutError(f"{test.__name__} exceeded {seconds} s")
+            previous = signal.signal(signal.SIGALRM, expired)
+            signal.setitimer(signal.ITIMER_REAL, seconds)
+            try:
+                return test(*args, **kwargs)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous)
+        return run
+    return decorate
 
 
 async def settle():
@@ -185,6 +206,7 @@ class P15Tests(unittest.TestCase):
             self.assertFalse(instance._membership_gate(replacement).paused)
         asyncio.run(run())
 
+    @time_limit(30)
     def test_08(self):
         # 1.0.107 (P2c-3b): a muted membership keeps its heartbeat and event
         # stream; only enrollment, activity and the other writers wait.
@@ -208,6 +230,7 @@ class P15Tests(unittest.TestCase):
             await asyncio.gather(task,activity,return_exceptions=True)
         asyncio.run(run())
 
+    @time_limit(30)
     def test_pr107_controls_other_statuses_hold_presence_contacts(self):
         # Every other non-active status still holds registration, heartbeat
         # and the event stream; active is unchanged.
@@ -501,6 +524,7 @@ class MutedEnrollmentLockTests(unittest.TestCase):
         self.assertEqual(len(beats), int((until - since - 1e-9) // 15) + 1, (room_id, beats))
         self.assertEqual({round(later - earlier, 6) for earlier, later in zip(beats, beats[1:])}, {15.0})
 
+    @time_limit(30)
     def test_muted_enrollment_listing_never_stops_sibling_heartbeats(self):
         for label, mute_at in [('muted before start', 0), ('muted while running', 100)]:
             with self.subTest(label):
@@ -528,6 +552,7 @@ class MutedEnrollmentLockTests(unittest.TestCase):
         self.assert_beats(room, 'a1', start_at + 15, start_at + 400)
         self.assert_beats(room, 'm1', start_at + 45, start_at + 400)
 
+    @time_limit(30)
     def test_13(self):
         # P15-13 (1.0.107, P2c-3b): a muted membership heartbeats on every
         # tick, registers again after a lost session and keeps its event
@@ -547,3 +572,121 @@ class MutedEnrollmentLockTests(unittest.TestCase):
                 self.assertEqual([call for call in room.calls if call[2] == 'm1' and call[1].startswith('activity')
                                   and call[0] > muted_listing[0]], [])
                 self.assertEqual(room.times('claim', 'm1'), [])
+
+
+class MutedHeartbeatHoldTests(unittest.TestCase):
+    """PR81-P-001/P-002 parity (1.0.107 r1): no gated contact holds a muted heartbeat.
+
+    OpenClaw 0.2.81 could hold the muted heartbeat behind a gated enrollment
+    listing inside its binding operation, and behind a gated startup frame
+    before its heartbeat loop started. Here the real participation gate and
+    `_call` path run against the P8 idle Room on the virtual clock.
+    """
+
+    def run_room(self, *, until, mute_at=None, pre_paused=False, listing_refuses=True,
+                 gated_routing=False, unread_state=()):
+        from test_parity_p8 import IdleRoom, REAL_SLEEP, START, STREAM_PASS, VirtualClock, binding_for, idle_instance, simulated, start, stop
+        clock = VirtualClock()
+        room = IdleRoom(clock)
+        binding = binding_for('m1', 'inst-A')
+        observed = {}
+
+        async def body():
+            instance = idle_instance(room, [binding])
+            del instance._call  # the production _call -> _membership_contact path
+
+            # The participation gate rechecks on the virtual clock (60 s).
+            key = (binding.base_url, binding.room_id, binding.membership_id, binding.credential)
+            instance._room_map('_membership_gates')[key] = adapter.MembershipGate(
+                adapter.INACTIVE_RECHECK_SECONDS, clock=lambda: clock.now)
+
+            async def raw(b, operation):
+                await REAL_SLEEP(0)
+                probe = types.SimpleNamespace(room_state=lambda _room: 'state',
+                                              connector_enrollments=lambda _installation: 'listing')
+                try:
+                    route = operation(probe)
+                except Exception:  # noqa: BLE001 - another route
+                    route = None
+                if route == 'state' and any(low <= clock.now - START < high for low, high in unread_state):
+                    # One unread own-roster read (a Room deploy): the gate stays as it is.
+                    room.calls.append((clock.now, 'state-unread', b.room_id))
+                    raise adapter.ProtocolError('Room temporarily unavailable', status=503,
+                                                code='server_error', retryable=True)
+                if route == 'listing' and not listing_refuses:
+                    # A Room that answers a muted listing (no refusal, no pause).
+                    room.calls.append((clock.now, 'enrollments', b.room_id))
+                    return []
+                return operation(room.api(b))
+            instance._raw_call = raw
+
+            async def stream_pass(b):
+                room.calls.append((clock.now, 'stream', b.room_id))
+                await asyncio.sleep(STREAM_PASS)
+            instance._transport_cycle = stream_pass
+            if gated_routing:
+                # The startup routing read is a gated background contact whose
+                # roster answer pauses the gate as muted (P15-2).
+                async def routing(b):
+                    await instance._call(b, lambda api: api.room_state(b.room_id), background=True)
+                instance._ensure_epoch_session_routing = routing
+            if pre_paused or mute_at == 0:
+                room.muted.add('m1')
+            if pre_paused:
+                instance._membership_gate(binding).pause('muted')
+            await start(instance, [binding])
+            if mute_at:
+                await clock.run_until(START + mute_at)
+                room.muted.add('m1')
+            await clock.run_until(START + until)
+            observed['gate'] = instance._membership_gate(binding)
+            observed['heartbeat_task'] = 'm1' in instance._heartbeat_tasks
+            observed['watching'] = not instance._tasks['m1'].done()
+            await stop(instance)
+
+        with simulated(clock):
+            asyncio.run(body())
+        return room, observed, START
+
+    def assert_muted_beating(self, room, observed, since, until, minimum):
+        self.assertTrue(observed['gate'].paused)
+        self.assertEqual(observed['gate'].status, 'muted')
+        self.assertTrue(observed['heartbeat_task'], room.calls)
+        beats = room.times('heartbeat', 'm1', since=since, until=until)
+        self.assertGreaterEqual(len(beats), minimum, room.calls)
+        self.assertLessEqual(max(later - earlier for earlier, later in zip(beats, beats[1:])), 30.0, beats)
+
+    @time_limit(30)
+    def test_pr81_muted_unread_recheck_keeps_heartbeating(self):
+        # PR81-P-001 scenario B: muted, then one unread own-roster read at the
+        # 60 s recheck; the gate stays paused, the heartbeat keeps its cadence,
+        # nothing registers again and the listing is not called again.
+        room, observed, start_at = self.run_room(until=400, mute_at=0, unread_state=[(50, 70)])
+        self.assertEqual(len(room.times('state-unread', 'm1')), 1, room.calls)
+        self.assert_muted_beating(room, observed, start_at + 15, start_at + 400, 25)
+        self.assertEqual(len(room.times('register', 'm1')), 1, room.calls)
+        self.assertEqual(len(room.times('enrollments', 'm1')), 1, room.calls)
+        self.assertGreaterEqual(len(room.times('stream', 'm1')), 2, room.calls)
+
+    @time_limit(30)
+    def test_pr81_pre_paused_muted_three_ticks_beat_and_never_list(self):
+        # PR81-P-001 scenario A / PR81-P-002: the gate is paused as muted
+        # before the start; 3 ticks give 3 heartbeats and 0 listings.
+        room, observed, start_at = self.run_room(until=46, pre_paused=True)
+        self.assertTrue(observed['heartbeat_task'], room.calls)
+        self.assertEqual(len(room.times('register', 'm1')), 1, room.calls)
+        self.assertEqual(len(room.times('heartbeat', 'm1')), 3, room.calls)
+        self.assertEqual(room.times('enrollments', 'm1'), [], room.calls)
+        self.assertEqual([call for call in room.calls if call[1].startswith('activity')], [], room.calls)
+
+    @time_limit(30)
+    def test_pr81_paused_during_start_still_starts_the_heartbeat(self):
+        # PR81-P-002: the gate pauses as muted during the start (the routing
+        # read's roster says muted); the heartbeat still starts, the event
+        # stream is still read, and no startup frame waits in the gate.
+        room, observed, start_at = self.run_room(until=400, mute_at=0, listing_refuses=False, gated_routing=True)
+        self.assertEqual(len(room.times('state', 'm1', until=start_at + 1)), 1, room.calls)
+        self.assert_muted_beating(room, observed, start_at + 15, start_at + 400, 25)
+        self.assertTrue(observed['watching'])
+        self.assertGreaterEqual(len(room.times('stream', 'm1')), 2, room.calls)
+        self.assertEqual([call for call in room.calls if call[1].startswith('activity')], [], room.calls)
