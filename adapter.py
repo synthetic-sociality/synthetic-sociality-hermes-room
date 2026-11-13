@@ -1747,6 +1747,11 @@ def _revocation_stopped(binding: RoomBinding) -> bool:
     return binding.revoked or binding.disabled_reason in _STALE_REASONS
 
 
+def _open_delivery_intents(binding: RoomBinding) -> bool:
+    """P18-2 (Hermes 1.0.106, OpenClaw 0.2.80): any delivery intent other than a settled terminal one (P3-2)."""
+    return any(not recovery.is_terminal_intent(intent) for intent in binding.delivery_intents.values())
+
+
 def _abandonable_entries(binding: RoomBinding) -> list[dict[str, Any]] | None:
     """P18-2: the pending work a server-stopped binding holds that can never complete, or None.
 
@@ -1755,7 +1760,7 @@ def _abandonable_entries(binding: RoomBinding) -> list[dict[str, Any]] | None:
     rotation, a lifecycle entry in another state, a quarantined, failed or
     received inbox entry, a pending marker without its inbox entry).
     """
-    if not _revocation_stopped(binding) or binding.delivery_intents or binding.recovery_closures or binding.credential_rotation:
+    if not _revocation_stopped(binding) or _open_delivery_intents(binding) or binding.recovery_closures or binding.credential_rotation:
         return None
     entries: list[dict[str, Any]] = []
     for source_id, record in sorted(binding.delivery_lifecycle.items()):
@@ -1782,13 +1787,13 @@ def _stale_inert_binding(binding: RoomBinding) -> bool:
     Stale: revoked, stopped for an expired or revoked credential, or holding an
     expired credential. A binding disabled for any other reason (an operator's
     manual disable) is not stale and is never enabled by a re-admission. Inert:
-    no delivery intent, delivery lifecycle, pending entry, recovery closure or
-    credential rotation, and only settled inbox outcomes, so replacing it loses
-    no evidence. Parity with the OpenClaw connector's staleInertState.
+    no delivery intent other than a settled terminal one (P3-2), no delivery
+    lifecycle, pending entry, recovery closure or credential rotation, and only
+    settled inbox outcomes, so replacing it loses no open work. Parity with the OpenClaw connector's staleInertState.
     """
     if not _server_stopped(binding):
         return False
-    return not (binding.delivery_intents or binding.delivery_lifecycle or binding.recovery_closures
+    return not (_open_delivery_intents(binding) or binding.delivery_lifecycle or binding.recovery_closures
                 or binding.credential_rotation or binding.pending_since
                 or any(value not in _SETTLED_INBOX for value in binding.inbox.values()))
 
