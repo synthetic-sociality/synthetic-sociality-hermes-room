@@ -725,11 +725,90 @@ class MutedHeartbeatHoldTests(unittest.TestCase):
 
 
 class Op12RecoveryBudgetTests(unittest.TestCase):
-    """H107-P-002 (1.0.107 r3): a startup muted pause never retires recovery.
+    """H107-P-002/P-005 (1.0.107 r3): a startup muted pause never retires or spends recovery.
 
     Adapted from the independent OP-12 review (Mac2024) RED tests and their
-    negative controls: the real participation gate, `_call` and closure path.
+    negative controls: the real participation gate, `_call`, `_watch`, epoch
+    routing, closure and repair paths run against the P8 idle Room.
     """
+
+    def start_room(self, *, pre_paused=False, muted_routing=False, journal=None):
+        from test_parity_p8 import IdleRoom, REAL_SLEEP, VirtualClock, binding_for, idle_instance, simulated, start, stop
+        clock = VirtualClock()
+        room = IdleRoom(clock)
+        binding = binding_for('review', 'review-install')
+        if journal is not None:
+            binding.delivery_lifecycle = copy.deepcopy(journal)
+            for item in binding.delivery_lifecycle.values():
+                item['binding'].update(membership_id=binding.membership_id, installation_id=binding.installation_id)
+        observed = {}
+
+        async def body():
+            instance = idle_instance(room, [binding])
+            del instance._call  # production _call -> _membership_contact
+            del instance._ensure_epoch_session_routing  # production routing read
+            del instance._repair_pending_lifecycles  # production repair and durable budget
+            instance._membership_gate(binding).clock = clock
+            if pre_paused:
+                room.muted.add(binding.room_id)
+                instance._pause_membership(binding, 'muted')
+            if muted_routing:
+                room.muted.add(binding.room_id)  # the routing roster read discovers the mute
+
+            async def raw(b, operation):
+                await REAL_SLEEP(0)
+                api = room.api(b)
+                if muted_routing:
+                    api.connector_enrollments = lambda _installation: []  # a nonrefusing listing
+                def finish(*_args):
+                    room.calls.append((clock.now, 'finish_turn', b.room_id))
+                    return {}
+                api.finish_turn = finish
+                return operation(api)
+            instance._raw_call = raw
+
+            async def closures(_b):
+                pass
+            instance._apply_recovery_closures = closures
+
+            async def stream_pass(_b):
+                while True:
+                    await asyncio.sleep(10)
+            instance._transport_cycle = stream_pass
+            await start(instance, [binding])
+            await clock.run_until(clock.now + 1)
+            observed['journal'] = copy.deepcopy(binding.delivery_lifecycle)
+            await stop(instance)
+
+        with simulated(clock):
+            asyncio.run(body())
+        return room, observed
+
+    @time_limit(30)
+    def test_h107_p005_routing_pause_never_spends_the_durable_retry_budget(self):
+        from test_delivery_lifecycle import turn_lifecycle_binding
+        journal = turn_lifecycle_binding().delivery_lifecycle
+        before = journal['evt-5']['attempts']
+        for _start in range(3):
+            room, observed = self.start_room(muted_routing=True, journal=journal)
+            journal = observed['journal']
+            self.assertEqual(room.times('finish_turn', 'review'), [], room.calls)
+        self.assertEqual(journal['evt-5']['attempts'], before, 'no lifecycle request reached Room, but attempts consumed')
+        self.assertEqual(journal['evt-5']['lifecycle_state'], 'pending')
+
+    @time_limit(30)
+    def test_h107_p005_pre_paused_muted_start_keeps_the_attempt(self):
+        from test_delivery_lifecycle import turn_lifecycle_binding
+        _room, observed = self.start_room(pre_paused=True, journal=turn_lifecycle_binding().delivery_lifecycle)
+        self.assertEqual(observed['journal']['evt-5']['attempts'], 1)
+        self.assertEqual(observed['journal']['evt-5']['lifecycle_state'], 'pending')
+
+    @time_limit(30)
+    def test_h107_p005_active_start_repairs_once(self):
+        from test_delivery_lifecycle import turn_lifecycle_binding
+        room, observed = self.start_room(journal=turn_lifecycle_binding().delivery_lifecycle)
+        self.assertEqual(len(room.times('finish_turn', 'review')), 1, room.calls)
+        self.assertNotIn('evt-5', observed['journal'])
 
     def closure_probe(self, *, mute):
         import tempfile
