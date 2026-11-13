@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import stat
 from pathlib import Path
 import platform
 import re
@@ -1715,6 +1716,21 @@ _ABANDONABLE_INBOX = frozenset({"pending", "retryable", "failed-retryable"})
 REVOCATION_ABANDONMENT_JOURNAL = "revocation-abandonment.jsonl"
 
 
+def _revocation_stopped(binding: RoomBinding) -> bool:
+    """P18-1 (OP-12 105 R1 H105-F001): a binding whose pending work a re-admission may abandon.
+
+    Narrower than ``_server_stopped``: the binding must be stopped (not enabled)
+    and either revoked or stopped by the server for a revoked or expired
+    credential. An enabled binding whose credential merely expired is the
+    renewal case and keeps its work; an operator-disabled binding never qualifies.
+    """
+    if binding.enabled:
+        return False
+    if binding.disabled_reason and binding.disabled_reason not in _STALE_REASONS:
+        return False
+    return binding.revoked or binding.disabled_reason in _STALE_REASONS
+
+
 def _abandonable_entries(binding: RoomBinding) -> list[dict[str, Any]] | None:
     """P18-2: the pending work a server-stopped binding holds that can never complete, or None.
 
@@ -1723,7 +1739,7 @@ def _abandonable_entries(binding: RoomBinding) -> list[dict[str, Any]] | None:
     rotation, a lifecycle entry in another state, a quarantined, failed or
     received inbox entry, a pending marker without its inbox entry).
     """
-    if not _server_stopped(binding) or binding.delivery_intents or binding.recovery_closures or binding.credential_rotation:
+    if not _revocation_stopped(binding) or binding.delivery_intents or binding.recovery_closures or binding.credential_rotation:
         return None
     entries: list[dict[str, Any]] = []
     for source_id, record in sorted(binding.delivery_lifecycle.items()):
@@ -1791,10 +1807,20 @@ def _append_journal(journal: Path, records: list[dict[str, Any]]) -> None:
     """Append records to the P18 journal: 0600, fsync of the file and its directory."""
     if not records:
         return
-    descriptor = os.open(journal, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    # OP-12 105 R1 H105-F004: never follow a planted link, append only to a
+    # regular file with one link, and never accept a short write.
+    descriptor = os.open(journal, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError(f"revocation abandonment journal is not a private regular file: {journal}")
         os.fchmod(descriptor, 0o600)
-        os.write(descriptor, "".join(json.dumps(record, sort_keys=True) + "\n" for record in records).encode("utf-8"))
+        data = memoryview("".join(json.dumps(record, sort_keys=True) + "\n" for record in records).encode("utf-8"))
+        while data:
+            written = os.write(descriptor, data)
+            if not written:
+                raise OSError(f"revocation abandonment journal write made no progress: {journal}")
+            data = data[written:]
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
