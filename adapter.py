@@ -1819,19 +1819,61 @@ def _journal_phases(journal: Path) -> set[tuple[str, str]]:
     return phases
 
 
+_RECORD_EVIDENCE = ("auditId", "reason", "roomId", "membershipId", "installationId", "entry", "revocation")
+
+
+def _recorded_intact(journal: Path, records: list[dict[str, Any]]) -> bool:
+    """H105-F007: every expected ``recorded`` entry is present as a parseable line with the same evidence.
+
+    The journal is read without following a link and must be a regular file;
+    any read failure counts as unverified. The comparison covers the full
+    evidence (Room, membership, installation, entry with its original record,
+    revocation), not only the audit id, so a line that merely names the id does
+    not count; ``abandonedAt`` may differ when an earlier run recorded it.
+    """
+    try:
+        descriptor = os.open(journal, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return False
+        chunks = []
+        while chunk := os.read(descriptor, 1 << 16):
+            chunks.append(chunk)
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+    present = []
+    for line in b"".join(chunks).splitlines():
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("phase") == "recorded":
+            present.append({key: parsed.get(key) for key in _RECORD_EVIDENCE})
+    return all({key: record.get(key) for key in _RECORD_EVIDENCE} in present for record in records)
+
+
 def _append_journal(journal: Path, records: list[dict[str, Any]]) -> None:
     """Append records to the P18 journal: 0600, fsync of the file and its directory."""
     if not records:
         return
     # OP-12 105 R1 H105-F004: never follow a planted link, append only to a
     # regular file with one link, and never accept a short write.
-    descriptor = os.open(journal, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    descriptor = os.open(journal, os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError(f"revocation abandonment journal is not a private regular file: {journal}")
         os.fchmod(descriptor, 0o600)
-        data = memoryview("".join(json.dumps(record, sort_keys=True) + "\n" for record in records).encode("utf-8"))
+        payload = "".join(json.dumps(record, sort_keys=True) + "\n" for record in records).encode("utf-8")
+        # OP-12 105 H105-F007: a torn last line (an interrupted earlier write)
+        # stays its own line, unchanged; the new records start on a fresh line.
+        if info.st_size and os.pread(descriptor, 1, info.st_size - 1) != b"\n":
+            payload = b"\n" + payload
+        data = memoryview(payload)
         while data:
             written = os.write(descriptor, data)
             if not written:
@@ -4999,6 +5041,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             "abandonedAt": now})
         known = _journal_phases(journal)
         _append_journal(journal, [record for record in records if (record["auditId"], "recorded") not in known])
+        # H105-F007: the state changes only after every recorded entry reads
+        # back as an intact line carrying exactly the expected evidence.
+        if not _recorded_intact(journal, records):
+            logger.warning("Room %s: P18 journal evidence could not be verified; pending work kept, no claim",
+                           held.room_id)
+            return False
         expected = json.dumps(entries, sort_keys=True)
 
         def remove(current):
