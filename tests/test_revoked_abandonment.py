@@ -212,3 +212,83 @@ class RevokedAbandonmentTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RevokedAbandonmentRemedyTests(RevokedAbandonmentTests):
+    """OP-12 105 R1 remedies: H105-F001 (abandonment eligibility) and H105-F004 (journal open/write safety)."""
+
+    async def test_h105_f001_an_enabled_binding_whose_credential_merely_expired_is_not_abandoned(self):
+        renewable = copy.deepcopy(REAL)
+        renewable.update(enabled=True, revoked=False, disabled_reason="", credential_expires_at="2026-01-01T00:00:00Z")
+        _instance, path, _live, claims, watched, before = await self.run_claim(renewable)
+        self.assert_untouched(path, before, claims, watched)
+
+    async def test_h105_f001_a_stopped_binding_with_credential_expired_reason_is_abandoned(self):
+        stopped = copy.deepcopy(REAL)
+        stopped.update(enabled=False, revoked=False, disabled_reason="credential_expired")
+        _instance, path, _live, claims, watched, _before = await self.run_claim(stopped)
+        self.assertEqual(claims, [FRESH["invitationId"]])
+        self.assertEqual(state_store.load(path).binding(ROOM).credential, "credential-fresh")
+        self.assertEqual(len(self.journal(path)), 2)
+        self.assertEqual(len(watched), 1)
+
+    async def test_h105_f001_operator_disabled_with_revoked_or_expired_flags_is_untouched(self):
+        for flags in (dict(revoked=True), dict(credential_expires_at="2026-01-01T00:00:00Z"),
+                      dict(revoked=True, credential_expires_at="2026-01-01T00:00:00Z")):
+            with self.subTest(flags=sorted(flags)):
+                disabled = copy.deepcopy(REAL)
+                disabled.update({"enabled": False, "disabled_reason": "manual", "revoked": False, **flags})
+                _instance, path, _live, claims, watched, before = await self.run_claim(disabled)
+                self.assert_untouched(path, before, claims, watched)
+
+    async def test_h105_f004_a_symlinked_journal_fails_closed_without_claim(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        target = Path(directory.name) / "elsewhere.jsonl"
+        target.write_text("")
+        original_update = adapter.update
+        # Plant the symlink where the journal belongs, then abandon.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = Path(tmp.name) / "state.json"
+        state_store.save(state_store.PluginState(bindings=[source_binding(), state_store.RoomBinding.from_dict(REAL)]), state)
+        (state.parent / JOURNAL).symlink_to(target)
+        before = state.read_bytes()
+        instance = object.__new__(adapter.SyntheticSocialityAdapter)
+        instance._state = state_store.load(state)
+        instance._state_file = state
+        adapter.update = lambda mutator: state_store.update(mutator, state)
+        try:
+            with self.assertRaises(OSError):
+                instance._abandon_revoked_pending_work(instance._state.binding(ROOM))
+        finally:
+            adapter.update = original_update
+        self.assertEqual(state.read_bytes(), before, "state unchanged when the journal is refused")
+        self.assertEqual(target.read_text(), "", "nothing written through the symlink")
+
+    async def test_h105_f004_short_writes_are_completed_and_a_zero_write_fails_closed(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        journal = Path(directory.name) / JOURNAL
+        records = [{"phase": "recorded", "auditId": "a" * 64, "pad": "x" * 300}]
+        real_write = adapter.os.write
+        calls = []
+
+        def short(fd, data):
+            calls.append(len(data))
+            return real_write(fd, bytes(data)[:7])
+
+        original = adapter.os.write
+        adapter.os.write = short
+        try:
+            adapter._append_journal(journal, records)
+        finally:
+            adapter.os.write = original
+        self.assertGreater(len(calls), 1, "a short write is continued, never accepted")
+        self.assertEqual([json.loads(line) for line in journal.read_text().splitlines()], records)
+        adapter.os.write = lambda fd, data: 0
+        try:
+            with self.assertRaises(OSError):
+                adapter._append_journal(Path(directory.name) / "second.jsonl", records)
+        finally:
+            adapter.os.write = original
