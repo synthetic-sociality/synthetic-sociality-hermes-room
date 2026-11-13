@@ -27,6 +27,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 import textwrap
 import time
 import unittest
@@ -1282,3 +1283,65 @@ class ConnectorControlR3Tests(ConnectorControlFixture):
                 self.assertEqual(self.room.phases(command["commandId"]), [("refused", "connector_scope_unknown")])
         self.assertEqual(self.requests, [])
         self.assert_listeners_untouched()
+
+
+class RestartWindowParserTests(unittest.TestCase):
+    """OP-12 105 PM addendum H105-F006: the restart window reads config.yaml with core's shared hermes_yaml
+    parser (PM generations ship no PyYAML), falls back to yaml.safe_load on an older core, and otherwise keeps
+    the 1800 s default; env precedence, the file checks and the value checks are unchanged."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.home = Path(directory.name) / "host-home"
+        self.home.mkdir()
+        environ = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.home)})
+        environ.start()
+        self.addCleanup(environ.stop)
+        os.environ.pop("HERMES_RESTART_AFTER_TURN_TIMEOUT", None)
+
+    def window(self, text, *, modules=None):
+        if text is not None:
+            (self.home / "config.yaml").write_text(text)
+        with mock.patch.dict(sys.modules, modules or {}):
+            return adapter.restart_within_seconds()
+
+    def test_h105_f006_a_configured_value_is_read_without_pyyaml(self):
+        self.assertEqual(self.window("agent:\n  restart_after_turn_timeout: 600\n", modules={"yaml": None}), 900)
+
+    def test_h105_f006_an_older_core_without_hermes_yaml_falls_back_to_yaml_safe_load(self):
+        calls = []
+        legacy = types.ModuleType("yaml")
+        legacy.safe_load = lambda text: (calls.append(text), {"agent": {"restart_after_turn_timeout": 600}})[1]
+        self.assertEqual(self.window("agent:\n  restart_after_turn_timeout: 600\n",
+                                     modules={"hermes_yaml": None, "yaml": legacy}), 900)
+        self.assertEqual(len(calls), 1, "the legacy parser is used only when hermes_yaml is unavailable")
+
+    def test_h105_f006_with_neither_parser_the_default_applies(self):
+        self.assertEqual(self.window("agent:\n  restart_after_turn_timeout: 600\n",
+                                     modules={"hermes_yaml": None, "yaml": None}), 2100)
+
+    def test_h105_f006_the_environment_value_wins(self):
+        with mock.patch.dict(os.environ, {"HERMES_RESTART_AFTER_TURN_TIMEOUT": "120"}):
+            self.assertEqual(self.window("agent:\n  restart_after_turn_timeout: 600\n", modules={"yaml": None}), 420)
+
+    def test_h105_f006_invalid_configs_and_values_fail_closed_to_the_default(self):
+        cases = {
+            "unreadable": "agent: [unclosed\n  : :\n",
+            "duplicate key": "agent:\n  restart_after_turn_timeout: 600\n  restart_after_turn_timeout: 900\n",
+            "bool": "agent:\n  restart_after_turn_timeout: true\n",
+            "negative": "agent:\n  restart_after_turn_timeout: -5\n",
+            "not a number": "agent:\n  restart_after_turn_timeout: soon\n",
+            "list": "agent:\n  restart_after_turn_timeout: [600]\n",
+            "agent not a mapping": "agent: 600\n",
+            "top level not a mapping": "- 600\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(config=label):
+                self.assertEqual(self.window(text, modules={"yaml": None}), 2100)
+
+    def test_h105_f006_a_symlinked_config_is_not_read(self):
+        real = self.home.parent / "elsewhere.yaml"
+        real.write_text("agent:\n  restart_after_turn_timeout: 600\n")
+        (self.home / "config.yaml").symlink_to(real)
+        self.assertEqual(self.window(None, modules={"yaml": None}), 2100)
