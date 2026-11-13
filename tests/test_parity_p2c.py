@@ -706,3 +706,33 @@ class P2cTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatusReadinessTests(unittest.TestCase):
+    """A4 (Hermes 1.0.106 / OpenClaw 0.2.80, contract Appendix "Updater readiness"): status.json carries every key
+    the external updater's canary gate reads, with the shared names and types; completed-attempt counts are
+    server-derived by the updater, never a connector field."""
+
+    TYPES = {"version": str, "pluginLoaded": bool, "pid": int, "startedAt": str, "updatedAt": str,
+             "rooms.<id>.connection": str, "rooms.<id>.membershipId": str, "rooms.<id>.holeSeqs": list,
+             "rooms.<id>.quarantinedSeqs": list, "rooms.<id>.lastErrorCode": str}
+
+    def test_status_01_status_json_carries_every_updater_readiness_field(self):
+        self.assertEqual(CONFORMANCE["statusReadinessCases"],
+                         ["STATUS-01 status.json carries every updater readiness field with the shared names and types"])
+        self.assertEqual(CONFORMANCE["statusReadinessFields"], list(self.TYPES))
+        self.assertIn("Completed-attempt counts are not a connector field", CONTRACT)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status.json"
+            status = local_status.LocalStatus(path, plugin="hermes", version="1.0.106", host_label="test")
+            status.room("room-1", "member-1", connection="connected", connected=True, registered=True,
+                        ledger={"acknowledgedSeq": 3, "holeSeqs": [5], "quarantinedSeqs": [7], "ledgerCode": "ack_hole"})
+            status.write()
+            data = json.loads(path.read_text())
+        room = data["rooms"]["room-1"]
+        for field, kind in self.TYPES.items():
+            value = room[field[len("rooms.<id>."):]] if field.startswith("rooms.<id>.") else data[field]
+            self.assertIsInstance(value, kind, field)
+        self.assertEqual((room["membershipId"], room["connection"], room["holeSeqs"], room["quarantinedSeqs"]),
+                         ("member-1", "connected", [5], [7]))
+        self.assertFalse([key for key in room if "attempt" in key.lower()], "no completed-attempt field")

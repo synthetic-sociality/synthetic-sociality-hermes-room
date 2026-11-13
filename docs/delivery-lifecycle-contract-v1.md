@@ -349,6 +349,12 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `rooms.<id>.quarantinedSeqs` | array of integers | quarantined seqs above the acknowledgement, at most 32 (P3-3) |
 | `rooms.<id>.ledgerCode` | string | `ack_hole`, `quarantine_held` or empty (P3-3) |
 
+Updater readiness (Hermes 1.0.106, OpenClaw 0.2.80). An external updater's canary gate reads only these keys of
+this file: `version`, `pluginLoaded`, `pid`, `startedAt`, `updatedAt`, and per Room `connection`, `membershipId`,
+`holeSeqs`, `quarantinedSeqs` and `lastErrorCode`. Completed-attempt counts are not a connector field: the updater
+derives them from the Room server for each active membership since `startedAt`. Both connectors write every listed
+key with the type above; conformance pins `statusReadinessFields` and the shared case `statusReadinessCases`.
+
 ## P3 — Ledger, recovery and holes (2026-10-03)
 
 P3-1 Receive ledger. Every event a connector reads above its acknowledgement gets a durable ledger entry before it

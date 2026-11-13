@@ -1333,7 +1333,7 @@
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
     "P2c": "bd376ce8350c3a3213b36a6770e357cbcf80e6bb3548eccbafa0b01ee839d940",
-    "Appendix": "96da1c168697180290254b7fb108772bd1ce331120e2174d1457ec25b8761fc1",
+    "Appendix": "0367341cb83ef4c484327b2d0666c9de7a769b2efbe4adfb4231650979756ef9",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
     "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d"
@@ -1627,5 +1627,20 @@
     "P18-05 a replay appends no duplicate audit entry",
     "P18-06 a stored binding that changed before the transaction is kept and unclaimed",
     "P18-07 a revoked binding with a delivery intent or quarantined entry is not abandoned and stays unclaimed"
+  ],
+  "statusReadinessFields": [
+    "version",
+    "pluginLoaded",
+    "pid",
+    "startedAt",
+    "updatedAt",
+    "rooms.<id>.connection",
+    "rooms.<id>.membershipId",
+    "rooms.<id>.holeSeqs",
+    "rooms.<id>.quarantinedSeqs",
+    "rooms.<id>.lastErrorCode"
+  ],
+  "statusReadinessCases": [
+    "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ]
 }
