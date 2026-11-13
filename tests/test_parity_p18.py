@@ -44,6 +44,14 @@ class P18ConformanceTests(unittest.TestCase):
                 with self.subTest(case=case, test=name):
                     self.assertIn(name, defined)
 
+    def test_the_whole_shared_contract_matches_conformance_contract_sha256(self):
+        """PR80-H-005: the whole shared contract is pinned, so a single-repo edit to any clause fails the suite."""
+        import hashlib
+        conf = json.loads((ROOT / "conformance.json").read_text())
+        self.assertRegex(conf["contractSha256"], r"^[0-9a-f]{64}$")
+        digest = hashlib.sha256((ROOT / "docs/delivery-lifecycle-contract-v1.md").read_bytes()).hexdigest()
+        self.assertEqual(digest, conf["contractSha256"])
+
 
 if __name__ == "__main__":
     unittest.main()
