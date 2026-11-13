@@ -869,6 +869,23 @@ class ConnectorControlTests(ConnectorControlFixture):
         self.assert_listeners_untouched()
         self.assertFalse(instance._stop.is_set())
 
+    async def test_unwritten_receipt_reports_receipt_unavailable_without_drain_or_signal(self):
+        """PR80-H-004 (contract P17-6, both connectors): one restarting report, then failed / receipt_unavailable;
+        nothing is drained and no supervisor is asked."""
+        instance = self.instance
+        command = _command("restart")
+        with mock.patch.object(adapter.SyntheticSocialityAdapter, "_write_receipts", return_value=False), \
+                mock.patch("os.kill") as kill:
+            self.deliver(ROOM_A, command)
+            await self.settle()
+        kill.assert_not_called()
+        self.assertEqual(self.room.phases(command["commandId"]),
+                         [("restarting", ""), ("failed", "receipt_unavailable")])
+        self.assertEqual(self.requests, [], "no supervisor call")
+        self.assertEqual(self.room.disconnects, [], "no disconnect")
+        self.assert_listeners_untouched()
+        self.assertFalse(instance._stop.is_set())
+
     # P17-12 ---------------------------------------------------------------
     async def _restart_then_new_process(self, between=None):
         command = _command("restart")
