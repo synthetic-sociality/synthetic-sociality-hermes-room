@@ -7,6 +7,16 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.108 — Paired with OpenClaw 0.2.83: local status per membership
+
+Paired release with OpenClaw 0.2.83 (contract P2c-4, tkw-049). `status.json` keeps one `memberships` entry per
+(Room, membership), with its own connection, error, gate wait, outage, mute and ledger values; one membership's
+write never changes another's. The `rooms` entry stays as a per-Room summary derived from those entries on every
+write: the membership with the worst connection, ties by the smallest id, plus the sorted `membershipIds`. It no
+longer alternates with whichever account wrote last. With one membership in a Room it equals that entry, as before;
+a re-admitted Room's entry moves to its new membership. Gates judge each membership by its own entry. Cases
+P2c-4-M1..M6 are shared with OpenClaw; the contract is b31e2b97. No persisted state migration.
+
 ## 1.0.107 — Paired with OpenClaw 0.2.81: a muted membership keeps its heartbeat
 
 Paired release with OpenClaw 0.2.81 (contract P2c-3b, P15-2). A muted membership keeps registering, heartbeating

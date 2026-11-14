@@ -724,7 +724,7 @@ class StatusReadinessTests(unittest.TestCase):
         self.assertIn("Completed-attempt counts are not a connector field", CONTRACT)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "status.json"
-            status = local_status.LocalStatus(path, plugin="hermes", version="1.0.107", host_label="test")
+            status = local_status.LocalStatus(path, plugin="hermes", version="1.0.108", host_label="test")
             status.room("room-1", "member-1", connection="connected", connected=True, registered=True,
                         ledger={"acknowledgedSeq": 3, "holeSeqs": [5], "quarantinedSeqs": [7], "ledgerCode": "ack_hole"})
             status.write()
