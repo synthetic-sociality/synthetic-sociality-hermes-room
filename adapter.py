@@ -2019,6 +2019,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001 - status is diagnostics only
             logger.debug("Room local status update failed")
 
+    def _status_replace_membership(self, room_id: str, old: str, new: str) -> None:
+        """Contract P2c-4 (tkw-049) re-admission; never raises into Room work."""
+        status = getattr(self, "_status", None)
+        if status is None:
+            return
+        try:
+            status.replace_membership(room_id, old, new)
+        except Exception:  # noqa: BLE001 - status is diagnostics only
+            logger.debug("Room local status update failed")
+
     def _secret_isolation_enforced(self) -> bool:
         """The installation's P2c-1 enforcement switch (off by default)."""
         # Boolean true only, as in OpenClaw's schema; any other value is off.
@@ -8987,6 +8997,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._state.bindings.append(latest)
             return latest
         if live is not latest:
+            if live.membership_id != latest.membership_id:
+                # Contract P2c-4 (tkw-049): the Room's one binding holds another
+                # membership now; its status entry moves with it.
+                self._status_replace_membership(live.room_id, live.membership_id, latest.membership_id)
             for field in fields(RoomBinding):
                 setattr(live, field.name, getattr(latest, field.name))
         return live

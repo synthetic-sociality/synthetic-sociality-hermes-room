@@ -21,6 +21,9 @@ from typing import Any
 
 SCHEMA = "synthetic-sociality-room-status-v1"
 CONNECTION_STATES = frozenset({"connecting", "connected", "reconnecting", "inactive", "stopped"})
+# Contract P2c-4 (tkw-049): the `rooms` summary takes the membership whose
+# connection is worst in this order, ties by the smallest membership id.
+CONNECTION_ORDER = ("stopped", "reconnecting", "connecting", "inactive", "connected")
 # Contract P2c-6: the web reading values, and the tool names that count.
 WEB_READ_VALUES = frozenset({"available", "unavailable", "unknown"})
 WEB_READ_TOOL_NAMES = ("browser", "browser_navigate", "web_extract", "web_fetch", "web_search")
@@ -83,12 +86,17 @@ class LocalStatus:
             "webReadTools": [],
             "documentTool": "unknown",
             "rooms": {},
+            "memberships": {},
         }
-        # Contract P2c-3a: when the current outage of a Room began (monotonic
-        # process memory only; never written).
+        # Contract P2c-4 (tkw-049): one entry per (Room, membership), keyed by
+        # membership id; an entry whose membership is not known yet is kept
+        # under "room:<roomId>" and never written to `memberships`.
+        self._entries: dict[str, dict[str, Any]] = {}
+        # Contract P2c-3a: when the current outage of a membership began
+        # (monotonic process memory only; never written).
         self._outage_started: dict[str, float] = {}
-        # Contract P2c-3b: Rooms whose membership is inactive (muted), and each
-        # Room's own connection state under that mark (P2c-4).
+        # Contract P2c-3b: memberships that are inactive (muted), and each
+        # membership's own connection state under that mark (P2c-4).
         self._inactive: set[str] = set()
         self._connection: dict[str, str] = {}
         # Contract P17-6/P17-7: an owner control receipt survives the process
@@ -136,36 +144,102 @@ class LocalStatus:
             self._data["pluginLoaded"] = bool(loaded)
         self.write()
 
+    def _adopt(self, old: str, new: str) -> None:
+        """Move the entry and marks of ``old`` to ``new`` (callers hold the lock)."""
+        entry = self._entries.pop(old)
+        self._data["memberships"].pop(old, None)
+        entry["membershipId"] = new
+        self._entries[new] = entry
+        self._data["memberships"][new] = entry
+        for marks in (self._outage_started, self._connection):
+            if old in marks:
+                marks[new] = marks.pop(old)
+        if old in self._inactive:
+            self._inactive.discard(old)
+            self._inactive.add(new)
+
+    def _entry_key(self, room_id: str, membership_id: str) -> str | None:
+        """The internal key of a (Room, membership); None when it is not attributable."""
+        if membership_id:
+            provisional = f"room:{room_id}"
+            if provisional in self._entries and membership_id not in self._entries:
+                # The provisional entry becomes the membership's own.
+                self._adopt(provisional, membership_id)
+            return membership_id
+        # A value without a membership id belongs to the Room's only
+        # membership; with several it is not attributed.
+        known = [key for key, entry in self._entries.items() if entry["roomId"] == room_id]
+        if len(known) > 1:
+            return None
+        return known[0] if known else f"room:{room_id}"
+
+    def _summarize(self, room_id: str) -> None:
+        """Contract P2c-4 (tkw-049): the `rooms` entry, derived from that Room's
+        membership entries alone, never from the order of writes."""
+        entries = sorted(
+            (entry for entry in self._entries.values() if entry["roomId"] == room_id),
+            key=lambda entry: (CONNECTION_ORDER.index(entry["connection"]), entry["membershipId"]),
+        )
+        if not entries:
+            return
+        fields = {key: value for key, value in json.loads(json.dumps(entries[0])).items() if key != "roomId"}
+        fields["membershipIds"] = sorted(entry["membershipId"] for entry in entries if entry["membershipId"])
+        self._data["rooms"][room_id] = fields
+
+    def replace_membership(self, room_id: str, old: str, new: str) -> None:
+        """A Room's one binding now holds another membership (a re-admission):
+        its entry and marks move to the new membership, as the Room entry did."""
+        if not room_id or not old or not new or old == new:
+            return
+        with self._lock:
+            entry = self._entries.get(old)
+            if entry is None or entry["roomId"] != str(room_id) or new in self._entries:
+                return
+            self._adopt(old, new)
+            self._summarize(str(room_id))
+        self.write()
+
     def room(self, room_id: str, membership_id: str = "", *, connection: str | None = None,
              error_code: str | None = None, connected: bool = False, registered: bool = False,
              inactive: bool | None = None, gate_wait_seconds: float | None = None,
              gate_wait_reason: str | None = None, ledger: dict[str, Any] | None = None) -> None:
-        """Update one Room entry; write only when something changed."""
+        """Update one membership's entry and its Room summary; write only when something changed."""
         if not room_id:
             return
+        room_key = str(room_id)
         with self._lock:
-            rooms = self._data["rooms"]
-            entry = rooms.setdefault(str(room_id), {
-                "membershipId": str(membership_id or ""),
-                "connection": "connecting",
-                "lastConnectedAt": None,
-                "lastErrorCode": "",
-                "lastErrorAt": None,
-                "lastGateWaitSeconds": 0,
-                "lastGateWaitAt": None,
-                "lastGateWaitReason": "",
-                "lastReconnectedAt": None,
-                "lastOutageSeconds": 0,
-                "acknowledgedSeq": 0,
-                "holeSeqs": [],
-                "quarantinedSeqs": [],
-                "ledgerCode": "",
-            })
-            before = json.dumps({**entry, "lastConnectedAt": None}, sort_keys=True)
+            key = self._entry_key(room_key, str(membership_id or ""))
+            if key is None:
+                return
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = self._entries[key] = {
+                    "roomId": room_key,
+                    "membershipId": "" if key.startswith("room:") else key,
+                    "connection": "connecting",
+                    "lastConnectedAt": None,
+                    "lastErrorCode": "",
+                    "lastErrorAt": None,
+                    "lastGateWaitSeconds": 0,
+                    "lastGateWaitAt": None,
+                    "lastGateWaitReason": "",
+                    "lastReconnectedAt": None,
+                    "lastOutageSeconds": 0,
+                    "acknowledgedSeq": 0,
+                    "holeSeqs": [],
+                    "quarantinedSeqs": [],
+                    "ledgerCode": "",
+                }
+                if entry["membershipId"]:
+                    self._data["memberships"][key] = entry
+
+            def unstamped() -> str:
+                summary = self._data["rooms"].get(room_key) or {}
+                return json.dumps([{**entry, "lastConnectedAt": None}, {**summary, "lastConnectedAt": None}],
+                                  sort_keys=True)
+
+            before = unstamped()
             connected_before = entry["lastConnectedAt"]
-            if membership_id:
-                entry["membershipId"] = str(membership_id)
-            key = str(room_id)
             # Contract P2c-4: `connection` is the connection's own state, with
             # `inactive` shown over `connected` only while the membership is
             # muted (P2c-3b); `stopped` and `reconnecting` win over it. A stop
@@ -209,7 +283,8 @@ class LocalStatus:
                 entry["lastGateWaitSeconds"] = round(max(0.0, float(gate_wait_seconds)), 1)
                 entry["lastGateWaitAt"] = _now()
                 entry["lastGateWaitReason"] = gate_wait_reason if gate_wait_reason in GATE_WAIT_REASONS else ""
-            changed = json.dumps({**entry, "lastConnectedAt": None}, sort_keys=True) != before
+            self._summarize(room_key)
+            changed = unstamped() != before
             connected_changed = entry["lastConnectedAt"] != connected_before
         if changed:
             self.write()
