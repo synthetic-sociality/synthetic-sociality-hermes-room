@@ -1,4 +1,4 @@
-"""Shared conformance cases P2c-4-M1..M6 (2026-11-14, tkw-049): local status per (Room, membership).
+"""Shared conformance cases P2c-4-M1..M7 (2026-11-14, tkw-049): local status per (Room, membership).
 
 Delivery contract P2c-4 and its Appendix "Per-membership status"; case names
 are the keys of ``conformance.json`` ``parityP2c4MembershipCases``; each names
@@ -23,7 +23,7 @@ from test_parity_p15 import time_limit
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
 CONTRACT = (ROOT / "docs" / "delivery-lifecycle-contract-v1.md").read_text()
 local_status = adapter.local_status
-CONTRACT_SHA256 = "b31e2b9747530cd421d5dd5328dae77f03eed9d355d9b597325cd3f64b783c54"
+CONTRACT_SHA256 = "4809d656fd75da97295a9d529fb8a7c94ebf203e25fb4922d12ec2bbf7e483db"
 
 
 def method_name(case: str) -> str:
@@ -64,7 +64,7 @@ class P2c4MembershipConformanceTests(unittest.TestCase):
         self.assertEqual(CONFORMANCE["contractSha256"], CONTRACT_SHA256)
         self.assertIn("The connection state is kept per (Room, membership) (2026-11-14, tkw-049)", CONTRACT)
         cases = CONFORMANCE["parityP2c4MembershipCases"]
-        self.assertEqual(list(cases), [f"P2c-4-M{index}" for index in range(1, 7)])
+        self.assertEqual(list(cases), [f"P2c-4-M{index}" for index in range(1, 8)])
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for key, case in cases.items():
             self.assertTrue(case.startswith(key + " "), case)
@@ -213,11 +213,65 @@ class P2c4MembershipTests(unittest.TestCase):
             self.assertEqual(after["memberships"], before["memberships"])
             self.assertEqual(after["rooms"], before["rooms"])
 
+    @time_limit(30)
+    def test_p2c_4_m7_a_replaced_membership_s_entry_is_dropped_and_does_not_represent_the_room(self):
+        # Re-admission under a new membership id (contract P2c-4, P18): the Room revoked member-2; the owner
+        # re-admits and the server returns member-3 for the same Room. member-2's stopped entry and its ledger are
+        # dropped, member-3 starts its own entry and alone represents the Room.
+        with tempfile.TemporaryDirectory() as directory:
+            gateway = Gateway(directory)
+            live = binding("member-2", "room-2")
+            gateway.instance._state = adapter.PluginState(bindings=[live])
+            gateway.update(live, connected=True, registered=True)
+            gateway.update(live, ledger={"acknowledgedSeq": 40, "holeSeqs": [42], "quarantinedSeqs": [],
+                                         "ledgerCode": "ack_hole"})
+            gateway.update(live, connection="stopped", error_code="credential_revoked")
+            live.revoked, live.enabled = True, False
+            adopted = gateway.instance._adopt_binding(binding("member-3", "room-2"))
+            self.assertIs(adopted, live)
+            written = gateway.read()
+            self.assertNotIn("member-2", written["memberships"], "the replaced membership's entry is dropped")
+            self.assertNotIn("room-2", written["rooms"], "no entry remains, so no summary")
+            # The new membership's runtime reports: its own fresh values, and a Room-only value is attributed to
+            # it again.
+            gateway.update(live, connected=True, registered=True)
+            gateway.instance._session_wait_started = {"room-2": time.time() - 1.5}
+            gateway.instance._end_session_wait("room-2")
+            written = gateway.read()
+            self.assertEqual(list(written["memberships"]), ["member-3"])
+            room = written["rooms"]["room-2"]
+            self.assertEqual((room["membershipId"], room["connection"], room["lastErrorCode"], room["acknowledgedSeq"],
+                              room["holeSeqs"], room["membershipIds"]),
+                             ("member-3", "connected", "", 0, [], ["member-3"]))
+            self.assertGreaterEqual(room["lastGateWaitSeconds"], 1.4)
+        # A removed binding: the summary is recomputed from the remaining entries and its marks go with the entry.
+        with tempfile.TemporaryDirectory() as directory:
+            gateway = Gateway(directory)
+            aura, claw = binding("member-aura"), binding("member-claw")
+            gateway.update(aura, connected=True, registered=True)
+            gateway.update(claw, connected=True, registered=True)
+            gateway.update(claw, connection="inactive", inactive=True, error_code="connector_not_active")
+            self.assertEqual(gateway.read()["rooms"]["room-1"]["membershipId"], "member-claw")
+            status = gateway.instance._status
+            status.forget("room-1", "member-claw")
+            written = gateway.read()
+            self.assertEqual(list(written["memberships"]), ["member-aura"])
+            summary = written["rooms"]["room-1"]
+            self.assertEqual((summary["membershipId"], summary["connection"], summary["membershipIds"]),
+                             ("member-aura", "connected", ["member-aura"]))
+            gateway.update(claw, connected=True)
+            self.assertEqual(gateway.read()["memberships"]["member-claw"]["connection"], "connected",
+                             "the inactive mark was dropped with the entry")
+            status.forget("room-1", "member-claw")
+            status.forget("room-1", "member-aura")
+            written = gateway.read()
+            self.assertEqual((written["memberships"], written["rooms"].get("room-1")), ({}, None))
+
 
 class SingleAccountReadmissionTests(unittest.TestCase):
     """Hermes keeps one binding per Room (state.py ``upsert``); a re-admission replaces its membership in place
-    (``_adopt_binding``). The status then holds the new membership alone, with the Room entry carried over, as
-    the single Room entry did before 1.0.108."""
+    (``_adopt_binding``). The status then holds the new membership alone, with its own fresh entry: it inherits
+    no error code and no ledger values from the replaced membership (contract P2c-4, M7)."""
 
     @time_limit(30)
     def test_a_readmitted_room_keeps_one_membership_entry(self):
@@ -226,7 +280,8 @@ class SingleAccountReadmissionTests(unittest.TestCase):
             live = binding("member-old")
             gateway.instance._state = adapter.PluginState(bindings=[live])
             gateway.update(live, connected=True, registered=True,
-                           ledger={"acknowledgedSeq": 4, "holeSeqs": [], "quarantinedSeqs": [], "ledgerCode": ""})
+                           ledger={"acknowledgedSeq": 4, "holeSeqs": [6], "quarantinedSeqs": [], "ledgerCode": "ack_hole"})
+            gateway.update(live, connection="reconnecting", error_code="network")
             adopted = gateway.instance._adopt_binding(binding("member-new"))
             self.assertIs(adopted, live)
             gateway.update(live, connected=True)
@@ -234,7 +289,8 @@ class SingleAccountReadmissionTests(unittest.TestCase):
             self.assertEqual(list(written["memberships"]), ["member-new"])
             summary = written["rooms"]["room-1"]
             self.assertEqual((summary["membershipId"], summary["membershipIds"], summary["connection"],
-                              summary["acknowledgedSeq"]), ("member-new", ["member-new"], "connected", 4))
+                              summary["acknowledgedSeq"], summary["holeSeqs"], summary["lastErrorCode"]),
+                             ("member-new", ["member-new"], "connected", 0, [], ""))
 
 
 if __name__ == "__main__":
