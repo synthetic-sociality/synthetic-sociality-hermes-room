@@ -380,8 +380,11 @@ changes no entry. The `rooms.<id>` summary is derived from that Room's `membersh
 the order of writes: its per-connection fields are copied from the representative membership, the one whose
 `connection` is worst in the order `stopped`, `reconnecting`, `connecting`, `inactive`, `connected`, ties broken by the
 smallest membership id; its `membershipId` is that representative's id and `membershipIds` lists them all. With one
-membership in a Room, the summary equals that membership's entry, as before. Conformance pins
-`parityP2c4MembershipCases`.
+membership in a Room, the summary equals that membership's entry, as before. When this gateway's binding for a Room is
+replaced by another membership (a re-admission under a new membership id) or removed, the old membership's entry and its
+marks are dropped, the new membership starts its own entry, and the Room summary is recomputed from the remaining
+entries (and dropped when none remain). A revoked binding that is still held keeps its `stopped` entry (P18).
+Conformance pins `parityP2c4MembershipCases`.
 
 Updater readiness (Hermes 1.0.106, OpenClaw 0.2.80). An external updater's canary gate reads only these keys of
 this file: `version`, `pluginLoaded`, `pid`, `startedAt`, `updatedAt`, and per Room `connection`, `membershipId`,
