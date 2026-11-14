@@ -1333,7 +1333,7 @@
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
     "P2c": "16692fd37d7e79631bdb2c679b833ec66ea99f743381ca95be7cc8c27874750b",
-    "Appendix": "36d8cf8d0bd78713db696d0c4eb3da3d37c135f7d856d3e4bf217c16e1f0d243",
+    "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
     "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d"
@@ -1636,7 +1636,8 @@
     "P2c-4-M4": "P2c-4-M4 a single-account gateway keeps its rooms entry unchanged and mirrors it in memberships",
     "P2c-4-M5": "P2c-4-M5 mute, outage and ledger values stay per membership",
     "P2c-4-M6": "P2c-4-M6 a Room-only value is attributed to the Room's only membership and to none of several",
-    "P2c-4-M7": "P2c-4-M7 a replaced membership's entry is dropped and does not represent the Room"
+    "P2c-4-M7": "P2c-4-M7 a replaced membership's entry is dropped and does not represent the Room",
+    "P2c-4-M8": "P2c-4-M8 a late write from a retired membership is ignored"
   },
   "statusReadinessFields": [
     "version",
@@ -1653,5 +1654,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "4809d656fd75da97295a9d529fb8a7c94ebf203e25fb4922d12ec2bbf7e483db"
+  "contractSha256": "5ac819a7417660018177e0a635215110457cb6c6eea1e1d0abab33924f968260"
 }

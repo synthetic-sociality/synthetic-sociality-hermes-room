@@ -383,7 +383,9 @@ smallest membership id; its `membershipId` is that representative's id and `memb
 membership in a Room, the summary equals that membership's entry, as before. When this gateway's binding for a Room is
 replaced by another membership (a re-admission under a new membership id) or removed, the old membership's entry and its
 marks are dropped, the new membership starts its own entry, and the Room summary is recomputed from the remaining
-entries (and dropped when none remain). A revoked binding that is still held keeps its `stopped` entry (P18).
+entries (and dropped when none remain). Once a membership is retired this way (replaced or removed), no later status
+write for it in that process, such as the late teardown of its old channel, may recreate its entry or move the Room
+summary; such a write is ignored. A revoked binding that is still held keeps its `stopped` entry (P18).
 Conformance pins `parityP2c4MembershipCases`.
 
 Updater readiness (Hermes 1.0.106, OpenClaw 0.2.80). An external updater's canary gate reads only these keys of
