@@ -8999,7 +8999,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if live is not latest:
             if live.membership_id != latest.membership_id:
                 # Contract P2c-4 (tkw-049): the Room's one binding holds another
-                # membership now; its status entry moves with it.
+                # membership now; the old membership's status entry is dropped.
                 self._status_replace_membership(live.room_id, live.membership_id, latest.membership_id)
             for field in fields(RoomBinding):
                 setattr(live, field.name, getattr(latest, field.name))

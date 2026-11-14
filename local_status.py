@@ -186,18 +186,31 @@ class LocalStatus:
         fields["membershipIds"] = sorted(entry["membershipId"] for entry in entries if entry["membershipId"])
         self._data["rooms"][room_id] = fields
 
+    def forget(self, room_id: str, membership_id: str) -> None:
+        """Contract P2c-4: a binding replaced by another membership (a re-admission
+        under a new membership id) or removed drops its entry and marks; the Room
+        summary is recomputed from the remaining entries, or dropped with the last."""
+        room_key = str(room_id or "")
+        key = str(membership_id or "")
+        with self._lock:
+            entry = self._entries.get(key)
+            if not room_key or not key or entry is None or entry["roomId"] != room_key:
+                return
+            del self._entries[key]
+            self._data["memberships"].pop(key, None)
+            self._outage_started.pop(key, None)
+            self._connection.pop(key, None)
+            self._inactive.discard(key)
+            self._data["rooms"].pop(room_key, None)
+            self._summarize(room_key)
+        self.write()
+
     def replace_membership(self, room_id: str, old: str, new: str) -> None:
         """A Room's one binding now holds another membership (a re-admission):
-        its entry and marks move to the new membership, as the Room entry did."""
-        if not room_id or not old or not new or old == new:
+        the old membership's entry is dropped and the new one starts its own."""
+        if not old or old == new:
             return
-        with self._lock:
-            entry = self._entries.get(old)
-            if entry is None or entry["roomId"] != str(room_id) or new in self._entries:
-                return
-            self._adopt(old, new)
-            self._summarize(str(room_id))
-        self.write()
+        self.forget(room_id, old)
 
     def room(self, room_id: str, membership_id: str = "", *, connection: str | None = None,
              error_code: str | None = None, connected: bool = False, registered: bool = False,
