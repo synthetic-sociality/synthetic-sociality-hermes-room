@@ -274,6 +274,13 @@ and without a post (P1-1); the connector holds no Room turn past its lease, what
 P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
 connection state, last error code, last gate wait and its reason, last reconnect and outage length, web reading per P2c-6),
 with no secrets and no message bodies, for the host watchdog. Additions to the file are additive: the schema name stays.
+The connection state is kept per (Room, membership) (2026-11-14, tkw-049): one gateway may hold several accounts in the
+same Room, and each membership's own connection, error, gate wait, outage, mute (P2c-3b) and ledger (P3-3) values live in
+its own `memberships` entry, keyed by membership id; one membership's write never changes another membership's entry.
+The `rooms` entry stays for compatibility as a per-Room summary derived deterministically from that Room's memberships
+(Appendix); it is advisory when the gateway holds more than one membership in that Room. An installer, updater or
+acceptance gate judges each (Room, membership) by itself, by the canonical server lease or by its `memberships` entry,
+never by the `rooms` summary.
 
 P2c-5 Host identity. The host label a connector reports is derived from the machine it runs on at start, not from stored state.
 
@@ -333,7 +340,8 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `webRead` | string | P2c-6: `available`, `unavailable` or `unknown` |
 | `webReadTools` | array of strings | P2c-6: the web reading tool names found, names only; empty unless `available` |
 | `documentTool` | string | P7d-6: `available`, `unavailable` or `unknown`: whether the document tool is offered in a Room turn |
-| `rooms` | object | one entry per configured Room, keyed by Room id |
+| `rooms` | object | one entry per configured Room, keyed by Room id: a per-Room summary of that Room's `memberships` entries (below); advisory when the gateway holds more than one membership in that Room |
+| `rooms.<id>.membershipIds` | array of strings | every membership id of this gateway in that Room, sorted |
 | `rooms.<id>.membershipId` | string | the Room membership |
 | `rooms.<id>.connection` | string | `connecting`, `connected`, `reconnecting`, `inactive` (P2c-3b) or `stopped`; `stopped` and `reconnecting` win over `inactive`, which is shown only while the membership is muted and the connection is otherwise up; a revoked credential shows `stopped` with `credential_revoked`; after an unmute or a new registration the value is `connected` |
 | `rooms.<id>.lastConnectedAt` | string or null | the last accepted registration or heartbeat, with a granularity of up to 60 s (P8-5) |
@@ -348,10 +356,37 @@ on, it refuses to start while the store is reachable. The path fence and the scr
 | `rooms.<id>.holeSeqs` | array of integers | holes above the acknowledgement, at most 32 (P3-3) |
 | `rooms.<id>.quarantinedSeqs` | array of integers | quarantined seqs above the acknowledgement, at most 32 (P3-3) |
 | `rooms.<id>.ledgerCode` | string | `ack_hole`, `quarantine_held` or empty (P3-3) |
+| `memberships` | object | one entry per (Room, membership) of this gateway, keyed by membership id (2026-11-14, tkw-049) |
+| `memberships.<id>.roomId` | string | the Room of that membership |
+| `memberships.<id>.membershipId` | string | the membership id, the same as the key |
+| `memberships.<id>.connection` | string | as `rooms.<id>.connection`, for this membership's own connection only |
+| `memberships.<id>.lastConnectedAt` | string or null | as `rooms.<id>.lastConnectedAt`, for this membership's own connection only |
+| `memberships.<id>.lastErrorCode` | string | as `rooms.<id>.lastErrorCode`, for this membership's own connection only |
+| `memberships.<id>.lastErrorAt` | string or null | as `rooms.<id>.lastErrorAt`, for this membership's own connection only |
+| `memberships.<id>.lastGateWaitSeconds` | number | as `rooms.<id>.lastGateWaitSeconds`, for this membership's own connection only |
+| `memberships.<id>.lastGateWaitAt` | string or null | as `rooms.<id>.lastGateWaitAt`, for this membership's own connection only |
+| `memberships.<id>.lastGateWaitReason` | string | as `rooms.<id>.lastGateWaitReason`, for this membership's own connection only |
+| `memberships.<id>.lastReconnectedAt` | string or null | as `rooms.<id>.lastReconnectedAt`, for this membership's own connection only |
+| `memberships.<id>.lastOutageSeconds` | number | as `rooms.<id>.lastOutageSeconds`, for this membership's own connection only |
+| `memberships.<id>.acknowledgedSeq` | integer | as `rooms.<id>.acknowledgedSeq`, for this membership's own connection only |
+| `memberships.<id>.holeSeqs` | array of integers | as `rooms.<id>.holeSeqs`, for this membership's own connection only |
+| `memberships.<id>.quarantinedSeqs` | array of integers | as `rooms.<id>.quarantinedSeqs`, for this membership's own connection only |
+| `memberships.<id>.ledgerCode` | string | as `rooms.<id>.ledgerCode`, for this membership's own connection only |
+
+Per-membership status (2026-11-14, tkw-049). Every per-connection value (the P2c-3a outage, the P2c-3b mute, the P8-5
+connection time, the P3-3 ledger, the gate wait) is kept and written per membership. A value reported for a Room without a
+membership id belongs to that Room's only membership; with several memberships in that Room it is not attributed and
+changes no entry. The `rooms.<id>` summary is derived from that Room's `memberships` entries on every write, never from
+the order of writes: its per-connection fields are copied from the representative membership, the one whose
+`connection` is worst in the order `stopped`, `reconnecting`, `connecting`, `inactive`, `connected`, ties broken by the
+smallest membership id; its `membershipId` is that representative's id and `membershipIds` lists them all. With one
+membership in a Room, the summary equals that membership's entry, as before. Conformance pins
+`parityP2c4MembershipCases`.
 
 Updater readiness (Hermes 1.0.106, OpenClaw 0.2.80). An external updater's canary gate reads only these keys of
 this file: `version`, `pluginLoaded`, `pid`, `startedAt`, `updatedAt`, and per Room `connection`, `membershipId`,
-`holeSeqs`, `quarantinedSeqs` and `lastErrorCode`. Completed-attempt counts are not a connector field: the updater
+`holeSeqs`, `quarantinedSeqs` and `lastErrorCode`; when it judges a gateway that holds more than one membership in a
+Room, it reads those per-Room keys from each `memberships.<id>` entry instead (P2c-4). Completed-attempt counts are not a connector field: the updater
 derives them from the Room server for each active membership since `startedAt`. Both connectors write every listed
 key with the type above; conformance pins `statusReadinessFields` and the shared case `statusReadinessCases`.
 

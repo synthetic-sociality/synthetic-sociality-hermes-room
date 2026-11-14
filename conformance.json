@@ -1332,8 +1332,8 @@
     "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "bd376ce8350c3a3213b36a6770e357cbcf80e6bb3548eccbafa0b01ee839d940",
-    "Appendix": "0367341cb83ef4c484327b2d0666c9de7a769b2efbe4adfb4231650979756ef9",
+    "P2c": "16692fd37d7e79631bdb2c679b833ec66ea99f743381ca95be7cc8c27874750b",
+    "Appendix": "7c143aef2dbda4f2a09fd3a1eedc8e0442616d17c0333fa5a799864e60ceb656",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
     "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d"
@@ -1629,6 +1629,14 @@
     "P18-06 a stored binding that changed before the transaction is kept and unclaimed",
     "P18-07 a revoked binding with a delivery intent or quarantined entry is not abandoned and stays unclaimed"
   ],
+  "parityP2c4MembershipCases": {
+    "P2c-4-M1": "P2c-4-M1 two accounts in one Room each keep their own memberships entry",
+    "P2c-4-M2": "P2c-4-M2 one membership stopping changes only its own entry",
+    "P2c-4-M3": "P2c-4-M3 the rooms summary is derived deterministically and does not alternate with the writer",
+    "P2c-4-M4": "P2c-4-M4 a single-account gateway keeps its rooms entry unchanged and mirrors it in memberships",
+    "P2c-4-M5": "P2c-4-M5 mute, outage and ledger values stay per membership",
+    "P2c-4-M6": "P2c-4-M6 a Room-only value is attributed to the Room's only membership and to none of several"
+  },
   "statusReadinessFields": [
     "version",
     "pluginLoaded",
@@ -1644,5 +1652,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "d915d47bdbcc848142c178cbedaa2b021b49e6873b4fbc6a631d8d8499f57a60"
+  "contractSha256": "b31e2b9747530cd421d5dd5328dae77f03eed9d355d9b597325cd3f64b783c54"
 }
