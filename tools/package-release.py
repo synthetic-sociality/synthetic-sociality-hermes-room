@@ -86,6 +86,7 @@ PAYLOAD = (
     "tests/test_parity_p1a.py",
     "tests/test_parity_p2a.py",
     "tests/test_parity_p2c.py",
+    "tests/test_parity_p2c4_memberships.py",
     "tests/test_parity_p3.py",
     "tests/test_parity_p5.py",
     "tests/test_parity_p6.py",

@@ -48,9 +48,9 @@ def flatten_keys(value: dict, prefix: str = "") -> set[str]:
     for key, item in value.items():
         name = f"{prefix}{key}"
         keys.add(name)
-        if key == "rooms":
+        if key in ("rooms", "memberships"):
             for entry in item.values():
-                keys |= {f"rooms.<id>.{inner}" for inner in entry}
+                keys |= {f"{key}.<id>.{inner}" for inner in entry}
     return keys
 
 
