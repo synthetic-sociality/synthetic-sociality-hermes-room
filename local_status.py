@@ -99,6 +99,9 @@ class LocalStatus:
         # membership's own connection state under that mark (P2c-4).
         self._inactive: set[str] = set()
         self._connection: dict[str, str] = {}
+        # Contract P2c-4 (tkw-049 B01): the (Room, membership) pairs this process
+        # retired with forget; a later write for one of them is ignored.
+        self._retired: set[tuple[str, str]] = set()
         # Contract P17-6/P17-7: an owner control receipt survives the process
         # that wrote it, so the restarted process can report and never repeat.
         receipt = _prior_connector_control(self.path)
@@ -189,12 +192,17 @@ class LocalStatus:
     def forget(self, room_id: str, membership_id: str) -> None:
         """Contract P2c-4: a binding replaced by another membership (a re-admission
         under a new membership id) or removed drops its entry and marks; the Room
-        summary is recomputed from the remaining entries, or dropped with the last."""
+        summary is recomputed from the remaining entries, or dropped with the last.
+        The membership stays retired: a late write for it, such as the old
+        listener's teardown, never recreates the entry or moves the summary."""
         room_key = str(room_id or "")
         key = str(membership_id or "")
+        if not room_key or not key:
+            return
         with self._lock:
+            self._retired.add((room_key, key))
             entry = self._entries.get(key)
-            if not room_key or not key or entry is None or entry["roomId"] != room_key:
+            if entry is None or entry["roomId"] != room_key:
                 return
             del self._entries[key]
             self._data["memberships"].pop(key, None)
@@ -221,6 +229,8 @@ class LocalStatus:
             return
         room_key = str(room_id)
         with self._lock:
+            if membership_id and (room_key, str(membership_id)) in self._retired:
+                return
             key = self._entry_key(room_key, str(membership_id or ""))
             if key is None:
                 return
