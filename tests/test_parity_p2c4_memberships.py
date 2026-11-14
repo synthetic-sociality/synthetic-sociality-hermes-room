@@ -1,4 +1,4 @@
-"""Shared conformance cases P2c-4-M1..M7 (2026-11-14, tkw-049): local status per (Room, membership).
+"""Shared conformance cases P2c-4-M1..M8 (2026-11-14, tkw-049): local status per (Room, membership).
 
 Delivery contract P2c-4 and its Appendix "Per-membership status"; case names
 are the keys of ``conformance.json`` ``parityP2c4MembershipCases``; each names
@@ -23,7 +23,7 @@ from test_parity_p15 import time_limit
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
 CONTRACT = (ROOT / "docs" / "delivery-lifecycle-contract-v1.md").read_text()
 local_status = adapter.local_status
-CONTRACT_SHA256 = "4809d656fd75da97295a9d529fb8a7c94ebf203e25fb4922d12ec2bbf7e483db"
+CONTRACT_SHA256 = "5ac819a7417660018177e0a635215110457cb6c6eea1e1d0abab33924f968260"
 
 
 def method_name(case: str) -> str:
@@ -64,7 +64,7 @@ class P2c4MembershipConformanceTests(unittest.TestCase):
         self.assertEqual(CONFORMANCE["contractSha256"], CONTRACT_SHA256)
         self.assertIn("The connection state is kept per (Room, membership) (2026-11-14, tkw-049)", CONTRACT)
         cases = CONFORMANCE["parityP2c4MembershipCases"]
-        self.assertEqual(list(cases), [f"P2c-4-M{index}" for index in range(1, 8)])
+        self.assertEqual(list(cases), [f"P2c-4-M{index}" for index in range(1, 9)])
         sources = "\n".join(path.read_text() for path in (ROOT / "tests").glob("test_*.py"))
         for key, case in cases.items():
             self.assertTrue(case.startswith(key + " "), case)
@@ -259,13 +259,74 @@ class P2c4MembershipTests(unittest.TestCase):
             summary = written["rooms"]["room-1"]
             self.assertEqual((summary["membershipId"], summary["connection"], summary["membershipIds"]),
                              ("member-aura", "connected", ["member-aura"]))
-            gateway.update(claw, connected=True)
-            self.assertEqual(gateway.read()["memberships"]["member-claw"]["connection"], "connected",
-                             "the inactive mark was dropped with the entry")
+            self.assertNotIn("member-claw", status._inactive, "the inactive mark was dropped with the entry")
+            self.assertNotIn("member-claw", status._connection)
+            self.assertNotIn("member-claw", status._outage_started)
             status.forget("room-1", "member-claw")
             status.forget("room-1", "member-aura")
             written = gateway.read()
             self.assertEqual((written["memberships"], written["rooms"].get("room-1")), ({}, None))
+
+    @time_limit(30)
+    def test_p2c_4_m8_a_late_write_from_a_retired_membership_is_ignored(self):
+        # OP12-TKW049-B01: a writer that still holds the replaced membership (a listener's own old-generation
+        # binding object, as ``_revoke`` and the disconnect teardown write through, or an explicit old id) reports
+        # after the re-admission. Neither the entry nor the Room summary may move.
+        with tempfile.TemporaryDirectory() as directory:
+            gateway = Gateway(directory)
+            live = binding("member-2", "room-2")
+            gateway.instance._state = adapter.PluginState(bindings=[live])
+            gateway.update(binding("member-sib", "room-9"), connected=True, registered=True)
+            gateway.update(live, connected=True, registered=True)
+            old = binding("member-2", "room-2")
+            gateway.instance._adopt_binding(binding("member-3", "room-2"))
+            gateway.update(live, connected=True, registered=True)
+            before = gateway.read()
+            gateway.update(old, connection="stopped", error_code="credential_revoked")
+            gateway.update(old, connection="reconnecting", error_code="network",
+                           ledger={"acknowledgedSeq": 9, "holeSeqs": [11], "quarantinedSeqs": [], "ledgerCode": "ack_hole"})
+            gateway.instance._status.room("room-2", "member-2", connection="stopped", gate_wait_seconds=5,
+                                          gate_wait_reason="host_run_busy")
+            after = gateway.read()
+            self.assertNotIn("member-2", after["memberships"], "the retired membership stays dropped")
+            self.assertEqual(after["memberships"], before["memberships"])
+            self.assertEqual(after["rooms"], before["rooms"])
+            room = after["rooms"]["room-2"]
+            self.assertEqual((room["membershipId"], room["connection"], room["membershipIds"]),
+                             ("member-3", "connected", ["member-3"]))
+            self.assertEqual(after["rooms"]["room-9"]["membershipIds"], ["member-sib"], "the sibling is unchanged")
+            # The new membership still reports; a Room-only value (the old session's end) goes to it (M6).
+            gateway.instance._session_wait_started = {"room-2": time.time() - 1.5}
+            gateway.instance._end_session_wait("room-2")
+            gateway.update(live, connection="reconnecting", error_code="network")
+            room = gateway.read()["rooms"]["room-2"]
+            self.assertEqual((room["membershipId"], room["connection"], room["lastErrorCode"], room["membershipIds"]),
+                             ("member-3", "reconnecting", "network", ["member-3"]))
+            self.assertGreaterEqual(room["lastGateWaitSeconds"], 1.4)
+        # A membership retired before it ever wrote stays retired, and cannot adopt the Room's provisional entry;
+        # the same id in another Room, a fresh membership and same-id re-admission still write.
+        with tempfile.TemporaryDirectory() as directory:
+            gateway = Gateway(directory)
+            status = gateway.instance._status
+            status.forget("room-1", "member-quiet")
+            gateway.instance._session_wait_started = {"room-1": time.time() - 1.5}
+            gateway.instance._end_session_wait("room-1")
+            gateway.update(binding("member-quiet"), connected=True, registered=True)
+            written = gateway.read()
+            self.assertNotIn("member-quiet", written["memberships"])
+            self.assertEqual(written["rooms"]["room-1"]["membershipIds"], [], "the provisional entry stays provisional")
+            gateway.update(binding("member-quiet", "room-5"), connected=True, registered=True)
+            gateway.update(binding("member-fresh"), connected=True, registered=True)
+            live = binding("member-same", "room-6")
+            gateway.instance._state = adapter.PluginState(bindings=[live])
+            gateway.update(live, connection="stopped", error_code="credential_revoked")
+            gateway.instance._adopt_binding(binding("member-same", "room-6"))
+            written = gateway.read()
+            self.assertEqual(written["memberships"]["member-quiet"]["roomId"], "room-5")
+            self.assertEqual(written["rooms"]["room-1"]["membershipIds"], ["member-fresh"])
+            self.assertEqual((written["memberships"]["member-same"]["connection"],
+                              written["memberships"]["member-same"]["lastErrorCode"]),
+                             ("stopped", "credential_revoked"), "a held revoked entry is kept (P18)")
 
 
 class SingleAccountReadmissionTests(unittest.TestCase):
