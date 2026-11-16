@@ -15,7 +15,6 @@ import json
 import re
 import socket
 import unittest
-from unittest import mock
 
 from test_parity_l1 import FAST_LIMITS, ROOT, Gateway, Harness, LinkTestCase, link, next_frame, until
 
@@ -77,12 +76,14 @@ class OpenFailedReasonLinkTests(LinkTestCase):
             self.active_record(harness.audience)
             service = self.service()
             service.local_opener = opener
-            await self.running(service)
-            ws, _ = await harness.accept(limits=limits)
-            await ws.send(json.dumps({"version": 1, "type": "hermes-open", "channelId": channel}))
-            frame = await next_frame(ws)
-            await ws.close()
-            return frame
+            task = await self.running(service)
+            try:
+                ws, _ = await harness.accept(limits=limits)
+                await ws.send(json.dumps({"version": 1, "type": "hermes-open", "channelId": channel}))
+                return await next_frame(ws)
+            finally:
+                # One service per call: a running one would follow the next record to the next Harness.
+                await self._stop(task)
 
     async def test_each_local_gateway_code_is_sent_as_its_reason_with_the_flag(self):
         for code in ("local_gateway_refused", "local_gateway_auth_unavailable", "local_gateway_unavailable",
@@ -114,10 +115,11 @@ class OpenFailedReasonLinkTests(LinkTestCase):
         silent = lambda max_size: link.open_local_gateway(  # noqa: E731
             "", max_size, resolver=lambda _url: ("127.0.0.1", port, "t"))
         self.assertEqual(await self.open_failed(silent, limits=FLAGGED), coded("local_gateway_unavailable"))
-        # A page without a session token (a login page): no usable local credential.
-        with mock.patch.object(link, "_no_proxy_opener") as opener:
-            opener.return_value.open.return_value.__enter__.return_value.read.return_value = b"<html>login</html>"
-            gated = lambda max_size: link.open_local_gateway("", max_size)  # noqa: E731
+        # A dashboard page without a session token (a login page): no usable local credential.
+        async with Gateway() as gateway:
+            gateway.page = "<html><form>login</form></html>"
+            gated = lambda max_size: link.open_local_gateway(  # noqa: E731
+                f"http://127.0.0.1:{gateway.port}", max_size)
             self.assertEqual(await self.open_failed(gated, limits=FLAGGED), coded("local_gateway_auth_unavailable"))
 
     async def test_the_device_channel_limit_reads_channel_limit(self):
