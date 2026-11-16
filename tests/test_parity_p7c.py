@@ -38,8 +38,24 @@ SENTENCE = CONFORMANCE["parityP7cNoStatusSentence"]
 # The Room server's instruction for a response turn, verbatim (hold-signal-47320f7
 # server/application/cycles/moderation.go:27-30).
 # A bound against a hang only: every wait below ends on an event or a condition,
-# none of them on the clock (P7c-10, P7c-16, N10).
-HANG_GUARD = 120.0
+# none of them on the clock (P7c-10, P7c-16, N10). Each condition holds within
+# about a second; a test with a dozen subtests waits it out once per subtest when
+# the condition never comes, so the bound is short enough that a failure fails
+# within minutes (at 120 s, one missed condition kept the suite busy for an hour).
+HANG_GUARD = 15.0
+
+
+def wait_in_worker(event, stop):
+    """In a worker thread: wait for ``event``, but give up once the test's loop
+    has stopped (``stop``, the instance's asyncio.Event) or after HANG_GUARD.
+    asyncio.run joins its worker threads without any bound on Python 3.11, so a
+    worker that waited out the guard after a failed test held the run for it
+    again. Returns whether ``event`` was set."""
+    deadline = time.monotonic() + HANG_GUARD
+    while not event.wait(0.01):
+        if stop.is_set() or time.monotonic() >= deadline:
+            return False
+    return True
 RESPONSE_INSTRUCTION = "The moderator has intervened; the message this turn answers is the moderator's. Respond to it first: acknowledge it briefly, then address every sub-question by answering it or explicitly leaving it to another participant by name. If the moderator's point is unclear to you, ask one short clarifying question instead of guessing. You may include a short interim summary within this turn before the round continues. Naming another participant is advisory prose only and does not schedule a directed turn. The discussion then continues in the direction the moderator set."
 INTERJECTION = {"id": "m-50", "seq": 50, "type": "message.posted", "actorRole": "human_owner", "actorId": "owner-1",
                 "payload": {"body": "What is the family's view? What should the doctor do next?"}}
@@ -158,6 +174,18 @@ class P7cConformanceTests(unittest.TestCase):
         self.assertEqual(adapter._word_bound_fact(90, bound["policy"]),
                          bound["format"].replace("{N}", "90").replace("{source}", bound["policy"]))
         self.assertIn("held_by_moderator", local_status.GATE_WAIT_REASONS)
+
+    def test_a_worker_wait_ends_when_the_loop_stops(self):
+        # The event comes: True. The loop stops first: False at once, never the
+        # guard, so asyncio.run's unbounded join of its workers stays short.
+        event, stop = threading.Event(), asyncio.Event()
+        event.set()
+        self.assertTrue(wait_in_worker(event, stop))
+        event.clear()
+        stop.set()
+        started = time.monotonic()
+        self.assertFalse(wait_in_worker(event, stop))
+        self.assertLess(time.monotonic() - started, HANG_GUARD / 2)
 
 
 class P7cTests(unittest.TestCase):
@@ -605,10 +633,12 @@ class P7cTests(unittest.TestCase):
                         # The stream breaks right after the revocation, before
                         # the loop looks at the binding again; an event read
                         # after the revocation is refused by the reader.
-                        stream.revoked.wait(HANG_GUARD)
-                        stream.late.append(on_event({**INTERJECTION, "id": "m-late", "seq": 41}))
+                        if wait_in_worker(stream.revoked, instance._stop):
+                            stream.late.append(on_event({**INTERJECTION, "id": "m-late", "seq": 41}))
+                        else:
+                            stream.late.append("the loop stopped before the revocation")
                     else:
-                        stream.release.wait(HANG_GUARD)
+                        wait_in_worker(stream.release, instance._stop)
                     if when == "fails at once with its own error":
                         raise RuntimeError("the stream reader failed")
                     raise adapter.ProtocolError("Room network failure", retryable=True)
@@ -618,7 +648,7 @@ class P7cTests(unittest.TestCase):
                 original_heartbeat = room.heartbeat
 
                 def heartbeat_once_the_stream_is_open(room_id, session):
-                    stream.opened.wait(HANG_GUARD)
+                    wait_in_worker(stream.opened, instance._stop)
                     return original_heartbeat(room_id, session)
 
                 room.heartbeat = heartbeat_once_the_stream_is_open
@@ -1331,7 +1361,8 @@ class P7cLeftoverTests(unittest.TestCase):
 
         def plugin(value):
             try:
-                protocol.RoomProtocol(f"http://127.0.0.1:{port}/api", value).request("GET", "/rooms/room-1/state")
+                protocol.RoomProtocol(f"http://127.0.0.1:{port}/api", value, timeout=10).request(
+                    "GET", "/rooms/room-1/state")
                 return "sent"
             except protocol.RequestNotFormed:
                 return "refused"
@@ -1339,9 +1370,14 @@ class P7cLeftoverTests(unittest.TestCase):
                 return f"failed {type(error).__name__}"
 
         outcomes, disagreements = {"sent": 0, "refused": 0}, []
+        # About 2,000 loopback round trips take a second; a listener that stops
+        # answering would make each one wait out its timeout.
+        deadline = time.monotonic() + 4 * HANG_GUARD
         try:
             for point in (*range(0x100), 0x100, 0x2019, 0x3042, 0xD800, 0xFEFF, 0xFFFD, 0xFFFF):
                 character = chr(point)
+                if time.monotonic() > deadline:
+                    self.fail(f"the loopback round trips took over {4 * HANG_GUARD:.0f} s; stopped at U+{point:04X}")
                 for value in (character, f"a{character}b", f"{character}ab", f"ab{character}"):
                     expected, actual = runtime(value), plugin(value)
                     outcomes[expected] += 1
