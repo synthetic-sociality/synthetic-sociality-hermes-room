@@ -122,6 +122,12 @@ _ALLOW_LOOPBACK_HTTP = False
 # its library default, which the site's bot protection refuses (403 1010).
 LINK_USER_AGENT_PRODUCT = "hermes-room-link"
 SITE_PROTECTION_CODE = "link_blocked_by_site_protection"
+# Contract "Open-failure reason": the closed list a hermes-open-failed may
+# carry, and only when authentication-complete has limits.openFailedReason 1.
+OPEN_FAILED_REASONS = frozenset({
+    "local_gateway_refused", "local_gateway_auth_unavailable", "local_gateway_unavailable",
+    SITE_PROTECTION_CODE, "channel_limit", "open_timeout", "unknown",
+})
 
 
 def _release(version: str | None = None) -> str:
@@ -910,6 +916,13 @@ def read_limits(complete: dict[str, Any]) -> tuple[dict[str, int], str]:
     return limits, ("advertised" if used else "fallback")
 
 
+def open_failed_reason_accepted(complete: dict[str, Any]) -> bool:
+    """True only when the Harness says it accepts hermes-open-failed.reason."""
+    advertised = complete.get("limits") if isinstance(complete, dict) else None
+    return isinstance(advertised, dict) and type(advertised.get("openFailedReason")) is int \
+        and advertised["openFailedReason"] == 1
+
+
 def close_outcome(code: int | None, reason: str = "") -> tuple[str, str]:
     """The fixed close table of contract L1-8: (status code, action)."""
     if code == 1008:
@@ -969,13 +982,17 @@ class _Channel:
                 )
             except LocalGatewayError as error:
                 self.bridge.channel_error(error.code)
-                await self.bridge.end(self, "hermes-open-failed")
+                await self.bridge.end(self, "hermes-open-failed", reason=error.code)
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - timeout, network or an unexpected opener failure
+            except asyncio.TimeoutError:
                 self.bridge.channel_error("local_gateway_unavailable")
-                await self.bridge.end(self, "hermes-open-failed")
+                await self.bridge.end(self, "hermes-open-failed", reason="open_timeout")
+                return
+            except Exception:  # noqa: BLE001 - network or an unexpected opener failure
+                self.bridge.channel_error("local_gateway_unavailable")
+                await self.bridge.end(self, "hermes-open-failed", reason="unknown")
                 return
             if self.ended:
                 return
@@ -1034,9 +1051,10 @@ class _Bridge:
 
     def __init__(self, socket: Any, limits: dict[str, int],
                  local_opener: Callable[[int], Awaitable[Any]], on_change: Callable[[], None],
-                 on_channel_error: Callable[[str], None]) -> None:
+                 on_channel_error: Callable[[str], None], *, open_failed_reason: bool = False) -> None:
         self.socket = socket
         self.limits = limits
+        self.open_failed_reason = open_failed_reason
         self.local_opener = local_opener
         self.channels: dict[str, _Channel] = {}
         self._on_change = on_change
@@ -1054,7 +1072,14 @@ class _Bridge:
         await self.socket.send(text)
         return True
 
-    async def end(self, channel: _Channel, kind: str) -> None:
+    def open_failed(self, channel_id: str, reason: str) -> dict[str, Any]:
+        """hermes-open-failed, with a listed reason only when the Harness accepts it."""
+        frame = _frame("hermes-open-failed", channel_id)
+        if self.open_failed_reason:
+            frame["reason"] = reason if reason in OPEN_FAILED_REASONS else "unknown"
+        return frame
+
+    async def end(self, channel: _Channel, kind: str, *, reason: str = "unknown") -> None:
         """End a channel from this side, telling the server once."""
         if channel.ended:
             return
@@ -1062,8 +1087,9 @@ class _Bridge:
         if self.channels.get(channel.id) is channel:
             del self.channels[channel.id]
             self._on_change()
+        frame = self.open_failed(channel.id, reason) if kind == "hermes-open-failed" else _frame(kind, channel.id)
         with contextlib.suppress(Exception):
-            await self.send(_frame(kind, channel.id))
+            await self.send(frame)
 
     async def handle(self, message: Any) -> None:
         if not isinstance(message, str):
@@ -1092,7 +1118,7 @@ class _Bridge:
                 return
             if len(self.channels) >= self.limits["maxChannels"]:
                 self.channel_error("channel_cap")
-                await self.send(_frame("hermes-open-failed", channel_id))
+                await self.send(self.open_failed(channel_id, "channel_limit"))
                 return
             channel = _Channel(self, channel_id)
             self.channels[channel_id] = channel
@@ -1349,6 +1375,7 @@ class LinkService:
             socket, limits, self.local_opener,
             on_change=lambda: self._set(channels=len(self.bridge.channels) if self.bridge else 0),
             on_channel_error=lambda code: self._set(lastChannelErrorCode=code),
+            open_failed_reason=open_failed_reason_accepted(complete),
         )
         return await self._serve(socket, limits, digest)
 
