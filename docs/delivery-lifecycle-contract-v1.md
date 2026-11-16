@@ -1258,6 +1258,8 @@ header the runtime actually sends, and sees the library default for a request
 formed without it). These offline checks do not replace a live photo turn
 through the edge after the rollout.
 
+P11b-3 Device link User-Agent (2026-11-16). Every connector request to the Harness/Room origin sends an explicit `User-Agent` `<connector>-room[-link]/<version>`, never the runtime library's default: the device link's pairing confirmation and device socket send `<connector>-room-link/<version>` (Hermes `hermes-room-link/1.0.109`), the Room API client keeps its P11b-1 value, and the loopback requests to the local Gateway are unchanged; a `403` from the site's bot protection (body `error code: 1010`, or a Cloudflare `403` without the Harness JSON) is reported as `link_blocked_by_site_protection` (L1-11), never `link_pairing_unavailable`, and stays pending; a pairing `404` after a lost `201` links when a signed connect with the pending key completes, otherwise it stays refused (amends L1-2).
+
 
 ## P12 — Share authority follows the host's own session continuation (2026-10-26)
 
