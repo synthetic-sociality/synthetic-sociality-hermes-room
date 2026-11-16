@@ -304,6 +304,11 @@ def _link(args: argparse.Namespace, *, sleep=None) -> int:
             print(f"This replaced the local key of device {old['deviceId']}. Revoke that device in the Harness.")
         return 0
     if state == "pending":
+        if code == device_link.SITE_PROTECTION_CODE:
+            # P11b-3: refused by the site's edge before the Harness saw it.
+            print(f"Not confirmed ({code}): the site's bot protection refused the request before it reached the "
+                  "Harness. Update the Room plugin to a release that sends its own User-Agent, or ask the "
+                  "operator to allow it.", file=sys.stderr)
         if old:
             # A re-link is confirmed here or not at all: the working link stays.
             device_link.discard_pending()

@@ -117,6 +117,48 @@ _SESSION_TOKEN_JS = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*"([A-Za-
 _LOCAL_TOKEN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 # Contract L1-1: plain http/ws only to a loopback host, and only in a test build.
 _ALLOW_LOOPBACK_HTTP = False
+# Contract P11b-3: the link's own User-Agent on every request to the Harness
+# origin (the confirmation and the device socket). Without it urllib sends
+# its library default, which the site's bot protection refuses (403 1010).
+LINK_USER_AGENT_PRODUCT = "hermes-room-link"
+SITE_PROTECTION_CODE = "link_blocked_by_site_protection"
+
+
+def _release(version: str | None = None) -> str:
+    if version:
+        return version
+    from .adapter import CONNECTOR_VERSION
+
+    return CONNECTOR_VERSION
+
+
+def link_user_agent(version: str | None = None) -> str:
+    """``hermes-room-link/<version>``: the connector release, nothing else."""
+    return f"{LINK_USER_AGENT_PRODUCT}/{_release(version)}"
+
+
+def blocked_by_site_protection(status: int, headers: Any, body: bytes) -> bool:
+    """Contract P11b-3: a 403 from the site's bot protection, not the Harness.
+
+    Cloudflare's ``error code: 1010`` body, or a Cloudflare 403 (``cf-ray`` or
+    ``server: cloudflare``) that carries no Harness JSON ``error``.
+    """
+    if status != 403:
+        return False
+    if b"error code: 1010" in body[:4096]:
+        return True
+    try:
+        server = str(headers.get("Server") or "").strip().lower() if headers is not None else ""
+        ray = headers.get("CF-RAY") if headers is not None else None
+    except Exception:  # noqa: BLE001 - foreign header objects
+        return False
+    if server != "cloudflare" and not ray:
+        return False
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return True
+    return not (isinstance(payload, dict) and isinstance(payload.get("error"), str))
 
 # Contract L1-8: close code and reason → (status code, action).
 STOP, RECONNECT = "stop", "reconnect"
@@ -561,14 +603,16 @@ def send_confirmation(record: dict[str, Any], *, timeout: float = 15.0,
     _, url = derive_urls(record["audience"], record["deviceId"])
     request = urllib.request.Request(
         url, data=confirmation_body(record), method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": link_user_agent()},
     )
+    headers: Any = None
     try:
         with (opener or _no_redirect_opener()).open(request, timeout=timeout) as response:
             status = response.status
             payload = response.read(65_536)
     except urllib.error.HTTPError as error:
         status = error.code
+        headers = error.headers
         payload = b""
         with contextlib.suppress(Exception):
             payload = error.read(65_536)
@@ -578,6 +622,8 @@ def send_confirmation(record: dict[str, Any], *, timeout: float = 15.0,
         raise ConfirmationRefused()
     if 300 <= status < 400:
         raise ConfirmationRetry("link_route_refused")
+    if blocked_by_site_protection(status, headers, payload):
+        raise ConfirmationRetry(SITE_PROTECTION_CODE)
     if status != 201:
         dispatcher = ""
         with contextlib.suppress(Exception):
@@ -597,15 +643,23 @@ def send_confirmation(record: dict[str, Any], *, timeout: float = 15.0,
 
 def confirm_pending(*, now: datetime | None = None, path: Path | None = None,
                     sender: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-                    blocking: bool = True) -> tuple[str, str]:
+                    blocking: bool = True,
+                    prober: Callable[[dict[str, Any]], bool] | None = None) -> tuple[str, str]:
     """One confirmation attempt for the pending (re-)link: (state, code).
 
     state is ``active``, ``pending`` (retry later), ``refused`` or ``expired``;
     ``none`` when nothing is pending. The pending record lives in its own
     file; link.json is replaced only after the 201, so a failed re-link
     leaves a working link as it was (L1-9).
+
+    A refusal after a lost ``201`` (P11b-3): the server answers a repeated
+    confirmation with 404 once the device is active. ``prober`` (by default a
+    signed connect with the pending key, when the real sender is used) tells
+    that apart from a spent token; only a completed handshake links.
     """
     target = path or link_path()
+    if prober is None and sender is None:
+        prober = probe_active
     pending_file = pending_path(target)
     with link_lock(blocking=blocking, path=target) as locked:
         if not locked:
@@ -620,8 +674,10 @@ def confirm_pending(*, now: datetime | None = None, path: Path | None = None,
         try:
             view = (sender or send_confirmation)(record)
         except ConfirmationRefused:
-            _retire(record, "refused", target)
-            return "refused", "link_pairing_refused"
+            if prober is None or not _probe_safely(prober, record):
+                _retire(record, "refused", target)
+                return "refused", "link_pairing_refused"
+            view = {}
         except ConfirmationRetry as retry:
             return "pending", retry.code
         active = {key: value for key, value in record.items() if key not in {"pairingSecret", "expiresAt"}}
@@ -630,6 +686,90 @@ def confirm_pending(*, now: datetime | None = None, path: Path | None = None,
         write_link(active, target)
         pending_file.unlink()
         return "active", ""
+
+
+def _probe_safely(prober: Callable[[dict[str, Any]], bool], record: dict[str, Any]) -> bool:
+    try:
+        return bool(prober(record))
+    except Exception:  # noqa: BLE001 - a failed probe is no proof
+        return False
+
+
+def probe_active(record: dict[str, Any], *, version: str | None = None) -> bool:
+    """P11b-3: does the server already hold this device active with this key?
+
+    One signed connect (L1-4) with the pending record's key, closed right after
+    ``authentication-complete``. Anything else is no proof.
+    """
+    return asyncio.run(_probe_active(record, version))
+
+
+async def _probe_active(record: dict[str, Any], version: str | None) -> bool:
+    from websockets.exceptions import ConnectionClosed, InvalidHandshake
+
+    try:
+        url, _ = derive_urls(record["audience"], record["deviceId"])
+        seed = _seed(record)
+    except (LinkError, ValueError, KeyError):
+        return False
+    try:
+        socket = await _connect_without_redirects()(
+            url, compression=None, ping_interval=None, ping_timeout=None,
+            max_size=CLIENT_MAX_MESSAGE_BYTES, open_timeout=HANDSHAKE_TIMEOUT_SECONDS, close_timeout=2,
+            user_agent_header=link_user_agent(version), logger=_socket_logger,
+        )
+    except (InvalidHandshake, OSError, TimeoutError, asyncio.TimeoutError):
+        return False
+    try:
+        complete, _code = await authenticate(socket, record, seed, _release(version))
+        return complete is not None
+    except ConnectionClosed:
+        return False
+    finally:
+        with contextlib.suppress(Exception):
+            await socket.close(1000)
+
+
+async def authenticate(socket: Any, record: dict[str, Any], seed: bytes,
+                       plugin_version: str) -> tuple[dict[str, Any] | None, str]:
+    """L1-4: one proof per socket, echoing the challenge.
+
+    ``(authentication-complete, "")``, or ``(None, status code)``.
+    """
+    try:
+        challenge = json.loads(await asyncio.wait_for(socket.recv(), HANDSHAKE_TIMEOUT_SECONDS))
+    except asyncio.TimeoutError:
+        return None, "link_handshake_timeout"
+    except (ValueError, TypeError):
+        await socket.close(1008, "protocol-error")
+        return None, "link_protocol_error"
+    fields = ("handshakeId", "connectionId", "deviceId", "audience", "nonce", "expiresAt")
+    if (not isinstance(challenge, dict) or challenge.get("type") != "authentication-challenge"
+            or type(challenge.get("version")) is not int or challenge.get("version") != 1
+            or not all(isinstance(challenge.get(name), str) for name in fields)):
+        await socket.close(1008, "protocol-error")
+        return None, "link_protocol_error"
+    if challenge["audience"] != record["audience"] or challenge["deviceId"] != record["deviceId"]:
+        await socket.close(1000)
+        return None, "link_audience_mismatch"
+    proof: dict[str, Any] = {"version": 1}
+    for name in fields:
+        proof[name] = challenge[name]
+    proof["signatureBase64"] = sign(seed, handshake_proof_bytes(challenge))
+    proof["pluginVersion"] = plugin_version
+    await socket.send(json.dumps(proof, separators=(",", ":"), ensure_ascii=False))
+    try:
+        complete = json.loads(await asyncio.wait_for(socket.recv(), HANDSHAKE_TIMEOUT_SECONDS))
+    except asyncio.TimeoutError:
+        return None, "link_handshake_timeout"
+    except (ValueError, TypeError):
+        await socket.close(1008, "protocol-error")
+        return None, "link_protocol_error"
+    if (not isinstance(complete, dict) or complete.get("type") != "authentication-complete"
+            or type(complete.get("version")) is not int or complete.get("version") != 1):
+        await socket.close(1008, "protocol-error")
+        return None, "link_protocol_error"
+    return complete, ""
 
 
 def discard_pending(path: Path | None = None) -> None:
@@ -1172,11 +1312,15 @@ class LinkService:
             socket = await connect(
                 url, compression=None, ping_interval=None, ping_timeout=None,
                 max_size=CLIENT_MAX_MESSAGE_BYTES, open_timeout=HANDSHAKE_TIMEOUT_SECONDS, close_timeout=5,
-                user_agent_header=f"synthetic-sociality-room-hermes/{self.plugin_version}",
+                user_agent_header=link_user_agent(self.plugin_version),
                 logger=_socket_logger,
             )
         except InvalidStatus as error:
-            status = getattr(getattr(error, "response", None), "status_code", 0)
+            response = getattr(error, "response", None)
+            status = getattr(response, "status_code", 0)
+            if blocked_by_site_protection(status, getattr(response, "headers", None),
+                                          bytes(getattr(response, "body", b"") or b"")):
+                return SITE_PROTECTION_CODE, RECONNECT
             refused = status in {400, 401, 403, 404} or 300 <= status < 400  # a redirect is never followed
             return ("link_route_refused" if refused else "link_connection_lost"), RECONNECT
         except (InvalidHandshake, OSError, TimeoutError, asyncio.TimeoutError):
@@ -1195,40 +1339,9 @@ class LinkService:
             self._set(channels=0)
 
     async def _session(self, socket: Any, record: dict[str, Any], seed: bytes, digest: str) -> tuple[str, str]:
-        # L1-4: one proof per socket, echoing the challenge.
-        try:
-            challenge = json.loads(await asyncio.wait_for(socket.recv(), HANDSHAKE_TIMEOUT_SECONDS))
-        except asyncio.TimeoutError:
-            return "link_handshake_timeout", RECONNECT
-        except (ValueError, TypeError):
-            await socket.close(1008, "protocol-error")
-            return "link_protocol_error", RECONNECT
-        fields = ("handshakeId", "connectionId", "deviceId", "audience", "nonce", "expiresAt")
-        if (not isinstance(challenge, dict) or challenge.get("type") != "authentication-challenge"
-                or type(challenge.get("version")) is not int or challenge.get("version") != 1
-                or not all(isinstance(challenge.get(name), str) for name in fields)):
-            await socket.close(1008, "protocol-error")
-            return "link_protocol_error", RECONNECT
-        if challenge["audience"] != record["audience"] or challenge["deviceId"] != record["deviceId"]:
-            await socket.close(1000)
-            return "link_audience_mismatch", RECONNECT
-        proof: dict[str, Any] = {"version": 1}
-        for name in fields:
-            proof[name] = challenge[name]
-        proof["signatureBase64"] = sign(seed, handshake_proof_bytes(challenge))
-        proof["pluginVersion"] = self.plugin_version
-        await socket.send(json.dumps(proof, separators=(",", ":"), ensure_ascii=False))
-        try:
-            complete = json.loads(await asyncio.wait_for(socket.recv(), HANDSHAKE_TIMEOUT_SECONDS))
-        except asyncio.TimeoutError:
-            return "link_handshake_timeout", RECONNECT
-        except (ValueError, TypeError):
-            await socket.close(1008, "protocol-error")
-            return "link_protocol_error", RECONNECT
-        if (not isinstance(complete, dict) or complete.get("type") != "authentication-complete"
-                or type(complete.get("version")) is not int or complete.get("version") != 1):
-            await socket.close(1008, "protocol-error")
-            return "link_protocol_error", RECONNECT
+        complete, code = await authenticate(socket, record, seed, self.plugin_version)
+        if complete is None:
+            return code, RECONNECT
         limits, source = read_limits(complete)
         self._attempt = 0
         self._set(state="connected", code="", limits=source, lastConnectedAt=_iso(), channels=0)

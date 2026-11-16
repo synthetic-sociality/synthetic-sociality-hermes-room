@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 from test_parity_l1 import (
-    DEVICE, FAKE_PAIRING_SECRET, SEED, Harness, LinkTestCase, _iso, adapter, confirmed, link, make_token,
+    DEVICE, FAKE_PAIRING_SECRET, SEED, Harness, LinkTestCase, _iso, adapter, cli, confirmed, link, make_token,
     run_cli, until,
 )
 
@@ -114,12 +114,22 @@ class LinkUserAgentTests(LinkTestCase):
             self.assertEqual(link.confirm_pending(path=self.record_path), ("pending", "link_pairing_unavailable"))
 
     def test_the_cli_names_the_site_bot_protection(self):
-        with edge_server("always-blocked") as server:
+        with edge_server("always-blocked") as server, mock.patch.object(cli, "LINK_CONFIRMATION_WAIT_SECONDS", 0.5):
             code, out, err, _prompt = run_cli("link", token=make_token(audience_of(server)))
         self.assertEqual(code, 1)
         self.assertIn("link_blocked_by_site_protection", err)
         self.assertIn("bot protection", err)
         self.assertNotIn("link_pairing_unavailable", out + err)
+
+
+class EdgeHarness(Harness):
+    """The device endpoint behind an edge that refuses every upgrade (403 1010)."""
+
+    def _process(self, connection, request):
+        self.requests.append(request)
+        response = connection.respond(403, "error code: 1010")
+        response.headers["Server"] = "cloudflare"
+        return response
 
 
 class LinkSocketUserAgentTests(LinkTestCase):
@@ -132,17 +142,7 @@ class LinkSocketUserAgentTests(LinkTestCase):
         self.assertEqual(harness.requests[0].headers["User-Agent"], f"hermes-room-link/{adapter.CONNECTOR_VERSION}")
 
     async def test_a_bot_protection_refusal_of_the_socket_has_its_own_reason(self):
-        async with Harness() as harness:
-            original = harness._process
-
-            def edge(connection, request):
-                harness.requests.append(request)
-                response = connection.respond(403, "error code: 1010")
-                response.headers["Server"] = "cloudflare"
-                return response
-
-            harness._process = edge
-            self.addCleanup(setattr, harness, "_process", original)
+        async with EdgeHarness() as harness:
             self.active_record(harness.audience)
             await self.running(self.service())
             await until(lambda: self.status_link()["code"] == "link_blocked_by_site_protection")
