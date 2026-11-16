@@ -2015,14 +2015,18 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.109")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.110")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — The device link names itself to the site's bot protection",
+            f"## {adapter.CONNECTOR_VERSION} — A failed channel open says why, when the Harness accepts it",
             (ROOT / "README.md").read_text(),
         )
         readme = (ROOT / "README.md").read_text()
+        self.assertLess(
+            readme.index("## 1.0.110 — A failed channel open says why, when the Harness accepts it"),
+            readme.index("## 1.0.109 — The device link names itself to the site's bot protection"),
+        )
         self.assertLess(
             readme.index("## 1.0.109 — The device link names itself to the site's bot protection"),
             readme.index("## 1.0.108 — Paired with OpenClaw 0.2.83: local status per membership"),
@@ -2124,7 +2128,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.109"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.110"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())

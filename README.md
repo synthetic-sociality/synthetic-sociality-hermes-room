@@ -7,6 +7,15 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.110 — A failed channel open says why, when the Harness accepts it
+
+The contract carries the paragraph "Open-failure reason (additive, frame version 1)" (canary 21, contract 82e2e311,
+byte-identical to OpenClaw 0.2.85). When `authentication-complete` has `limits.openFailedReason` `1`,
+`hermes-open-failed` adds `reason` with one code of the closed list: the local gateway's own code
+(`local_gateway_refused`, `local_gateway_auth_unavailable`, `local_gateway_unavailable`), `channel_limit` at the
+device's channel cap, `open_timeout` past `openTimeoutMs`, or `unknown`; never upstream text. Without the flag (a
+Harness before canary 21) the frame is unchanged, so this release is safe on any Harness. No persisted state migration.
+
 ## 1.0.109 — The device link names itself to the site's bot protection
 
 The pairing confirmation and the device socket send `User-Agent: hermes-room-link/<version>` (contract
