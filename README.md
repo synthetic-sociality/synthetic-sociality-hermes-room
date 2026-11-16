@@ -7,6 +7,14 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.109 — The device link names itself to the site's bot protection
+
+The pairing confirmation and the device socket send `User-Agent: hermes-room-link/<version>` (contract
+P11b-3, 8c4cb761); 1.0.108 sent urllib's default, which the site's bot protection refused with 403 `error code: 1010`,
+so a pairing never confirmed. Such a refusal now reads `link_blocked_by_site_protection` with a plain message, not
+`link_pairing_unavailable`, and a repeated confirmation after a lost `201` links once a signed connect with the pending
+key completes; a genuinely refused pairing stays refused. Room API requests are unchanged. No persisted state migration.
+
 ## 1.0.108 — Paired with OpenClaw 0.2.83: local status per membership
 
 Paired release with OpenClaw 0.2.83 (contract P2c-4, tkw-049). `status.json` keeps one `memberships` entry per
