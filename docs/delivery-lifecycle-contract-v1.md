@@ -625,6 +625,93 @@ this rule, including 404 `not_found` and 409 `room_closed`, stays terminal for i
 command is recorded as a missed source and offered once (P2a-3), so it is never lost silently; a discussion start is
 not, as it is never a trigger (L1-16) and its topic reaches the agent as "Current discussion".
 
+## L1o — OpenClaw device link (2026-11-16)
+
+From OpenClaw 0.2.84 the OpenClaw translation of L1 is implemented and its L1 cases (L1-01 to L1-14, L1-20, L1-21) are
+no longer planned. The rules L1-1 to L1-11 apply to OpenClaw unchanged except where this section translates them. The
+Harness side is sociality-room-bff `openclaw-link.ts` (device kind `openclaw`, the same device ingress, pairing
+confirmation and signed handshake as Hermes). Hermes is unchanged by this section; the case names stay identical in both
+connectors, and where they name a Hermes frame or the Hermes dashboard, OpenClaw reads them through the translations
+below. Owner, 2026-11-16: the person sets the link up on their own OpenClaw host, without an inbound port, Tailscale or a
+tunnel.
+
+L1o-1 Setup. The person creates a link token on their OpenClaw card (Settings > Plugins > OpenClaw > Link) and runs
+`openclaw-room-link` on the OpenClaw host as the user that runs the gateway. The command reads the token only at a hidden
+prompt (L1-1), shows the server host and the device label and asks for confirmation, writes the pending record, and sends
+the pairing confirmation once (L1-2). `openclaw-room-link status` shows the link record without its secrets and the
+`link` status codes; `openclaw-room-link unlink` deletes the local key, record and pending re-link (L1-9). A token on the
+command line is refused. The running gateway serves the link as soon as the record is active, and retries a pending first
+link until its token expires; no restart is needed.
+
+L1o-2 Token. The OpenClaw token prefix is `twoc1.` (Harness `openclawLinkToken`); its JSON body is that of L1-1. A Hermes
+token (`twh1.`) is refused by OpenClaw with `link_token_invalid`, as any other prefix: a token links only the agent kind
+it was made for. The device label is the machine name and the OpenClaw profile (`OPENCLAW_PROFILE`, else `default`),
+spelled `<machine> · OpenClaw <profile>`, within the L1-2 limits.
+
+L1o-3 Store and service. The link record (`link.json`), the pending re-link (`link-pending.json`) and the lock file live
+in the plugin's fenced store, `<OPENCLAW_STATE_DIR>/synthetic-sociality-room/` (P2c-1), directory mode 0700, files mode
+0600, written atomically; a symlink in their place is refused. The link service runs only in the gateway's own full
+registration, one per gateway process, and stops with the gateway. A link service failure never stops the gateway or a
+Room account from starting (it reports `link_service_error` and retries).
+
+L1o-4 Frames. On the device socket the frame types are `openclaw-open`, `openclaw-frame` and `openclaw-close` from the
+server and `openclaw-opened`, `openclaw-open-failed`, `openclaw-frame` and `openclaw-close` from the device, each a JSON
+object with `version` 1 and the keys `version`, `type`, `channelId` (a UUID) and, for `openclaw-frame` only, `data` (a
+string), sent in that order. Every L1-6 rule for `hermes-*` frames applies to the `openclaw-*` frame of the same suffix.
+The server advertises `maxDataBytes`, `openTimeoutMs` and `maxChannels` (L1-5); `maxFrameBytes` and `keepaliveMs` take
+their fallbacks when absent. The close reasons are those of L1-8.
+
+L1o-5 Local Gateway. In place of L1-7, the device reaches the OpenClaw gateway it runs in at `ws://127.0.0.1:<port>/`
+(`gateway.port`, default 18789; a literal loopback address, never a name), with no Origin header, no proxy and no redirect.
+It answers the gateway's `connect.challenge` with one `connect` request: protocol 4 (`minProtocol` and `maxProtocol` 4),
+client id `gateway-client`, mode `backend`, role `operator`, scopes `operator.read` and `operator.write`, no device
+identity, and the gateway's own shared credential from its configuration (`gateway.auth.token`, else
+`OPENCLAW_GATEWAY_TOKEN`, for `gateway.auth.mode` `token`; `gateway.auth.password`, else `OPENCLAW_GATEWAY_PASSWORD`, for
+`password`; none for `none`). The credential never leaves the machine and never reaches the server or the agent's tools.
+A gateway with no loopback endpoint (`gateway.bind` `tailnet`, or `custom` on a non-loopback host), another auth mode, or
+a credential that is not a plain string has no non-interactive credential: its channels fail with
+`local_gateway_auth_unavailable`. A refused `connect` (a response with `ok` false, or an upgrade answered 401 or 403) is
+`local_gateway_refused`; a gateway that cannot be reached, or answers `UNAVAILABLE`, is `local_gateway_unavailable`. The
+device sends `openclaw-opened` after the gateway's `hello-ok`, the first point at which the gateway connection is usable,
+or `openclaw-open-failed` within `openTimeoutMs`.
+
+L1o-6 Projection. In place of L1-6's verbatim rule, the device projects each channel; the Harness never speaks to the
+OpenClaw gateway directly. A server `openclaw-frame` must carry one gateway request `{type: "req", id, method, params}`
+with `id` a string of 1 to 128 characters from `A-Z a-z 0-9 _ . : -`. Only four methods are admitted: `sessions.list`,
+`chat.history`, `chat.send` and `chat.abort`. Their parameters are reduced to these keys, each checked for its type; every
+other key is dropped:
+
+| Method | Kept parameters |
+|---|---|
+| sessions.list | `limit` (integer ≥ 1, at most 200, default 50), `offset` (integer ≥ 0), `search` (string ≤ 200), `agentId` (string), `includeDerivedTitles`, `includeLastMessage` (booleans) |
+| chat.history | `sessionKey` (required), `agentId`, `limit` (integer ≥ 1, at most 200, default 50), `offset` (integer ≥ 0) |
+| chat.send | `sessionKey` (required), `agentId`, `message` (required string), `idempotencyKey` (required, 1 to 128 characters) |
+| chat.abort | `sessionKey` (required), `agentId`, `runId` |
+
+A `limit` above 200 is lowered to 200. String parameters other than `message` are at most 512 characters, and
+`sessionKey` and `agentId` are non-empty. Any
+other method, including `connect`, is answered by the device itself, without reaching the gateway, with
+`{type: "res", id, ok: false, error: {code: "method_not_allowed", message: "This method is not available over the
+link."}}`; a request with an invalid parameter likewise with code `invalid_params`; a request beyond 64 unanswered
+requests of the channel with code `too_many_requests`. Each such answer sets `lastChannelErrorCode`
+`channel_method_refused`. A server `openclaw-frame` whose `data` is not such a request object ends that channel
+(`channel_request_invalid`). From the gateway the device forwards, in order, only: the response to an admitted request of
+this channel (once, with the keys `type`, `id`, `ok` and `payload` or `error`, `error` reduced to `code`, `message`,
+`retryable` and `retryAfterMs`), and `chat` events (keys `type`, `event`, `payload` and `seq`). It drops every other
+gateway message: its own `connect` exchange, `connect.challenge`, ticks, presence, health, agent, approval and node events,
+and responses to ids it did not forward. A gateway message that is not JSON is dropped. The size, binary and buffer rules
+of L1-6 apply to the projected text.
+
+L1o-7 Per person. A link serves only the person whose token made it: the device answers only a challenge for its own
+`deviceId` and `audience` (L1-4); each channel has its own gateway connection, so a response or event of one channel never
+reaches another; one OpenClaw state directory (one person's installation) holds one link, read by that installation's
+gateway only. The server routes a channel only to its own human's active OpenClaw device (`openclaw-link.ts`).
+
+L1o-8 Status. The `link` object of L1-11 is written by OpenClaw with the same keys; `lastChannelErrorCode` adds
+`channel_method_refused` and `channel_request_invalid`. OpenClaw writes the object once the installation has a link
+record (pending or active) in this process; until then it is absent, which a reader takes as `not_linked`, so the files
+of installations that never link are unchanged.
+
 ## P5 — Cycle documents (2026-10-03)
 
 P5-1 Cycle documents. On every turn of a discussion cycle the document context holds the exact attachments of the

@@ -1336,7 +1336,8 @@
     "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
-    "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d"
+    "P8": "7a73e25bf27415134b884bfa18affcda6f0f8fb692bee1f9058ac6a1542f289d",
+    "L1o": "115973d9666e53f0df7b6dc929e08258ec62be55fd638bc06fd7c7f6a07d70ab"
   },
   "issue106Cases": {
     "fixture": "tests/fixtures/issue-106.json",
@@ -1654,5 +1655,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "8c4cb7618b25dffcd67c423030958b7d8c2ba8c4515f0c62b4d1ed95b8b7d032"
+  "contractSha256": "8caa6e0b2365e60f551f83943efaf1678b151bcec351248f9a9fad24e2985f09"
 }
