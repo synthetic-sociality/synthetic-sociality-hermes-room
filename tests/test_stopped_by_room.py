@@ -104,7 +104,10 @@ class Gateway:
             return status_room(status, room_id, membership_id, **fields)
 
         instance._status.room = recorded.__get__(instance._status)
-        noop = lambda *_args, **_kwargs: REAL_SLEEP(0)
+
+        def noop(*_args, **_kwargs):
+            return REAL_SLEEP(0)
+
         instance._refresh_binding = lambda _binding: REAL_SLEEP(0, True)
         instance._expire_stale_pending = noop
         instance._ensure_epoch_session_routing = noop
@@ -113,7 +116,10 @@ class Gateway:
         instance._persist_binding = lambda _binding: True
         instance._mark_connected = lambda: None
         instance._mark_disconnected = lambda: None
-        room_of = lambda binding: self.rooms[binding.room_id]
+
+        def room_of(binding):
+            return self.rooms[binding.room_id]
+
         instance._call = lambda binding, operation, **_options: asyncio.to_thread(operation, room_of(binding))
         instance._raw_call = instance._call
         instance._stream_call = lambda binding, operation: asyncio.to_thread(operation, room_of(binding))
