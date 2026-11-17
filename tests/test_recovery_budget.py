@@ -43,17 +43,20 @@ RECOVERY_BUDGET_CASES = [
     "RRB-02 a membership's recovery delay grows across consecutive failed registrations and heartbeats and resets only after an accepted heartbeat",
     "RRB-03 an HTTP 429 delays that membership at least by its Retry-After",
     "RRB-04 heartbeats of current sessions are never delayed by the budget, and a membership stopped by the Room does not use it",
+    "RRB-05 a 429 on a heartbeat of a current session is retried after Retry-After and, while the lease holds, is not counted as a failure",
 ]
 PARAGRAPH = """\
 P2c-3e Recovery budget (2026-11-17). All memberships of one connector installation share one recovery budget: across
 the installation at most 6 connector-session registrations start in any 60 seconds (P2c-3), and a membership that is
 over the budget waits for the next free slot instead of failing. Each membership's recovery delay follows the P2c-3a
 schedule with its jitter and persists across consecutive failed registrations and failed heartbeats of the same
-outage; it is reset only by a heartbeat that the Room accepts on the new session. An HTTP 429 answer delays that
-membership at least by its `Retry-After` (or `retryAfterSeconds`). Heartbeats of a membership whose session is current
-are never delayed by the budget, and a membership stopped by the Room (P2c-3d) does not use it.
+outage; it is reset only by a heartbeat that the Room accepts on the new session. An HTTP 429 answer to a registration
+delays that membership's next registration at least by its `Retry-After` (or `retryAfterSeconds`); an HTTP 429 answer
+to a heartbeat of a current session is retried after its `Retry-After` and does not count as a failed heartbeat unless
+the lease expires first. Heartbeats of a membership whose session is current are never delayed by the budget, and a
+membership stopped by the Room (P2c-3d) does not use it.
 """
-PARAGRAPH_SHA256 = "ab2b5f99f5651df7acb0e676b2b740c74827fe8db1e2333ebd37315fe3adcd7c"
+PARAGRAPH_SHA256 = "c6e14bbdcd748cb21e3abd67a834bdabc89e7c365c187e65029d0b5b2b58357d"  # Addendum 1, final
 BUDGET, WINDOW = 6, 60.0
 INTERVAL = 20  # the heartbeat interval every fake Room instructs
 FAR_LEASE = "2099-01-01T00:00:00Z"
@@ -465,24 +468,75 @@ class RecoveryBudgetTests(unittest.TestCase):
                 # Only that membership: its sibling registered at once.
                 self.assertEqual(gateway.room(2).starts(), [1000.0])
 
-    def test_rrb_03_a_429_on_a_heartbeat_delays_that_membership_at_least_by_its_retry_after(self):
+    def test_rrb_05_a_429_on_a_current_heartbeat_is_retried_after_retry_after_and_is_not_a_failure(self):
+        # Paula's paste check (Addendum 1): the Room's per-membership allowance
+        # answers 429 to a heartbeat; the session is current and its lease holds.
+        # The heartbeat is retried after the Retry-After, the membership's
+        # recovery step does not move, and nothing reports it as failing: the
+        # next network failure still waits the schedule's first step.
+        for label, answer, wait in (("Retry-After header", lambda: rate_limited(header="30"), 30.0),
+                                    ("retryAfterSeconds detail", lambda: rate_limited(detail=40), 40.0)):
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                gateway = Installation(directory, 1)
+                room = gateway.room(1)
+                room.heartbeat_script = [answer(), answer(), network_failure(), None]
+                writes: list[tuple] = []
+                status_room = gateway.instance._status.room
+
+                def recorded(room_id, membership_id="", **fields):
+                    writes.append((fields.get("connection"), fields.get("error_code")))
+                    return status_room(room_id, membership_id, **fields)
+
+                gateway.instance._status.room = recorded
+                observed = {}
+
+                async def run():
+                    try:
+                        gateway.beat(1)
+                        await gateway.clock.advance(INTERVAL + 2 * wait + 0.5)
+                        observed["step"] = gateway.instance._room_map("_recovery_steps").get(room_id(1), 0)
+                        await gateway.clock.advance(120.0)
+                    finally:
+                        await gateway.stop()
+
+                with gateway.running():
+                    asyncio.run(run())
+                self.check_delays(room.attempts, [
+                    ("heartbeat", False, (wait, wait)),  # retried after its Retry-After ...
+                    ("heartbeat", False, (wait, wait)),  # ... again, still not a failure
+                    ("heartbeat", False, (0.8, 1.0)),    # a real failure: the schedule's first step
+                    ("heartbeat", True, (INTERVAL, INTERVAL)),
+                ])
+                self.assertEqual(observed["step"], 0, "a 429 on a current heartbeat moved the recovery step")
+                self.assertEqual(room.starts(), [], "the session stayed current: no registration")
+                # Only the network failure reports reconnecting; the two 429s report nothing failing.
+                self.assertEqual([write for write in writes if write[0] == "reconnecting"],
+                                 [("reconnecting", "network")], writes)
+                self.assertEqual(gateway.entry(1)["connection"], "connected")
+
+    def test_rrb_05_once_the_lease_has_expired_a_429_on_a_heartbeat_takes_the_normal_recovery_path(self):
+        # The lease ran out before the 429: the heartbeat counts as failed, the
+        # next contact registers after the Retry-After, and the step has moved.
         with tempfile.TemporaryDirectory() as directory:
             gateway = Installation(directory, 1)
             room = gateway.room(1)
-            room.heartbeat_script = [rate_limited(detail=40), None]
+            room.heartbeat_script = [rate_limited(header="30")]
+            room.register_script = [network_failure(), None]
 
             async def run():
                 try:
-                    gateway.beat(1)
+                    gateway.beat(1, lease_deadline=1.0)
                     await gateway.clock.advance(120.0)
                 finally:
                     await gateway.stop()
 
             with gateway.running():
                 asyncio.run(run())
-            beats = room.heartbeats()
-            self.assertGreaterEqual(len(beats), 2, room.attempts)
-            self.assertGreaterEqual(beats[1][0] - beats[0][0], 40.0, room.attempts)
+            self.check_delays(room.attempts, [
+                ("heartbeat", False, (30.0, 30.0)),
+                ("register", False, (1.6, 2.0)),  # the 429 counted: this is the schedule's second step
+                ("register", True, (INTERVAL, INTERVAL)),
+            ])
 
     def test_rrb_04_heartbeats_of_current_sessions_keep_their_interval_while_the_budget_is_spent(self):
         # Ten memberships in the outage spend the budget; two others hold current
