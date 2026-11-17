@@ -278,6 +278,14 @@ re-admission (P18). It never reports such a membership as `connecting` or `recon
 code while the credential stays unusable. A renewal or re-admission that succeeds returns the membership to the normal
 path, and only then does its connection state change. The per-Room summary follows the membership entries (P2c-4).
 
+P2c-3e Recovery budget (2026-11-17). All memberships of one connector installation share one recovery budget: across
+the installation at most 6 connector-session registrations start in any 60 seconds (P2c-3), and a membership that is
+over the budget waits for the next free slot instead of failing. Each membership's recovery delay follows the P2c-3a
+schedule with its jitter and persists across consecutive failed registrations and failed heartbeats of the same
+outage; it is reset only by a heartbeat that the Room accepts on the new session. An HTTP 429 answer delays that
+membership at least by its `Retry-After` (or `retryAfterSeconds`). Heartbeats of a membership whose session is current
+are never delayed by the budget, and a membership stopped by the Room (P2c-3d) does not use it.
+
 P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
 connection state, last error code, last gate wait and its reason, last reconnect and outage length, web reading per P2c-6),
 with no secrets and no message bodies, for the host watchdog. Additions to the file are additive: the schema name stays.

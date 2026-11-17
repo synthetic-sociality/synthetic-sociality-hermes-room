@@ -345,6 +345,12 @@
     "SBR-03 while it waits for a renewal or re-admission the membership is never reported connecting or reconnecting and keeps its code",
     "SBR-04 a successful renewal returns the membership to the normal path; a sibling membership's entry is never changed"
   ],
+  "parityP2c3eCases": [
+    "RRB-01 a persistent network failure across many memberships starts at most 6 registrations in any 60 seconds per installation",
+    "RRB-02 a membership's recovery delay grows across consecutive failed registrations and heartbeats and resets only after an accepted heartbeat",
+    "RRB-03 an HTTP 429 delays that membership at least by its Retry-After",
+    "RRB-04 heartbeats of current sessions are never delayed by the budget, and a membership stopped by the Room does not use it"
+  ],
   "parityL1StatusCommandCases": [
     "LSC-01 the status file the gateway writes is found by the gateway's own path rule, also when it is not beside the link record",
     "LSC-02 the link record without its secrets and the link object are shown as the gateway reports them",
@@ -1405,7 +1411,7 @@
     "L1": "94a5809aa1b1a9121404e15769e69487d5919efb641a8b0c358ba1793dc3842c",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "bb86d24859a93fed05b899ee44ec3d848895bb71cc8a6cf451a16c52f6a02c03",
+    "P2c": "92a1adca95f0af69f7fcc87f8af82280ab114f5689d14435c57cd6da9af63bc6",
     "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
@@ -1729,5 +1735,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "7fec9f97266eaa91fcb3d6cf628c52f8814b3eaa1ab3e64f7a4ba91d45def187"
+  "contractSha256": "9b67c7ff793bb286a12b2acdecc06d8ed4e1c0a378781400e755d52738d38b6e"
 }
