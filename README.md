@@ -7,6 +7,18 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.113 — A membership stopped by the Room is reported as stopped (P2c-3d), paired with OpenClaw 0.2.88
+
+The contract carries the paragraph "P2c-3d Stopped by the Room (2026-11-17)" directly after P2c-3c (contract 7fec9f97,
+byte-identical to OpenClaw): when the Room answers `credential_expired` or `credential_revoked` for a membership, the
+local status reports it with connection `stopped` and that code as `lastErrorCode`, for as long as it waits for a
+renewal or a re-admission, never `connecting` or `reconnecting`. Hermes already did this from the Room's answer on
+(`_expire`, `_revoke`). `conformance.json` lists the four shared cases `parityP2c3dCases` (SBR-01 to SBR-04, the same
+strings as OpenClaw); `tests/test_stopped_by_room.py` runs them. One fix (SBR-03): after a gateway restart such a
+waiting membership had no status entry at all until the Room answered again; it is now reported `stopped` with its code
+from the start. A successful renewal still returns it to the normal path. Nothing else changes at runtime and there is
+no persisted state migration.
+
 ## 1.0.112 — The link status command is a universal rule (L1-11a), paired with OpenClaw 0.2.87
 
 The contract carries the paragraph "L1-11a Status command (2026-11-17)" directly after L1-11 (contract a96dc1a5,
