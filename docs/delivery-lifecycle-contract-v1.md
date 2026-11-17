@@ -555,6 +555,18 @@ L1-11 Status. The status file (Appendix) gains one object, `link`, with codes on
 `channel_cap`, `channel_duplicate`, `channel_unknown`, `channel_data_too_large`, `channel_buffer_overflow`,
 `channel_binary`, or empty) and `updatedAt`.
 
+L1-11a Status command (2026-11-17). Each connector gives the person one command that shows the link on that host
+(Hermes: `hermes room link status`; OpenClaw: `openclaw-room-link status`). It shows the link record without its
+secrets (L1-10) and the `link` object of L1-11 as the running gateway reports it. The command reads that object from
+the status file the gateway actually writes (P3-5), found by the gateway's own path rule and never by a second rule of
+the command's own; this holds for every layout the connector supports, also when the status file is not in the
+directory of the link record. Where that path depends on the host's configuration, the command reads the configuration
+the way the host reads it; where it does not, the command reads no host configuration. When no status file names the
+link, the command says in plain words that the gateway has not reported the link. A status file or a host
+configuration that is missing or cannot be read never fails the command: it then shows the link record and that plain
+statement. The command writes nothing, and prints nothing of a credential, of the host configuration or of an account
+or state file beyond the link record's public fields and the `link` object.
+
 The following clauses were added to P4 after the Room server release joint-772ca32 (live 2026-10-03 07:46Z; receipt
 `RECEIPT-20261003T0746Z-room-server-joint-772ca32.md`). Both connectors implement them in this release.
 

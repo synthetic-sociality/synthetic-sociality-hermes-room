@@ -339,6 +339,14 @@
     "LF-16 with attachments chat.send keeps valid attachments and refuses an invalid type, mime type, file name, base64, more than 10 files or more than 716800 decoded bytes with invalid_params": "openclaw-only",
     "LF-17 a Hermes device ignores limits.openclawLinkFeatures and its hermes-opened frame is unchanged": "test_lf_17_a_hermes_device_ignores_the_capability_and_its_opened_frame_is_unchanged"
   },
+  "parityL1StatusCommandCases": [
+    "LSC-01 the status file the gateway writes is found by the gateway's own path rule, also when it is not beside the link record",
+    "LSC-02 the link record without its secrets and the link object are shown as the gateway reports them",
+    "LSC-03 no status file names the link: a plain statement that the gateway has not reported it",
+    "LSC-04 a missing or unreadable status file or host configuration never fails the command",
+    "LSC-05 a host configuration is read the way the host reads it; without such a dependency none is read",
+    "LSC-06 the command writes nothing and prints no credential, configuration or account content"
+  ],
   "parityL1Cases": {
     "L1-01 a link token is read at a hidden prompt and accepted only as v1 with every field, an https audience and an unexpired expiry": "test_l1_01_token_parsing",
     "L1-02 the pairing confirmation is sent to the derived URL with the signed body and only 201 links": "test_l1_02_pairing_confirmation",
@@ -1388,7 +1396,7 @@
   },
   "parityContractSectionSha256": {
     "P3": "a689096e24f9fee13e0603006274c303f3435ee823f082a84a63b765deb8906b",
-    "L1": "7b1d5426d6608b6f9b835f04b93756b5c330f360dd4cba8209dce034279a34e3",
+    "L1": "94a5809aa1b1a9121404e15769e69487d5919efb641a8b0c358ba1793dc3842c",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
     "P2c": "16692fd37d7e79631bdb2c679b833ec66ea99f743381ca95be7cc8c27874750b",
@@ -1715,5 +1723,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "e2784a23d3c06cd9299806ee577995831f041666b1e609a27ac1d619fa30d574"
+  "contractSha256": "a96dc1a519cee0a7836e982ea973fa4d0b2d865d35a5ab669227fe4f119e0529"
 }
