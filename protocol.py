@@ -144,6 +144,15 @@ def _error_envelope(raw: bytes) -> dict[str, Any] | None:
     return envelope if isinstance(envelope, dict) else None
 
 
+def _envelope_retry_after(envelope: dict[str, Any]) -> float:
+    """Contract P2c-3e: the Room's ``retryAfterSeconds`` detail, bounded as a Retry-After."""
+    details = envelope.get("details")
+    value = details.get("retryAfterSeconds") if isinstance(details, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return parse_retry_after(str(value))
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Contract P2c-3a: the Room never redirects. A 3xx is answered as the
     HTTPError it is, never followed, so the credential never goes to another
@@ -310,6 +319,7 @@ class RoomProtocol:
                     f"Room API answered HTTP {error.code} without the Room's JSON",
                     status=error.code, retryable=True, retry_after=retry_after, non_json=True,
                 ) from None
+            retry_after = max(retry_after, _envelope_retry_after(envelope))
             if "/artcraft/agent/" in path:
                 failure = ProtocolError("ArtCraft request failed", status=error.code)
                 failure.artcraft_error = envelope
@@ -600,6 +610,7 @@ class RoomProtocol:
                     f"SSE answered HTTP {error.code} without the Room's JSON",
                     status=error.code, retryable=True, retry_after=retry_after, non_json=True,
                 ) from None
+            retry_after = max(retry_after, _envelope_retry_after(envelope))
             raise ProtocolError(
                 envelope.get("message") or f"SSE returned HTTP {error.code}",
                 status=error.code,

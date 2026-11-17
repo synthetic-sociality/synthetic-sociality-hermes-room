@@ -408,6 +408,46 @@ def _clock() -> float:
     return time.monotonic()
 
 
+# Contract P2c-3e: all memberships of one installation share one recovery
+# budget, at most this many registration starts in any window.
+RECOVERY_BUDGET_STARTS = 6
+RECOVERY_BUDGET_WINDOW_SECONDS = 60.0
+
+
+class RecoveryBudget:
+    """Contract P2c-3e: the registration starts of one installation.
+
+    A start reserves its slot at once, the earliest time at which no window
+    holds more than the budget, and its membership sleeps until then: waiters
+    keep their order and nothing polls. A slot whose membership stopped while
+    it waited is given back.
+    """
+
+    def __init__(self) -> None:
+        self._slots: list[float] = []
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def reserve(self, now: float) -> float:
+        loop = asyncio.get_running_loop()
+        if loop is not self._loop:  # a new event loop is a new run of the gateway
+            self._loop, self._slots = loop, []
+        slots = self._slots = [slot for slot in self._slots if slot > now - RECOVERY_BUDGET_WINDOW_SECONDS]
+        slot = max([now, *slots[-1:]])
+        if len(slots) >= RECOVERY_BUDGET_STARTS:
+            slot = max(slot, slots[-RECOVERY_BUDGET_STARTS] + RECOVERY_BUDGET_WINDOW_SECONDS)
+        slots.append(slot)
+        return slot
+
+    def release(self, slot: float) -> None:
+        with contextlib.suppress(ValueError):
+            self._slots.remove(slot)
+
+
+# Keyed as the installation's status file (P2c-4): one gateway process may
+# serve several profiles (P17), each its own installation.
+_recovery_budgets: dict[str, RecoveryBudget] = {}
+
+
 def _binding_fingerprint(binding: RoomBinding) -> str:
     """Contract P8-6: a digest of every stored field of a binding (memory only)."""
     encoded = json.dumps(asdict(binding), sort_keys=True, default=str, separators=(",", ":"))
@@ -4184,7 +4224,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     logger.warning("Room %s temporarily unavailable: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     step = next_step(error)
-                    await asyncio.sleep(reconnect_delay(step, retry_after=error.retry_after, status=error.status))
+                    # Contract P2c-3e: a failed registration waits the membership's delay.
+                    delay = getattr(error, "recovery_delay", None)
+                    await asyncio.sleep(delay if delay is not None else reconnect_delay(
+                        step, retry_after=error.retry_after, status=error.status))
                     step += 1
                 except Exception as error:  # noqa: BLE001 - contract P2c-3
                     # An unexpected failure must not end this Room's event
@@ -4312,9 +4355,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # and the event stream is read meanwhile (as OpenClaw's scan).
                 if error.session_lost:
                     binding.connector_session_id = ""
+                    # Contract P2c-3a: one registration within the first step.
+                    self._room_map("_recovery_not_before").pop(binding.room_id, None)
                 elif error.retryable and not error.revoked and not error.expired:
                     logger.warning("Room %s heartbeat failed (%s); session kept, retried by the heartbeat loop",
                                    binding.room_id, _status_error_code(error))
+                    self._recovery_failed(binding, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     return {}
                 else:
@@ -4331,8 +4377,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         installation = self._installation_identity()
         if installation:
             metadata["installationId"] = installation
-        session = await self._call(binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata),
-                                   background=True, presence=True)
+        await self._recovery_slot(binding)
+        try:
+            session = await self._call(
+                binding, lambda api: api.register_connector(binding.room_id, binding.installation_id, metadata),
+                background=True, presence=True)
+        except ProtocolError as error:
+            if not error.revoked and not error.expired:
+                error.recovery_delay = self._recovery_failed(binding, error)
+            raise
         binding.connector_session_id = session["sessionId"]
         registered.add(binding.room_id)
         counts = getattr(self, "_registrations", None)
@@ -4350,6 +4403,52 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _registration_count(self, room_id: str) -> int:
         """Accepted registrations of this Room in this process (P2c-3a reset)."""
         return (getattr(self, "_registrations", None) or {}).get(room_id, 0)
+
+    def _recovery_budget(self) -> RecoveryBudget:
+        """Contract P2c-3e: the budget of this installation, keyed as its status file."""
+        status = getattr(self, "_status", None)
+        key = str(status.path) if status is not None else f"adapter-{id(self)}"
+        return _recovery_budgets.setdefault(key, RecoveryBudget())
+
+    def _recovery_failed(self, binding: RoomBinding, error: BaseException | None = None) -> float:
+        """Contract P2c-3e: a failed registration or heartbeat of this membership.
+
+        Returns its next wait on the P2c-3a schedule (a 429's Retry-After at
+        least). The step persists across the outage's failed registrations and
+        heartbeats; only an accepted heartbeat resets it (_note_connected).
+        """
+        steps = self._room_map("_recovery_steps")
+        step = steps.get(binding.room_id, 0)
+        steps[binding.room_id] = step + 1
+        delay = reconnect_delay(step, retry_after=getattr(error, "retry_after", 0.0),
+                                status=getattr(error, "status", 0))
+        self._room_map("_recovery_not_before")[binding.room_id] = _clock() + delay
+        return delay
+
+    def _recovery_still_wanted(self, binding: RoomBinding) -> None:
+        stop = getattr(self, "_stop", None)
+        if (stop is not None and stop.is_set()) or not binding.enabled or binding.revoked:
+            # Contract P2c-3e: a membership stopped meanwhile (P2c-3d) does not use the budget.
+            raise ProtocolError("Room membership stopped while it waited to register",
+                                code="recovery_budget_left", retryable=False)
+
+    async def _recovery_slot(self, binding: RoomBinding) -> None:
+        """Contract P2c-3e: before a registration starts, this membership's
+        recovery delay, then a free slot of the installation's budget."""
+        not_before = self._room_map("_recovery_not_before").get(binding.room_id, 0.0)
+        if not_before > _clock():
+            await asyncio.sleep(not_before - _clock())
+        self._recovery_still_wanted(binding)
+        budget = self._recovery_budget()
+        now = _clock()
+        slot = budget.reserve(now)
+        try:
+            if slot > now:
+                await asyncio.sleep(slot - now)
+            self._recovery_still_wanted(binding)
+        except BaseException:
+            budget.release(slot)
+            raise
 
     async def _ensure_epoch_session_routing(self, binding: RoomBinding) -> None:
         if binding.epoch_session_routing_initialized:
@@ -4431,8 +4530,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # Contract P2c-3a: a failed heartbeat is retried on the reconnect
         # schedule, not at the heartbeat interval; success resets it.
         # Contract P8-1: the interval of the latest session answer, at most 60 s.
+        # Contract P2c-3e: the step is the membership's (_recovery_failed).
         retry_delay: float | None = None
-        step = 0
         try:
             while not self._stop.is_set() and binding.enabled and not binding.revoked:
                 current = min(HEARTBEAT_MAX_INTERVAL_SECONDS,
@@ -4481,7 +4580,6 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             "heartbeat",
                             suppress_errors=True,
                         )
-                    step = 0
                 except ProtocolError as error:
                     if error.revoked:
                         self._revoke(binding)
@@ -4489,13 +4587,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     if error.expired:
                         self._expire(binding)
                         return
+                    if self._stop.is_set() or not binding.enabled or binding.revoked:
+                        return  # ended meanwhile (P2c-3d): its status stays stopped
                     logger.warning("Room %s heartbeat failed; lease will truthfully expire: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     # A 429 is a scheduling instruction: its Retry-After is
                     # honoured up to 120 s, a 5xx one up to the cap (P2c-3a);
                     # the room will truthfully show unavailable if its lease
                     # expires meanwhile.
-                    retry_delay = reconnect_delay(step, retry_after=error.retry_after, status=error.status)
+                    retry_delay = getattr(error, "recovery_delay", None)
+                    if retry_delay is None:
+                        retry_delay = self._recovery_failed(binding, error)
                     if error.session_lost:
                         # Contract P2c-3a: only the Room's own JSON answer
                         # loses the session; the next heartbeat registers,
@@ -4503,7 +4605,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         # before (P7c-8), then on the schedule until accepted.
                         getattr(self, "_registered_rooms", set()).discard(binding.room_id)
                         retry_delay = reconnect_delay(0)
-                    step += 1
+                        self._room_map("_recovery_not_before")[binding.room_id] = _clock() + retry_delay
                     self._expire_lease_if_due(binding)
                 except RequestNotFormed as error:
                     self._fail_closed_on_request(binding, error)
@@ -4513,8 +4615,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     # type only (no body, no trace).
                     logger.warning("Room %s heartbeat failed (%s); retrying", binding.room_id, type(error).__name__)
                     self._status_room(binding, connection="reconnecting", error_code="connector_error")
-                    retry_delay = reconnect_delay(step)
-                    step += 1
+                    retry_delay = self._recovery_failed(binding)
                     self._expire_lease_if_due(binding)
         finally:
             self._heartbeat_tasks.pop(binding.room_id, None)
@@ -8183,6 +8284,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # and the interval it instructs (a later answer's value takes effect).
         self._room_map("_heartbeat_accepted_at")[binding.room_id] = _clock()
         self._room_map("_session_answers")[binding.room_id] = dict(evidence)
+        if not registered:
+            # Contract P2c-3e: only a heartbeat the Room accepts ends the outage's delay.
+            self._room_map("_recovery_steps").pop(binding.room_id, None)
+            self._room_map("_recovery_not_before").pop(binding.room_id, None)
         if registered or evidence.get("heartbeatIntervalSeconds") is not None:
             self._room_map("_heartbeat_intervals")[binding.room_id] = heartbeat_interval_seconds(
                 evidence.get("heartbeatIntervalSeconds"))
