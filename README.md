@@ -7,6 +7,19 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.112 — The link status command is a universal rule (L1-11a), paired with OpenClaw 0.2.87
+
+The contract carries the paragraph "L1-11a Status command (2026-11-17)" directly after L1-11 (contract a96dc1a5,
+byte-identical to OpenClaw): each connector has one command that shows the link record without its secrets and the
+`link` object as the running gateway reports it, read from the status file the gateway writes and found by the
+gateway's own path rule. `hermes room link status` already did this: the link record and `status.json` are both next
+to the state file in use, and no host configuration decides that path, so none is read. `conformance.json` lists the
+six shared cases `parityL1StatusCommandCases` (LSC-01 to LSC-06, the same strings as OpenClaw);
+`tests/test_link_status_command.py` runs them. One fix (LSC-04): a `status.json` that is JSON but not an object, or
+whose `link` is not an object, ended the command with an error; it now shows the link record and "no status (the
+Hermes gateway has not reported the link)" with exit 0, like a missing or unreadable file. Nothing else changes at
+runtime and there is no persisted state migration.
+
 ## 1.0.111 — Link features: paired with OpenClaw, no Hermes behaviour change
 
 Paired release for OpenClaw's link parity (new sessions, archive, approvals, files and photos over the device link).
