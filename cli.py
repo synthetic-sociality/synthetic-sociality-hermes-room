@@ -348,10 +348,12 @@ def _link_status() -> int:
     try:
         from . import local_status
 
-        runtime = local_status.read(state_path().parent / "status.json").get("link") or {}
-    except (OSError, ValueError):
-        runtime = {}
-    if runtime:
+        runtime = local_status.read(state_path().parent / "status.json").get("link")
+    except (OSError, ValueError, AttributeError):
+        runtime = None
+    # Contract L1-11a: a status file that cannot be read as an object with a
+    # `link` object never fails the command.
+    if isinstance(runtime, dict) and runtime:
         print(f"Gateway:     {runtime.get('state', '')} {runtime.get('code', '')}".rstrip())
         print(f"Channels:    {runtime.get('channels', 0)}")
         if runtime.get("lastChannelErrorCode"):
