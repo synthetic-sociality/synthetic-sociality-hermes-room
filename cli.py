@@ -349,7 +349,7 @@ def _link_status() -> int:
         from . import local_status
 
         runtime = local_status.read(state_path().parent / "status.json").get("link")
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         runtime = None
     # Contract L1-11a: a status file that cannot be read as an object with a
     # `link` object never fails the command.

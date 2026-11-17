@@ -17,8 +17,8 @@ to the state file in use, and no host configuration decides that path, so none i
 six shared cases `parityL1StatusCommandCases` (LSC-01 to LSC-06, the same strings as OpenClaw);
 `tests/test_link_status_command.py` runs them. One fix (LSC-04): a `status.json` that is JSON but not an object, or
 whose `link` is not an object, ended the command with an error; it now shows the link record and "no status (the
-Hermes gateway has not reported the link)" with exit 0, like a missing or unreadable file. Nothing else changes at
-runtime and there is no persisted state migration.
+Hermes gateway has not reported the link)" with exit 0, like a missing or unreadable file; a deeply nested status
+file never fails the command either. Nothing else changes at runtime and there is no persisted state migration.
 
 ## 1.0.111 — Link features: paired with OpenClaw, no Hermes behaviour change
 
