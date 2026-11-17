@@ -493,7 +493,7 @@ class RecoveryBudgetTests(unittest.TestCase):
                 async def run():
                     try:
                         gateway.beat(1)
-                        await gateway.clock.advance(INTERVAL + 2 * wait + 0.5)
+                        await gateway.clock.advance(INTERVAL + 2 * wait - 0.5)  # after both 429s
                         observed["step"] = gateway.instance._room_map("_recovery_steps").get(room_id(1), 0)
                         await gateway.clock.advance(120.0)
                     finally:

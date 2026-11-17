@@ -4358,6 +4358,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     # Contract P2c-3a: one registration within the first step.
                     self._room_map("_recovery_not_before").pop(binding.room_id, None)
                 elif error.retryable and not error.revoked and not error.expired:
+                    if self._heartbeat_rate_limited(binding, error) is not None:
+                        return {}  # Contract P2c-3e: not a failed heartbeat; the heartbeat loop retries it
                     logger.warning("Room %s heartbeat failed (%s); session kept, retried by the heartbeat loop",
                                    binding.room_id, _status_error_code(error))
                     self._recovery_failed(binding, error)
@@ -4424,6 +4426,20 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                                 status=getattr(error, "status", 0))
         self._room_map("_recovery_not_before")[binding.room_id] = _clock() + delay
         return delay
+
+    def _heartbeat_rate_limited(self, binding: RoomBinding, error: ProtocolError) -> float | None:
+        """Contract P2c-3e: a 429 to a heartbeat of a current session whose lease
+        holds. Returns the wait before it is retried (its Retry-After, the step
+        unchanged), or None when it is a failed heartbeat as any other."""
+        if error.status != 429 or getattr(error, "recovery_delay", None) is not None:
+            return None
+        if binding.room_id not in (getattr(self, "_registered_rooms", None) or set()):
+            return None
+        deadline = self._lease_deadline.get(binding.room_id, 0)
+        if not deadline or asyncio.get_running_loop().time() >= deadline:
+            return None
+        step = self._room_map("_recovery_steps").get(binding.room_id, 0)
+        return reconnect_delay(step, retry_after=error.retry_after, status=error.status)
 
     def _recovery_still_wanted(self, binding: RoomBinding) -> None:
         stop = getattr(self, "_stop", None)
@@ -4589,6 +4605,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         return
                     if self._stop.is_set() or not binding.enabled or binding.revoked:
                         return  # ended meanwhile (P2c-3d): its status stays stopped
+                    rate_limited = self._heartbeat_rate_limited(binding, error)
+                    if rate_limited is not None:
+                        # Contract P2c-3e: retried after its Retry-After; while the
+                        # lease holds it is not a failed heartbeat.
+                        logger.info("Room %s heartbeat rate limited; retried in %.0f s", binding.room_id, rate_limited)
+                        retry_delay = rate_limited
+                        continue
                     logger.warning("Room %s heartbeat failed; lease will truthfully expire: %s", binding.room_id, error)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     # A 429 is a scheduling instruction: its Retry-After is

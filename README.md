@@ -9,16 +9,18 @@ Room identity.
 
 ## 1.0.114 — One recovery budget per installation (P2c-3e), paired with OpenClaw 0.2.89
 
-The contract carries the paragraph "P2c-3e Recovery budget (2026-11-17)" directly after P2c-3d (contract 9b67c7ff,
+The contract carries the paragraph "P2c-3e Recovery budget (2026-11-17)" directly after P2c-3d (contract 9ab72778,
 byte-identical to OpenClaw). When the path to the Room drops TLS, the memberships of one installation no longer each
 recover on their own schedule and add up to a request storm: across the installation (keyed as its status file) at most
 6 connector-session registrations start in any 60 seconds, and a membership over the budget waits for the next free
 slot instead of failing. Each membership's P2c-3a delay, with its jitter, now persists across failed registrations and
 failed heartbeats of the same outage, in the event stream and in the heartbeat loop, and only a heartbeat the Room
-accepts resets it (an accepted registration no longer does). A 429 delays that membership at least by its
-`Retry-After`, and the client now also reads the Room's `retryAfterSeconds` detail. Heartbeats of a current session
+accepts resets it (an accepted registration no longer does). A 429 to a registration delays that membership's next
+registration at least by its `Retry-After`; a 429 to a heartbeat of a current session is retried after its
+`Retry-After` and, while the lease holds, is not a failed heartbeat (the step does not move and the status does not say
+reconnecting). The client now also reads the Room's `retryAfterSeconds` detail. Heartbeats of a current session
 never wait for the budget, and a membership stopped by the Room (P2c-3d) does not use it. `conformance.json` lists the
-four shared cases `parityP2c3eCases` (RRB-01 to RRB-04, the same strings as OpenClaw); `tests/test_recovery_budget.py`
+five shared cases `parityP2c3eCases` (RRB-01 to RRB-05, the same strings as OpenClaw); `tests/test_recovery_budget.py`
 runs them with a fake Room and a fake clock: twelve memberships in a five-minute outage started 309 registrations
 (96 in one minute) before, and 36 (6 per minute) now. There is no persisted state migration.
 
