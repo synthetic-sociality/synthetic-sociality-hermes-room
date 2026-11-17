@@ -271,6 +271,13 @@ retried on the P2c-3a schedule with its cap at 5 seconds (1, 2, 4, 5, 5, ... s, 
 remaining lease, so the first retry follows within 1 s. When the lease has run out the attempt is superseded, durably
 and without a post (P1-1); the connector holds no Room turn past its lease, whatever the host run still does.
 
+P2c-3d Stopped by the Room (2026-11-17). When the Room answers `credential_expired` or `credential_revoked` for a
+membership, the connector reports that membership in its local status (P2c-4) with connection `stopped` and that code
+as `lastErrorCode`, from the first such answer on and for as long as the membership waits for a renewal or a
+re-admission (P18). It never reports such a membership as `connecting` or `reconnecting`, and it never clears the
+code while the credential stays unusable. A renewal or re-admission that succeeds returns the membership to the normal
+path, and only then does its connection state change. The per-Room summary follows the membership entries (P2c-4).
+
 P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
 connection state, last error code, last gate wait and its reason, last reconnect and outage length, web reading per P2c-6),
 with no secrets and no message bodies, for the host watchdog. Additions to the file are additive: the schema name stays.
