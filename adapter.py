@@ -2117,6 +2117,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     self._watch(binding, is_reconnect=is_reconnect),
                     name=f"synthetic-sociality:{binding.room_id}",
                 )
+            elif binding.revoked or (not binding.enabled and binding.disabled_reason in _STALE_REASONS):
+                # Contract P2c-3d: a membership the Room stopped still waits for a
+                # renewal or re-admission after a restart; it is reported stopped
+                # with the Room's code, never missing or connecting.
+                code = "credential_revoked" if binding.revoked else binding.disabled_reason
+                self._status_room(binding, connection="stopped", error_code=code)
         linked = self._start_link_service()
         if not self._tasks and self._renewal_task is None and not linked:
             return False
