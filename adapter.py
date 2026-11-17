@@ -4340,6 +4340,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if accepted is not None and _clock() - accepted < (
                     self._heartbeat_interval(binding.room_id) + STREAM_PASS_HEARTBEAT_GRACE_SECONDS):
                 return dict(self._room_map("_session_answers").get(binding.room_id) or {})
+            if self._heartbeat_hold(binding) > 0:
+                # Contract P2c-3e: a heartbeat 429's Retry-After holds every presence caller.
+                return dict(self._room_map("_session_answers").get(binding.room_id) or {})
             try:
                 heartbeat = await self._call(
                     binding,
@@ -4358,11 +4361,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     # Contract P2c-3a: one registration within the first step.
                     self._room_map("_recovery_not_before").pop(binding.room_id, None)
                 elif error.retryable and not error.revoked and not error.expired:
-                    if self._heartbeat_rate_limited(binding, error) is not None:
+                    rate_limited = self._heartbeat_rate_limited(binding, error)
+                    if rate_limited is not None:
+                        self._hold_heartbeat(binding, rate_limited)
                         return {}  # Contract P2c-3e: not a failed heartbeat; the heartbeat loop retries it
                     logger.warning("Room %s heartbeat failed (%s); session kept, retried by the heartbeat loop",
                                    binding.room_id, _status_error_code(error))
-                    self._recovery_failed(binding, error)
+                    delay = self._recovery_failed(binding, error)
+                    if error.status == 429:
+                        self._hold_heartbeat(binding, delay)
                     self._status_room(binding, connection="reconnecting", error_code=_status_error_code(error))
                     return {}
                 else:
@@ -4440,6 +4447,22 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return None
         step = self._room_map("_recovery_steps").get(binding.room_id, 0)
         return reconnect_delay(step, retry_after=error.retry_after, status=error.status)
+
+    def _hold_heartbeat(self, binding: RoomBinding, wait: float) -> None:
+        """Contract P2c-3e: one heartbeat-not-before deadline per membership and
+        session, set by a heartbeat 429 on any presence path; a later 429 can only
+        lengthen it."""
+        holds = self._room_map("_heartbeat_not_before")
+        session, until = holds.get(binding.room_id, ("", 0.0))
+        until = max(until, _clock() + wait) if session == binding.connector_session_id else _clock() + wait
+        holds[binding.room_id] = (binding.connector_session_id, until)
+
+    def _heartbeat_hold(self, binding: RoomBinding) -> float:
+        """Seconds until this membership's current session may heartbeat again (0: now)."""
+        session, until = self._room_map("_heartbeat_not_before").get(binding.room_id, ("", 0.0))
+        if not session or session != binding.connector_session_id:
+            return 0.0
+        return max(0.0, until - _clock())
 
     def _recovery_still_wanted(self, binding: RoomBinding) -> None:
         stop = getattr(self, "_stop", None)
@@ -4573,6 +4596,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         await self._ensure_connector(binding)
                         registered_now = True
                     else:
+                        hold = self._heartbeat_hold(binding)
+                        if hold > 0:
+                            # Contract P2c-3e: another presence caller's heartbeat 429.
+                            retry_delay = hold
+                            continue
                         heartbeat = await self._call(
                             binding,
                             lambda api: api.heartbeat(binding.room_id, binding.connector_session_id),
@@ -4610,6 +4638,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                         # Contract P2c-3e: retried after its Retry-After; while the
                         # lease holds it is not a failed heartbeat.
                         logger.info("Room %s heartbeat rate limited; retried in %.0f s", binding.room_id, rate_limited)
+                        self._hold_heartbeat(binding, rate_limited)
                         retry_delay = rate_limited
                         continue
                     logger.warning("Room %s heartbeat failed; lease will truthfully expire: %s", binding.room_id, error)
@@ -4621,6 +4650,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     retry_delay = getattr(error, "recovery_delay", None)
                     if retry_delay is None:
                         retry_delay = self._recovery_failed(binding, error)
+                        if error.status == 429:
+                            self._hold_heartbeat(binding, retry_delay)  # the lease ran out first
                     if error.session_lost:
                         # Contract P2c-3a: only the Room's own JSON answer
                         # loses the session; the next heartbeat registers,
