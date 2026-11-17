@@ -7,6 +7,16 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.111 — Link features: paired with OpenClaw, no Hermes behaviour change
+
+Paired release for OpenClaw's link parity (new sessions, archive, approvals, files and photos over the device link).
+The contract carries the paragraph "Link features (additive, frame version 1, 2026-11-17)" (contract e2784a23,
+byte-identical to OpenClaw). It amends L1o for OpenClaw only: a Hermes device ignores
+`limits.openclawLinkFeatures`, and `hermes-opened` and the `hermes-open-failed` reason rules are unchanged (LF-17,
+`tests/test_link_features.py`). `conformance.json` lists the shared `parityL1oLinkFeatures` and
+`parityL1oFeatureCases`; LF-01 to LF-16 are marked `openclaw-only`. Also carries the test-hang fix: `test_parity_p7c`
+fails within minutes instead of hanging when a condition never comes. No runtime change and no persisted state migration.
+
 ## 1.0.110 — A failed channel open says why, when the Harness accepts it
 
 The contract carries the paragraph "Open-failure reason (additive, frame version 1)" (canary 21, contract 82e2e311,

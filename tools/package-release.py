@@ -84,6 +84,7 @@ PAYLOAD = (
     "tests/test_parity_l1_room.py",
     "tests/test_link_user_agent.py",
     "tests/test_open_failed_reason.py",
+    "tests/test_link_features.py",
     "tests/test_parity_p1.py",
     "tests/test_parity_p1a.py",
     "tests/test_parity_p2a.py",
