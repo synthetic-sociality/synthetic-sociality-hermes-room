@@ -604,5 +604,74 @@ class RecoveryBudgetTests(unittest.TestCase):
             self.assertGreaterEqual(len(gateway.all_starts()), BUDGET * 4)
 
 
+    def test_rrb_05_cross_path_a_heartbeat_loop_429_holds_the_stream_entry_and_not_a_sibling(self):
+        # Paula's OP-12 probe (H-RRB05-01): the heartbeat loop's heartbeat is
+        # answered 429 Retry-After 30 at fake 1020; a stream pass enters
+        # _ensure_connector at 1021 while the session is current. No presence
+        # caller of that membership heartbeats before 1050; the sibling keeps
+        # its own 20 s cadence.
+        with tempfile.TemporaryDirectory() as directory:
+            gateway = Installation(directory, 2)
+            room = gateway.room(1)
+            room.heartbeat_script = [rate_limited(header="30"), None]
+            observed = {}
+
+            async def run():
+                try:
+                    gateway.beat(1)
+                    gateway.beat(2)
+                    await gateway.clock.advance(21.0)
+                    observed["answer"] = await gateway.instance._ensure_connector(gateway.binding(1))
+                    observed["at-1021"] = list(room.heartbeats())
+                    await gateway.clock.advance(28.5)  # to 1049.5
+                    observed["at-1049.5"] = list(room.heartbeats())
+                    await gateway.clock.advance(31.0)
+                finally:
+                    await gateway.stop()
+
+            with gateway.running():
+                asyncio.run(run())
+            self.assertEqual(observed["at-1021"], [(1020.0, False)], "the stream entry heartbeated before Retry-After")
+            self.assertEqual(observed["at-1049.5"], [(1020.0, False)])
+            beats = room.heartbeats()
+            self.assertEqual(beats[:2], [(1020.0, False), (1050.0, True)], beats)
+            self.assertEqual(room.starts(), [], "the session stayed current: no registration")
+            self.assertEqual(gateway.instance._room_map("_recovery_steps").get(room_id(1), 0), 0)
+            self.assertEqual(gateway.room(2).heartbeats()[:4],
+                             [(1020.0, True), (1040.0, True), (1060.0, True), (1080.0, True)],
+                             "a sibling membership was delayed")
+
+    def test_rrb_05_cross_path_a_stream_entry_429_holds_the_heartbeat_loop(self):
+        # The other direction: the stream pass's heartbeat (its last accepted
+        # heartbeat is older than the interval) is answered 429 with only the
+        # retryAfterSeconds detail (35 s) at 1030; the heartbeat loop, due at
+        # 1040, waits until 1065.
+        with tempfile.TemporaryDirectory() as directory:
+            gateway = Installation(directory, 1)
+            room = gateway.room(1)
+            room.heartbeat_script = [None, rate_limited(detail=35), None]
+            observed = {}
+
+            async def run():
+                try:
+                    gateway.beat(1)
+                    await gateway.clock.advance(30.0)  # accepted at 1020
+                    gateway.instance._room_map("_heartbeat_accepted_at").pop(room_id(1), None)
+                    observed["answer"] = await gateway.instance._ensure_connector(gateway.binding(1))
+                    await gateway.clock.advance(34.5)  # to 1064.5
+                    observed["at-1064.5"] = list(room.heartbeats())
+                    await gateway.clock.advance(20.0)
+                finally:
+                    await gateway.stop()
+
+            with gateway.running():
+                asyncio.run(run())
+            self.assertEqual(observed["answer"], {})
+            self.assertEqual(observed["at-1064.5"], [(1020.0, True), (1030.0, False)],
+                             "the heartbeat loop heartbeated before the stream's Retry-After")
+            self.assertEqual(room.heartbeats()[:3], [(1020.0, True), (1030.0, False), (1065.0, True)])
+            self.assertEqual(room.starts(), [])
+            self.assertEqual(gateway.entry(1)["connection"], "connected")
+
 if __name__ == "__main__":
     unittest.main()
