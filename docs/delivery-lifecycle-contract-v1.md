@@ -282,9 +282,11 @@ P2c-3e Recovery budget (2026-11-17). All memberships of one connector installati
 the installation at most 6 connector-session registrations start in any 60 seconds (P2c-3), and a membership that is
 over the budget waits for the next free slot instead of failing. Each membership's recovery delay follows the P2c-3a
 schedule with its jitter and persists across consecutive failed registrations and failed heartbeats of the same
-outage; it is reset only by a heartbeat that the Room accepts on the new session. An HTTP 429 answer delays that
-membership at least by its `Retry-After` (or `retryAfterSeconds`). Heartbeats of a membership whose session is current
-are never delayed by the budget, and a membership stopped by the Room (P2c-3d) does not use it.
+outage; it is reset only by a heartbeat that the Room accepts on the new session. An HTTP 429 answer to a registration
+delays that membership's next registration at least by its `Retry-After` (or `retryAfterSeconds`); an HTTP 429 answer
+to a heartbeat of a current session is retried after its `Retry-After` and does not count as a failed heartbeat unless
+the lease expires first. Heartbeats of a membership whose session is current are never delayed by the budget, and a
+membership stopped by the Room (P2c-3d) does not use it.
 
 P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
 connection state, last error code, last gate wait and its reason, last reconnect and outage length, web reading per P2c-6),
