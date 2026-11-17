@@ -284,6 +284,30 @@ class LinkStatusCommandTests(LinkTestCase):
                 path.write_text(content, encoding="utf-8")
                 self.assertEqual(self.status(self.other_state).splitlines(), expected)
 
+    def test_lsc_04_a_deeply_nested_status_file_never_fails_the_command(self):
+        """LSC-04 deeply nested: 100000 opening brackets, also with their closing ones (OP-12 F1)."""
+        record = self.record(self.other_store)
+        expected = self.record_lines(record) + [NO_STATUS]
+        path = self.other_store / "status.json"
+        contents = {
+            "deeply nested, opening brackets only": "[" * 100000,
+            "deeply nested, opening and closing brackets": "[" * 100000 + "]" * 100000,
+        }
+        for name, content in contents.items():
+            with self.subTest(status_file=name):
+                path.write_text(content, encoding="utf-8")
+                out, err = io.StringIO(), io.StringIO()
+                with state_path_scope(self.other_state), contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(err):
+                    try:
+                        code = cli.dispatch(argparse.Namespace(room_command="link", action="status", yes=False))
+                    except RecursionError as error:
+                        self.fail(f"the command ended with a traceback: {type(error).__name__}")
+                self.assertEqual((code, err.getvalue()), (0, ""))
+                self.assertNotIn("Traceback", out.getvalue())
+                self.assertNotIn("RecursionError", out.getvalue())
+                self.assertEqual(out.getvalue().splitlines(), expected)
+
     def test_lsc_04_a_missing_or_unreadable_host_configuration_never_fails_the_command(self):
         record = self.record(self.other_store)
         self.gateway_status(self.other_store, {"state": "connected", "deviceId": DEVICE, "channels": 1})
