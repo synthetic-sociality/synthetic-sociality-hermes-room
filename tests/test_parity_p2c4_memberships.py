@@ -23,7 +23,7 @@ from test_parity_p15 import time_limit
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
 CONTRACT = (ROOT / "docs" / "delivery-lifecycle-contract-v1.md").read_text()
 local_status = adapter.local_status
-CONTRACT_SHA256 = "9ab72778cfd10e51f99d599e5901bb3ec96fb4cb003132ad86f8a9db5aa9b5ac"
+CONTRACT_SHA256 = "0dc18a4ffe2b227728148a24c7a4a5835721c226bf68137423a95732ec146969"
 
 
 def method_name(case: str) -> str:

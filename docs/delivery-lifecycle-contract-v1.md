@@ -288,6 +288,21 @@ to a heartbeat of a current session is retried after its `Retry-After` and does 
 the lease expires first. Heartbeats of a membership whose session is current are never delayed by the budget, and a
 membership stopped by the Room (P2c-3d) does not use it.
 
+P2c-3f Request discipline (2026-11-18). A connector keeps each (Room, membership)'s ordinary Room calls well inside
+that membership's request allowance. While it waits for a requested turn to be granted, it learns the grant from the
+event read it already runs, without an additional state read for that grant. Where a Room state read is required instead,
+the first read starts no earlier than 2 seconds after the turn request; after each successful read that shows no grant,
+the minimum wait doubles to 4, 8 and then 10 seconds, remaining at 10 seconds. No such read starts at or after the
+turn's lease deadline; if the next eligible read would reach or pass that deadline, the connector stops waiting at the
+deadline without a final read. A grant received through the existing event read ends this wait immediately. Failed
+contacts retain P2c-3a handling, including Retry-After, and never shorten these minimum waits. For one received event
+batch of one (Room, membership), the connector reads the Room state at most once and reuses that answer only within
+that batch and membership; it never treats a cached answer as fresh authority for a post or a lease renewal. It sends
+at most one `preparing_response` activity per (Room, membership, turn) in any rolling 5 seconds. These bounds never
+delay a heartbeat (P2c-3e), a post, an acknowledgement or a stop (P2c-3d); their existing authority, retry and stop rules
+still apply. A membership stopped by the Room starts none of these waits or activities until its existing renewal or
+re-admission rules permit it.
+
 P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
 connection state, last error code, last gate wait and its reason, last reconnect and outage length, web reading per P2c-6),
 with no secrets and no message bodies, for the host watchdog. Additions to the file are additive: the schema name stays.

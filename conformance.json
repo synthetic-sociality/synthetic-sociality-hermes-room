@@ -352,6 +352,16 @@
     "RRB-04 heartbeats of current sessions are never delayed by the budget, and a membership stopped by the Room does not use it",
     "RRB-05 a 429 on a heartbeat of a current session is retried after Retry-After and, while the lease holds, is not counted as a failure"
   ],
+  "parityP2c3fCases": [
+    "RDC-01 an event-read grant ends the wait immediately with zero extra grant-state reads",
+    "RDC-02 fallback state-read waits are at least 2, 4, 8, 10, 10 seconds; early reads fail the case",
+    "RDC-03 no state read starts at or after the lease deadline, including a lease shorter than 2 seconds and a next wait crossing the deadline",
+    "RDC-04 one multi-event batch performs at most one state read; another batch may read again; another membership never shares its answer",
+    "RDC-05 preparing_response allows the first send and a send at 5 seconds, refuses another before 5 seconds in a rolling window, and keeps different turns and memberships independent",
+    "RDC-06 pending grant/debounce waits do not delay heartbeat, post, acknowledgement or stop; stop cancels the wait and causes no later read/activity",
+    "RDC-07 a Room-stopped membership makes no grant-state read or preparing_response and retains its stop reason; sibling memberships continue",
+    "RDC-08 a failed contact or Retry-After cannot create a tight poll or shorten the minimum wait; an event grant still ends waiting"
+  ],
   "parityL1StatusCommandCases": [
     "LSC-01 the status file the gateway writes is found by the gateway's own path rule, also when it is not beside the link record",
     "LSC-02 the link record without its secrets and the link object are shown as the gateway reports them",
@@ -1412,7 +1422,7 @@
     "L1": "94a5809aa1b1a9121404e15769e69487d5919efb641a8b0c358ba1793dc3842c",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "cd7c4385a19416eb144743973554a4e3938bd2b07c2db243e9543d6e2ca65efa",
+    "P2c": "e8df2e3e637e144c5399a8f4c3f5c0c5f6dac5f68141eaf27dd56029e4573018",
     "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
@@ -1736,5 +1746,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "9ab72778cfd10e51f99d599e5901bb3ec96fb4cb003132ad86f8a9db5aa9b5ac"
+  "contractSha256": "0dc18a4ffe2b227728148a24c7a4a5835721c226bf68137423a95732ec146969"
 }
