@@ -13,11 +13,12 @@ The contract carries the paragraph "P2c-3f Request discipline (2026-11-18)" dire
 byte-identical to OpenClaw). The Room allows 120 general requests per membership per 60 s, and a busy Room made Hermes
 spend most of them on reads. Three changes, each per (Room, membership):
 - **Turn grant.** `_wait_for_turn` (the direct turn of a reply outside a discussion cycle; Hermes waits for a grant
-  nowhere else) no longer replays the turn request every 750 ms. A `turn.granted` event, or a `turn.changed` event whose
-  active turn is this membership's, on the event read it already runs ends the wait at once. Only as a fallback does it
-  read the turn's state (the idempotent replay of the request), the first time 2 s after the request and then 4, 8 and
-  10 s apart, never at or after the turn's lease deadline (the Room's `leaseExpiresAt` when the turn carries one, never
-  later than send's 120 s). A failed read keeps its `Retry-After` and never shortens the wait; a connector stop or a
+  nowhere else) no longer replays the turn request every 750 ms. The Room's `turn.granted` event for this membership's
+  turn (the turn nested under `payload.turn`, as the server sends it; a flat payload is tolerated) on the event read it
+  already runs ends the wait at once. Only as a fallback does it read the turn's state (the idempotent replay of the
+  request), the first time 2 s after the request and then 4, 8 and 10 s apart, never at or after the turn's lease
+  deadline (the `expiresAt` of the turn record in the turn request's answer, flat or nested under `turn`, when it
+  carries one, never later than send's 120 s). A failed read keeps its `Retry-After` and never shortens the wait; a connector stop or a
   Room stop (P2c-3d) ends the wait at once, with the stop reason.
 - **One state read per batch.** The receive path (the epoch fence at the receive boundary, the membership probe of an
   assigned event, session routing, the discussion-cycle preflight and the dispatch fence) reads the Room state at most

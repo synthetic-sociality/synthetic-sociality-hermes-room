@@ -440,14 +440,25 @@ def _forget_batch_state(adapter: Any, binding: RoomBinding) -> None:
         states.pop((binding.room_id, binding.membership_id), None)
 
 
+def _turn_record(value: Any) -> dict[str, Any]:
+    """The Room's turn record: ``value["turn"]`` when nested, as the server's
+    ``turnPayload`` nests it in ``turn.granted``; a flat record is tolerated."""
+    if not isinstance(value, dict):
+        return {}
+    nested = value.get("turn")
+    return nested if isinstance(nested, dict) else value
+
+
 def _turn_lease_deadline(turn: dict[str, Any], start: float, timeout: float) -> float:
     """Contract P2c-3f: the turn's lease deadline on the ``_clock`` scale.
 
-    The Room's ``leaseExpiresAt`` (or ``expiresAt``) when the turn carries one,
+    Taken from the turn record of the turn request's answer (``_turn_record``):
+    the Room's ``expiresAt`` (``leaseExpiresAt`` tolerated) when it carries one,
     never later than ``timeout`` after ``start``.
     """
+    turn = _turn_record(turn)
     deadline = start + timeout
-    for field in ("leaseExpiresAt", "expiresAt"):
+    for field in ("expiresAt", "leaseExpiresAt"):
         raw = str(turn.get(field) or "")
         if not raw:
             continue
@@ -8558,6 +8569,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         source_id: str,
         timeout: float,
     ) -> dict[str, Any]:
+        turn = _turn_record(turn)
         # A replay after an ambiguous finish may return the same idempotent
         # turn already in its terminal state. Continue through the idempotent
         # message/finish calls so the original canonical event is recovered.
@@ -8605,10 +8617,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 # record. Room state only exposes the current grant, so it cannot
                 # distinguish a queued turn that was revoked, expired, or replaced.
                 try:
-                    current = await self._call(
+                    current = _turn_record(await self._call(
                         binding,
                         lambda api: api.request_turn(binding.room_id, observed_seq, source_id),
-                    )
+                    ))
                 except ProtocolError as error:
                     if not error.retryable:
                         raise
@@ -8653,20 +8665,15 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _note_turn_grant(self, binding: RoomBinding, event: dict[str, Any]) -> None:
         """Contract P2c-3f: a turn grant on the event read ends that turn's wait.
 
-        ``turn.granted`` carries the turn, ``turn.changed`` the Room's active
-        turn; either ends the wait of this membership's turn it names.
+        The Room's ``turn.granted`` nests the turn under ``payload.turn``
+        (server ``turnPayload``: turnId, state, holderMembershipId, topicId,
+        grantedAtSeq, expiresAt); a flat payload is tolerated. The server emits
+        no other turn event, so no other event type ends a wait.
         """
         waiters = getattr(self, "_turn_grant_waiters", None)
-        if not waiters:
+        if not waiters or event.get("type") != "turn.granted":
             return
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        event_type = str(event.get("type") or "")
-        if event_type == "turn.granted":
-            turn = payload
-        elif event_type == "turn.changed" and isinstance(payload.get("activeTurn"), dict):
-            turn = payload["activeTurn"]
-        else:
-            return
+        turn = _turn_record(event.get("payload"))
         turn_id = str(turn.get("turnId") or "")
         holder = str(turn.get("holderMembershipId") or "")
         if not turn_id or (holder and holder != binding.membership_id):
