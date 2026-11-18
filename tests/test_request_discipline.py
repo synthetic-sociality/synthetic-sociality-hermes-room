@@ -160,11 +160,19 @@ class Gateway(Installation):
 
         self.instance._publish = publish
 
-    def wait(self, index: int, source: str = "source-1", *, timeout: float = 120.0, lease: float | None = None):
-        """``send``'s grant wait for a turn this membership just requested and the Room queued."""
-        turn = {"turnId": f"turn-{source}", "state": "queued"}
+    def wait(self, index: int, source: str = "source-1", *, timeout: float = 120.0, lease: float | None = None,
+             nested: bool = False):
+        """``send``'s grant wait for a turn this membership just requested and the Room queued.
+
+        The turn record carries the server's ``turnPayload`` keys; its lease is
+        ``expiresAt``. ``nested`` wraps it as ``{"turn": …}``, the event payload's shape.
+        """
+        turn = {"turnId": f"turn-{source}", "state": "queued", "holderMembershipId": self.binding(index).membership_id,
+                "topicId": "topic-1"}
         if lease is not None:
-            turn["leaseExpiresAt"] = datetime.fromtimestamp(time.time() + lease, timezone.utc).isoformat()
+            turn["expiresAt"] = datetime.fromtimestamp(time.time() + lease, timezone.utc).isoformat()
+        if nested:
+            turn = {"turn": turn}
         room = self.room(index)
         room.requested.setdefault(source, self.clock.now)
         task = asyncio.create_task(self.instance._wait_for_turn(self.binding(index), turn, 1, source, timeout))
@@ -195,13 +203,20 @@ def peer_post(gateway: Gateway, index: int = 1, *, to: str | None = "member-8", 
             "actorRole": "participant_agent", "payload": {"body": "my view", "resolvedRecipientMembershipIds": recipients}}
 
 
-def grant(gateway: Gateway, membership: str, source: str = "source-1", *, changed: bool = False) -> dict:
-    """The Room's turn grant on the existing event read."""
+def grant(gateway: Gateway, membership: str, source: str = "source-1", *, flat: bool = False) -> dict:
+    """The Room's turn grant on the existing event read, in the server's exact shape.
+
+    Room server bc9ab0f: ``turn.granted`` (server/domain/event.go:42) with the
+    payload of ``turnPayload`` (turnservice/service.go:815-831):
+    ``{"turn": {"turnId", "state", "holderMembershipId", "topicId", "grantedAtSeq"?, "expiresAt"?}, "reason"?}``.
+    ``flat`` is the older flat shape, tolerated as a fallback only.
+    """
     seq = gateway.next_seq()
-    turn = {"turnId": f"turn-{source}", "holderMembershipId": membership}
-    if changed:
-        return {"id": f"turn-{seq}", "seq": seq, "type": "turn.changed", "payload": {"activeTurn": turn}}
-    return {"id": f"turn-{seq}", "seq": seq, "type": "turn.granted", "payload": turn}
+    turn = {"turnId": f"turn-{source}", "state": "granted", "holderMembershipId": membership, "topicId": "topic-1",
+            "grantedAtSeq": seq,
+            "expiresAt": datetime.fromtimestamp(time.time() + 120, timezone.utc).isoformat()}
+    payload = turn if flat else {"turn": turn, "reason": "queue_advanced"}
+    return {"id": f"turn-{seq}", "seq": seq, "type": "turn.granted", "payload": payload}
 
 
 def ended(task: asyncio.Task):
@@ -265,8 +280,9 @@ class RequestDisciplineConformanceTests(unittest.TestCase):
 
 class RequestDisciplineTests(unittest.TestCase):
     def test_rdc_01_an_event_read_grant_ends_the_wait_at_once_with_no_grant_state_read(self):
-        for changed in (False, True):
-            with self.subTest(event="turn.changed" if changed else "turn.granted"), \
+        # The server's nested payload.turn first; the flat shape is a tolerated fallback.
+        for flat in (False, True):
+            with self.subTest(payload="flat fallback" if flat else "server payload.turn"), \
                     tempfile.TemporaryDirectory() as directory:
                 gateway = Gateway(directory, 1)
                 seen = {}
@@ -274,12 +290,32 @@ class RequestDisciplineTests(unittest.TestCase):
                 async def body():
                     waiting = gateway.wait(1)
                     await gateway.clock.advance(1.0)
-                    await gateway.deliver(1, grant(gateway, "member-1", changed=changed))
+                    await gateway.deliver(1, grant(gateway, "member-1", flat=flat))
                     seen["at"], seen["outcome"] = gateway.clock.now, ended(waiting)
+                    seen["turn"] = waiting.result() if seen["outcome"] == "granted" else {}
 
                 run(gateway, body)
                 self.assertEqual((seen["at"], seen["outcome"]), (START + 1.0, "granted"))
                 self.assertEqual(gateway.room(1).at("grant-read"), [], "the grant came from the event read")
+                self.assertEqual((seen["turn"].get("turnId"), seen["turn"].get("topicId")), ("turn-source-1", "topic-1"),
+                                 "the wait returns the granted turn record")
+
+    def test_rdc_01_turn_changed_is_not_a_server_event_and_ends_no_wait(self):
+        # The Room server emits no turn.changed; an event of that name is ignored.
+        with tempfile.TemporaryDirectory() as directory:
+            gateway = Gateway(directory, 1)
+            seen = {}
+
+            async def body():
+                waiting = gateway.wait(1)
+                await gateway.clock.advance(1.0)
+                seq = gateway.next_seq()
+                await gateway.deliver(1, {"id": f"turn-{seq}", "seq": seq, "type": "turn.changed", "payload": {
+                    "activeTurn": {"turnId": "turn-source-1", "holderMembershipId": "member-1"}}})
+                seen["outcome"] = ended(waiting)
+
+            run(gateway, body)
+            self.assertEqual(seen["outcome"], "pending")
 
     def test_rdc_01_a_grant_for_another_membership_or_turn_does_not_end_the_wait(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -314,13 +350,16 @@ class RequestDisciplineTests(unittest.TestCase):
         # (lease seconds, the reads it allows): a lease under 2 s allows none; a
         # 6 s lease allows the 2 s read, and the next (at 6 s) would reach the
         # deadline; a 10 s lease allows 2 s and 6 s, the next (14 s) crosses it.
-        for lease, expected in ((1.0, []), (1.9, []), (6.0, [2.0]), (10.0, [2.0, 6.0])):
-            with self.subTest(lease=lease), tempfile.TemporaryDirectory() as directory:
+        cases = [(lease, expected, nested) for nested in (False, True)
+                 for lease, expected in ((1.0, []), (1.9, []), (6.0, [2.0]), (10.0, [2.0, 6.0]))]
+        for lease, expected, nested in cases:
+            with self.subTest(lease=lease, turn="nested turn" if nested else "turn record"), \
+                    tempfile.TemporaryDirectory() as directory:
                 gateway = Gateway(directory, 1)
                 seen = {}
 
                 async def body():
-                    waiting = gateway.wait(1, lease=lease)
+                    waiting = gateway.wait(1, lease=lease, nested=nested)
                     await gateway.clock.advance(lease - 0.01)
                     seen["before"] = ended(waiting)
                     await gateway.clock.advance(0.02)
