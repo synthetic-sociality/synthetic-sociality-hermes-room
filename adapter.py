@@ -8609,9 +8609,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 if granted.done():
                     return granted.result()
                 self._turn_wait_wanted(binding)
-                if not_before >= deadline:
-                    # The next eligible read would reach the lease deadline:
-                    # the wait ends there without a final read.
+                if not_before >= deadline or _clock() >= deadline:
+                    # The next eligible read would reach the lease deadline, or
+                    # a late wake already passed it: the wait ends there without
+                    # a final read. No await lies between this check and the
+                    # read below (RD-H-03-01).
                     break
                 # Replaying the same idempotent request returns this turn's durable
                 # record. Room state only exposes the current grant, so it cannot
