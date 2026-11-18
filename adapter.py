@@ -413,6 +413,51 @@ def _clock() -> float:
 RECOVERY_BUDGET_STARTS = 6
 RECOVERY_BUDGET_WINDOW_SECONDS = 60.0
 
+# Contract P2c-3f: while a requested turn waits for its grant, a read of that
+# turn's state starts no earlier than these waits (2, 4, 8, then 10 s), and one
+# membership sends at most one preparing_response per turn in any 5 s.
+TURN_GRANT_FIRST_READ_SECONDS = 2.0
+TURN_GRANT_MAX_READ_SECONDS = 10.0
+PREPARING_RESPONSE_INTERVAL_SECONDS = 5.0
+
+
+async def _changing_call(adapter: Any, binding: RoomBinding, operation: Callable[..., Any], **options) -> Any:
+    """Contract P2c-3f: a call that changes this membership's Room state.
+
+    Afterwards the receive batch of this (Room, membership) reads the Room
+    state afresh instead of reusing its answer.
+    """
+    try:
+        return await adapter._call(binding, operation, **options)
+    finally:
+        _forget_batch_state(adapter, binding)
+
+
+def _forget_batch_state(adapter: Any, binding: RoomBinding) -> None:
+    """Contract P2c-3f: the receive batch of this (Room, membership) reads the Room state afresh."""
+    states = getattr(adapter, "_batch_room_states", None)
+    if states:
+        states.pop((binding.room_id, binding.membership_id), None)
+
+
+def _turn_lease_deadline(turn: dict[str, Any], start: float, timeout: float) -> float:
+    """Contract P2c-3f: the turn's lease deadline on the ``_clock`` scale.
+
+    The Room's ``leaseExpiresAt`` (or ``expiresAt``) when the turn carries one,
+    never later than ``timeout`` after ``start``.
+    """
+    deadline = start + timeout
+    for field in ("leaseExpiresAt", "expiresAt"):
+        raw = str(turn.get(field) or "")
+        if not raw:
+            continue
+        try:
+            expires = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        return min(deadline, start + (expires - time.time()))
+    return deadline
+
 
 class RecoveryBudget:
     """Contract P2c-3e: the registration starts of one installation.
@@ -3342,6 +3387,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     binding, chat_id, "", observed, source_id, body, observed_epoch,
                     None, responds_to_id, open_recipients, coordination_mode="open",
                 )
+                _forget_batch_state(self, binding)
                 self._record_canonical_delivery(
                     binding, source_id, event, completion=None,
                 )
@@ -3405,6 +3451,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding, chat_id, str((turn or {}).get("turnId") or ""), observed, source_id, body, observed_epoch,
                 cycle_attempt, responds_to_id, coordination_mode="coordinated",
             )
+            _forget_batch_state(self, binding)
             completion = None
             if cycle_attempt:
                 cycle_view, attempt_view = cycle_attempt["cycle"], cycle_attempt["attempt"]
@@ -3967,8 +4014,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     retryable=False,
                 )
             try:
-                turn = await self._call(
-                    binding,
+                turn = await _changing_call(
+                    self, binding,
                     lambda api: _with_idempotency_key(api, turn_key).request_turn(
                         chat_id, observed, source_id,
                     ),
@@ -4011,8 +4058,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
         for attempt in range(3):
             try:
-                await self._call(
-                    binding,
+                await _changing_call(
+                    self, binding,
                     lambda api: _with_idempotency_key(
                         api, str(intent["finish"]["idempotency_key"]),
                     ).finish_turn(
@@ -4121,8 +4168,24 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         source_ref = str((metadata or {}).get("reply_to") or self._latest_source.get(chat_id) or "")
         source_id, _dispatch_generation = _decode_dispatch_source(source_ref)
-        if source_id:
-            await self._publish(self._binding(chat_id), source_id, "lifecycle", status="preparing_response", suppress_errors=True)
+        if not source_id:
+            return
+        binding = self._binding(chat_id)
+        if _server_stopped(binding):
+            # Contract P2c-3f: a membership the Room stopped sends no activity.
+            return
+        # Contract P2c-3f: at most one preparing_response per (Room,
+        # membership, turn) in any rolling 5 s; the host may call this often.
+        sent = self._room_map("_preparing_response_sent")
+        now = _clock()
+        for key, at in list(sent.items()):
+            if now - at >= PREPARING_RESPONSE_INTERVAL_SECONDS:
+                sent.pop(key, None)
+        key = (binding.room_id, binding.membership_id, source_id)
+        if key in sent:
+            return
+        sent[key] = now
+        await self._publish(binding, source_id, "lifecycle", status="preparing_response", suppress_errors=True)
 
     async def _watch(self, binding: RoomBinding, *, is_reconnect: bool) -> None:
         # Contract P2c-3a: one schedule, no attempt limit, never handed back
@@ -4297,8 +4360,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             lambda api: valid_event_page(api.events(binding.room_id, self._read_frontier(binding), 8, all_epochs=True)),
             background=True, presence=True,
         )
-        for event in page.get("events") or []:
-            await self._consume(binding, event)
+        # Contract P2c-3f: one page is one received batch.
+        await self._consume_batch(binding, list(page.get("events") or []))
 
     def _read_frontier(self, binding: RoomBinding) -> int:
         """Scan beyond isolated work without acknowledging or deleting it.
@@ -4492,7 +4555,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _ensure_epoch_session_routing(self, binding: RoomBinding) -> None:
         if binding.epoch_session_routing_initialized:
             return
-        state = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
+        state = await self._batch_room_state(binding)
         active_epoch_id = (state.get("activeEpoch") or {}).get("id")
         if not isinstance(active_epoch_id, str) or not active_epoch_id.strip():
             raise ProtocolError(
@@ -4784,7 +4847,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     async def _own_membership_status(self, binding: RoomBinding) -> str:
         """Contract P2c-3b: this membership's status in the Room roster, or ""."""
         try:
-            state = await self._raw_call(binding, lambda api: api.room_state(binding.room_id))
+            state = await self._batch_room_state(binding, raw=True)
         except ProtocolError as error:
             if error.revoked or error.expired:
                 raise
@@ -5332,10 +5395,16 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     event = await asyncio.wait_for(queue.get(), timeout=1)
                 except asyncio.TimeoutError:
                     continue
-                await self._consume(binding, event)
+                # Contract P2c-3f: the events received together are one batch.
+                batch = [event]
+                while not queue.empty():
+                    batch.append(queue.get_nowait())
+                await self._consume_batch(binding, batch)
             await future
+            batch = []
             while not queue.empty():
-                await self._consume(binding, queue.get_nowait())
+                batch.append(queue.get_nowait())
+            await self._consume_batch(binding, batch)
             # The transport cursor is not the durable acknowledgement cursor.
             # on_processing_complete advances the latter after Hermes finishes.
         finally:
@@ -5344,9 +5413,25 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if not future.done():
                 future.cancel()
 
+    async def _consume_batch(self, binding: RoomBinding, events: list[dict[str, Any]]) -> None:
+        """Contract P2c-3f: one received batch reads the Room state at most once."""
+        if not events:
+            return
+        if binding.enabled and not binding.revoked:
+            for event in events:
+                # A grant on the event read ends its turn's wait before anything else.
+                self._note_turn_grant(binding, event)
+        token = self._begin_receive_batch(binding)
+        try:
+            for event in events:
+                await self._consume(binding, event)
+        finally:
+            self._end_receive_batch(binding, token)
+
     async def _consume(self, binding: RoomBinding, event: dict[str, Any]) -> None:
         if not binding.enabled or binding.revoked:
             return
+        self._note_turn_grant(binding, event)
         if _is_assigned_event(event, binding.membership_id):
             await self._membership_active(binding, refresh=True, force=True)
         await self._wait_membership_active(binding)
@@ -5520,10 +5605,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # the reviewed lifecycle allowlist may cross the boundary only to close
         # the local delivery chain; all other contradictory evidence fails
         # closed and remains unacknowledged.
-        receive_state = await self._call(
-            binding, lambda api: api.room_state(binding.room_id),
-            background=True,
-        )
+        receive_state = await self._batch_room_state(binding)
         active_epoch = receive_state.get("activeEpoch") or {}
         active_epoch_id = active_epoch.get("id")
         if not isinstance(active_epoch_id, str) or not active_epoch_id.strip():
@@ -5839,7 +5921,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         self, binding: RoomBinding, event: dict[str, Any], *, state: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if state is None:
-            state = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
+            state = await self._batch_room_state(binding)
         active_epoch = state.get("activeEpoch") or {}
         if not active_epoch.get("id"):
             return None
@@ -5900,8 +5982,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             ),
         }
         try:
-            return await self._call(
-                binding,
+            return await _changing_call(
+                self, binding,
                 lambda api: api.start_discussion_cycle(binding.room_id, request),
                 background=True,
             )
@@ -5981,8 +6063,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._claim_refusals = refusals
         refusals.pop(binding.room_id, None)
         try:
-            claimed = await self._call(
-                binding,
+            claimed = await _changing_call(
+                self, binding,
                 lambda api: (
                     _bounded_protocol(api, request_seconds) if request_seconds else api
                 ).claim_discussion_attempt(binding.room_id, cycle_id),
@@ -6030,8 +6112,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         step = 0
         while True:
             try:
-                await self._call(
-                    binding,
+                await _changing_call(
+                    self, binding,
                     lambda api: api.complete_discussion_attempt(
                         binding.room_id, str(cycle["id"]), str(attempt["id"]), payload,
                     ),
@@ -6230,7 +6312,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # The authenticated current-epoch fence precedes recovery as well as
         # new model dispatch. A frozen historical result must never regain an
         # outbound I/O path merely because the process restarted.
-        state = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
+        state = await self._batch_room_state(binding)
         active_epoch = state.get("activeEpoch") or {}
         starts_at = _known_epoch_start(active_epoch.get("startsAtSeq"))
         if starts_at and seq < starts_at:
@@ -8488,33 +8570,161 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 code="turn_not_active",
                 retryable=False,
             )
-        deadline = asyncio.get_running_loop().time() + timeout
-        while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0.75)
-            # Replaying the same idempotent request returns this turn's durable
-            # record. Room state only exposes the current grant, so it cannot
-            # distinguish a queued turn that was revoked, expired, or replaced.
-            current = await self._call(
-                binding,
-                lambda api: api.request_turn(binding.room_id, observed_seq, source_id),
-            )
-            if current.get("turnId") != turn.get("turnId"):
-                raise ProtocolError(
-                    "Idempotent turn replay returned a different turn",
-                    status=409,
-                    code="idempotency_mismatch",
-                    retryable=False,
-                )
-            if current.get("state") in {"granted", "finished"}:
-                return current
-            if current.get("state") in {"revoked", "expired"}:
-                raise ProtocolError(
-                    "Room turn is no longer active",
-                    status=409,
-                    code="turn_not_active",
-                    retryable=False,
-                )
+        # Contract P2c-3f: this is the only place Hermes waits for a grant. The
+        # grant normally arrives on the event read this membership already runs
+        # (_note_turn_grant); the turn's state is read only as a fallback, the
+        # first read 2 s after the request and then 4, 8 and 10 s apart, never
+        # at or after the turn's lease deadline. A stop ends the wait at once.
+        start = _clock()
+        deadline = _turn_lease_deadline(turn, start, timeout)
+        key = (binding.room_id, binding.membership_id, str(turn.get("turnId") or ""))
+        waiters = self._room_map("_turn_grant_waiters")
+        granted = asyncio.get_running_loop().create_future()
+        waiters[key] = granted
+        stop = getattr(self, "_stop", None)
+        stopped = asyncio.ensure_future(stop.wait()) if stop is not None else asyncio.get_running_loop().create_future()
+        wait = TURN_GRANT_FIRST_READ_SECONDS
+        not_before = start + wait
+        try:
+            while True:
+                self._turn_wait_wanted(binding)
+                until = min(not_before, deadline)
+                sleeper = asyncio.ensure_future(asyncio.sleep(max(0.0, until - _clock())))
+                try:
+                    await asyncio.wait({granted, stopped, sleeper}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    sleeper.cancel()
+                if granted.done():
+                    return granted.result()
+                self._turn_wait_wanted(binding)
+                if not_before >= deadline:
+                    # The next eligible read would reach the lease deadline:
+                    # the wait ends there without a final read.
+                    break
+                # Replaying the same idempotent request returns this turn's durable
+                # record. Room state only exposes the current grant, so it cannot
+                # distinguish a queued turn that was revoked, expired, or replaced.
+                try:
+                    current = await self._call(
+                        binding,
+                        lambda api: api.request_turn(binding.room_id, observed_seq, source_id),
+                    )
+                except ProtocolError as error:
+                    if not error.retryable:
+                        raise
+                    # A failed read keeps P2c-3a's Retry-After and never
+                    # shortens the minimum wait; an event grant still ends it.
+                    wait = min(wait * 2, TURN_GRANT_MAX_READ_SECONDS)
+                    not_before = _clock() + max(wait, error.retry_after)
+                    continue
+                if current.get("turnId") != turn.get("turnId"):
+                    raise ProtocolError(
+                        "Idempotent turn replay returned a different turn",
+                        status=409,
+                        code="idempotency_mismatch",
+                        retryable=False,
+                    )
+                if current.get("state") in {"granted", "finished"}:
+                    return current
+                if current.get("state") in {"revoked", "expired"}:
+                    raise ProtocolError(
+                        "Room turn is no longer active",
+                        status=409,
+                        code="turn_not_active",
+                        retryable=False,
+                    )
+                wait = min(wait * 2, TURN_GRANT_MAX_READ_SECONDS)
+                not_before = _clock() + wait
+        finally:
+            stopped.cancel()
+            if waiters.get(key) is granted:
+                waiters.pop(key, None)
         raise ProtocolError("Room turn remained queued until timeout", retryable=True)
+
+    def _turn_wait_wanted(self, binding: RoomBinding) -> None:
+        """Contract P2c-3f: a stopped connector or a membership the Room stopped waits no longer."""
+        stop = getattr(self, "_stop", None)
+        if stop is not None and stop.is_set():
+            raise ProtocolError("Connector stopped while the turn waited", code="connector_stopped", retryable=False)
+        if _server_stopped(binding):
+            reason = binding.disabled_reason or ("credential_revoked" if binding.revoked else "credential_expired")
+            raise ProtocolError("Room membership stopped while the turn waited", code=reason, retryable=False)
+
+    def _note_turn_grant(self, binding: RoomBinding, event: dict[str, Any]) -> None:
+        """Contract P2c-3f: a turn grant on the event read ends that turn's wait.
+
+        ``turn.granted`` carries the turn, ``turn.changed`` the Room's active
+        turn; either ends the wait of this membership's turn it names.
+        """
+        waiters = getattr(self, "_turn_grant_waiters", None)
+        if not waiters:
+            return
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_type = str(event.get("type") or "")
+        if event_type == "turn.granted":
+            turn = payload
+        elif event_type == "turn.changed" and isinstance(payload.get("activeTurn"), dict):
+            turn = payload["activeTurn"]
+        else:
+            return
+        turn_id = str(turn.get("turnId") or "")
+        holder = str(turn.get("holderMembershipId") or "")
+        if not turn_id or (holder and holder != binding.membership_id):
+            return
+        waiter = waiters.get((binding.room_id, binding.membership_id, turn_id))
+        if waiter is not None and not waiter.done():
+            waiter.set_result({**turn, "turnId": turn_id, "state": "granted"})
+
+    def _end_turn_waits(self, binding: RoomBinding) -> None:
+        """Contract P2c-3f: the Room stopped this membership; its turn waits end now, with its reason."""
+        for (room_id, membership_id, _turn), waiter in list((getattr(self, "_turn_grant_waiters", None) or {}).items()):
+            if room_id == binding.room_id and membership_id == binding.membership_id and not waiter.done():
+                waiter.set_exception(ProtocolError(
+                    "Room membership stopped while the turn waited",
+                    code=binding.disabled_reason or "credential_revoked", retryable=False,
+                ))
+
+    def _receive_key(self, binding: RoomBinding) -> tuple[str, str]:
+        return binding.room_id, binding.membership_id
+
+    def _begin_receive_batch(self, binding: RoomBinding) -> object:
+        """Contract P2c-3f: one received event batch of this (Room, membership) starts."""
+        token = object()
+        self._room_map("_receive_batches")[self._receive_key(binding)] = token
+        self._room_map("_batch_room_states").pop(self._receive_key(binding), None)
+        return token
+
+    def _end_receive_batch(self, binding: RoomBinding, token: object) -> None:
+        key = self._receive_key(binding)
+        if self._room_map("_receive_batches").get(key) is token:
+            self._room_map("_receive_batches").pop(key, None)
+            self._room_map("_batch_room_states").pop(key, None)
+
+    async def _batch_room_state(self, binding: RoomBinding, *, raw: bool = False) -> dict[str, Any]:
+        """Contract P2c-3f: the Room state for the receive path, read at most once per batch.
+
+        Outside a batch (and for every post, turn or lease renewal, which never
+        call this) the state is read afresh. The answer is reused only within
+        the batch and membership that read it.
+        """
+        key = self._receive_key(binding)
+        token = (getattr(self, "_receive_batches", None) or {}).get(key)
+        states = self._room_map("_batch_room_states")
+        cached = states.get(key)
+        if token is not None and cached is not None and cached[0] is token:
+            answer = cached[1]
+            roster = answer.get("roster") if isinstance(answer, dict) else None
+            own = next((member for member in roster if isinstance(member, dict)
+                        and member.get("membershipId") == binding.membership_id), None) if isinstance(roster, list) else None
+            if raw or not own or own.get("status") in {None, "", "active"}:
+                return answer
+        if raw:
+            answer = await self._raw_call(binding, lambda api: api.room_state(binding.room_id))
+        else:
+            answer = await self._call(binding, lambda api: api.room_state(binding.room_id), background=True)
+        if token is not None and (getattr(self, "_receive_batches", None) or {}).get(key) is token:
+            states[key] = (token, answer)
+        return answer
 
     async def _publish(
         self,
@@ -9201,6 +9411,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         update(revoke_generation)
         binding.disabled_reason = "credential_revoked"
         self._stop_live_binding(binding, reason="credential_revoked")
+        self._end_turn_waits(binding)
 
     def _expire(self, binding: RoomBinding) -> None:
         """Stop an expired binding without turning expiry into revocation."""
@@ -9228,6 +9439,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         # every sibling Room's listener from its send path (1.0.102).
         update(expire_generation)
         self._stop_live_binding(binding, reason="credential_expired")
+        self._end_turn_waits(binding)
 
 
 def _restore_escaped_json_layout(candidate: str) -> str:
