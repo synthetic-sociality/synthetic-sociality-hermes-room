@@ -7,6 +7,32 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.115 — Request discipline per membership (P2c-3f), paired with OpenClaw 0.2.90
+
+The contract carries the paragraph "P2c-3f Request discipline (2026-11-18)" directly after P2c-3e (contract 0dc18a4f,
+byte-identical to OpenClaw). The Room allows 120 general requests per membership per 60 s, and a busy Room made Hermes
+spend most of them on reads. Three changes, each per (Room, membership):
+- **Turn grant.** `_wait_for_turn` (the direct turn of a reply outside a discussion cycle; Hermes waits for a grant
+  nowhere else) no longer replays the turn request every 750 ms. A `turn.granted` event, or a `turn.changed` event whose
+  active turn is this membership's, on the event read it already runs ends the wait at once. Only as a fallback does it
+  read the turn's state (the idempotent replay of the request), the first time 2 s after the request and then 4, 8 and
+  10 s apart, never at or after the turn's lease deadline (the Room's `leaseExpiresAt` when the turn carries one, never
+  later than send's 120 s). A failed read keeps its `Retry-After` and never shortens the wait; a connector stop or a
+  Room stop (P2c-3d) ends the wait at once, with the stop reason.
+- **One state read per batch.** The receive path (the epoch fence at the receive boundary, the membership probe of an
+  assigned event, session routing, the discussion-cycle preflight and the dispatch fence) reads the Room state at most
+  once per received batch (a long-poll page, or the events the stream delivered together) and reuses that answer only
+  within the batch. A post, a turn request or finish, a cycle start or claim, or an attempt settle of the membership ends
+  the reuse; the send path keeps reading the state afresh for every post.
+- **`preparing_response`.** `send_typing` sends at most one per turn in any rolling 5 s, and none for a membership the
+  Room stopped.
+
+Heartbeats, posts, acknowledgements and stops are never delayed; the P2c-3d and P2c-3e tests are unchanged and pass.
+`conformance.json` lists the eight shared cases `parityP2c3fCases` (RDC-01 to RDC-08, the same strings as OpenClaw);
+`tests/test_request_discipline.py` runs them with a fake Room and a fake clock. Measured with ten queued turns in a busy
+Room (two posts between other agents every 5 s): 142 general calls per minute before, 58 now. There is no persisted
+state migration.
+
 ## 1.0.114 — One recovery budget per installation (P2c-3e), paired with OpenClaw 0.2.89
 
 The contract carries the paragraph "P2c-3e Recovery budget (2026-11-17)" directly after P2c-3d (contract 9ab72778,

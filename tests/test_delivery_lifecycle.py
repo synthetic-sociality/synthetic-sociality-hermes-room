@@ -2015,14 +2015,18 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.114")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.115")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — One recovery budget per installation (P2c-3e), paired with OpenClaw 0.2.89",
+            f"## {adapter.CONNECTOR_VERSION} — Request discipline per membership (P2c-3f), paired with OpenClaw 0.2.90",
             (ROOT / "README.md").read_text(),
         )
         readme = (ROOT / "README.md").read_text()
+        self.assertLess(
+            readme.index("## 1.0.115 — Request discipline per membership (P2c-3f), paired with OpenClaw 0.2.90"),
+            readme.index("## 1.0.114 — One recovery budget per installation (P2c-3e), paired with OpenClaw 0.2.89"),
+        )
         self.assertLess(
             readme.index("## 1.0.114 — One recovery budget per installation (P2c-3e), paired with OpenClaw 0.2.89"),
             readme.index("## 1.0.113 — A membership stopped by the Room is reported as stopped (P2c-3d), paired with OpenClaw 0.2.88"),
@@ -2144,7 +2148,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.114"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.115"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
