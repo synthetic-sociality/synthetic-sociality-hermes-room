@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import heapq
 import os
 import sys
 import tempfile
@@ -372,6 +373,34 @@ class RequestDisciplineTests(unittest.TestCase):
                 self.assertTrue(all(at < lease for at in reads))
                 self.assertEqual(seen["before"], "pending", "the wait lasts to the deadline")
                 self.assertNotEqual(seen["after"], "pending", "the wait ends at the deadline, without a final read")
+
+    def test_rdc_03_a_wake_serviced_after_the_deadline_starts_no_read(self):
+        # Paula's RD-H-03-01: a busy event loop services the 2 s wake of a turn
+        # with a 6 s lease only at 7 s, after the deadline: no read may start
+        # then. Serviced at 3 s (the control), the eligible read happens at 3 s.
+        for lag, expected in ((7.0, []), (3.0, [3.0])):
+            with self.subTest(serviced_at=lag), tempfile.TemporaryDirectory() as directory:
+                gateway = Gateway(directory, 1)
+                seen = {}
+
+                async def body():
+                    waiting = gateway.wait(1, lease=6.0)
+                    await gateway.clock.settle()
+                    clock = gateway.clock
+                    clock.now = START + lag  # the timer fires late, all at once
+                    while clock.sleepers and clock.sleepers[0][0] <= clock.now:
+                        _wake, _order, future = heapq.heappop(clock.sleepers)
+                        if not future.done():
+                            future.set_result(None)
+                    await clock.settle()
+                    seen["outcome"] = ended(waiting)
+
+                run(gateway, body)
+                self.assertEqual([at - START for at in gateway.room(1).at("grant-read")], expected)
+                if lag >= 6.0:
+                    self.assertNotEqual(seen["outcome"], "pending", "the wait ends at the deadline without a read")
+                else:
+                    self.assertEqual(seen["outcome"], "pending")
 
     def test_rdc_03_the_wait_without_a_lease_ends_at_its_timeout_without_a_final_read(self):
         with tempfile.TemporaryDirectory() as directory:
