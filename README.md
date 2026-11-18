@@ -28,7 +28,10 @@ spend most of them on reads. Three changes, each per (Room, membership):
 - **`preparing_response`.** `send_typing` sends at most one per turn in any rolling 5 s, and none for a membership the
   Room stopped.
 
-Heartbeats, posts, acknowledgements and stops are never delayed; the P2c-3d and P2c-3e tests are unchanged and pass.
+Heartbeats, posts, acknowledgements and stops are never delayed; the P2c-3d and P2c-3e behaviour is unchanged and their
+tests pass. The P2c-3d test file is byte-unchanged; in `tests/test_recovery_budget.py` one assertion's bytes are
+adjusted: the P2c-3e paragraph test (`test_the_paragraph_follows_p2c_3d_byte_identical`) now expects the next
+paragraph to start with "P2c-3f Request discipline " instead of "P2c-4 Local status. ".
 `conformance.json` lists the eight shared cases `parityP2c3fCases` (RDC-01 to RDC-08, the same strings as OpenClaw);
 `tests/test_request_discipline.py` runs them with a fake Room and a fake clock. Measured with ten queued turns in a busy
 Room (two posts between other agents every 5 s): 142 general calls per minute before, 58 now. There is no persisted
