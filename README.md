@@ -7,6 +7,16 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.116 — Retained terminal delivery intents no longer block credential renewal, paired with OpenClaw 0.2.91
+
+`renewal.quiescent` no longer counts retained terminal delivery intents (posted with lifecycle `complete` or
+`not_required`, `superseded`, `skipped`; `recovery.is_terminal_intent`) as unfinished work. Contract P3-2 keeps the
+newest 32 of them per binding, so any Room with activity never passed the check: the automatic renewal tick skipped it
+before discovery, an owner-initiated renewal was refused, and the credential drifted to expiry. Quarantined intents,
+in-flight intents (`selected`, a pending or blocked lifecycle), `delivery_lifecycle`, `pending_since` and the inbox
+still block exactly as before. Same fix as OpenClaw 0.2.91. `tests/test_renewal_terminal.py` covers it. Contract and
+parity sections are unchanged; there is no persisted state migration.
+
 ## 1.0.115 — Request discipline per membership (P2c-3f), paired with OpenClaw 0.2.90
 
 The contract carries the paragraph "P2c-3f Request discipline (2026-11-18)" directly after P2c-3e (contract 0dc18a4f,

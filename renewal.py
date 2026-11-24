@@ -7,6 +7,7 @@ invocations. No process environment, active profile, model or sibling changes.
 from pathlib import Path
 
 from .protocol import RoomProtocol
+from .recovery import is_terminal_intent
 from .state import RoomBinding, load, state_path_scope
 
 
@@ -22,11 +23,13 @@ def quiescent(binding: RoomBinding) -> bool:
     # Quarantine is inert evidence, not an in-flight credential user. Keep it
     # byte-for-byte; renewal must neither replay it nor acknowledge its gap.
     # Unfinished outbound/lifecycle work still has to drain under the adapter's
-    # receive/dispatch fence before exchanging credentials.
+    # receive/dispatch fence before exchanging credentials. Retained terminal
+    # intents (contract P3-2) are finished history, not unfinished work.
     return not (
-        any(not (intent.get("state") == "quarantined"
-                 and intent.get("delivery_state", "quarantined") == "quarantined"
-                 and intent.get("lifecycle_state", "not_started") == "not_started")
+        any(not is_terminal_intent(intent)
+            and not (intent.get("state") == "quarantined"
+                     and intent.get("delivery_state", "quarantined") == "quarantined"
+                     and intent.get("lifecycle_state", "not_started") == "not_started")
             for intent in binding.delivery_intents.values())
         or binding.delivery_lifecycle
         or any(binding.inbox.get(key) != "quarantined" for key in binding.pending_since)
