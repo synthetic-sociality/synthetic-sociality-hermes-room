@@ -14,7 +14,9 @@ import copy
 import hashlib
 import json
 import logging
+import sys
 import tempfile
+from contextlib import contextmanager
 import types
 import unittest
 from pathlib import Path
@@ -250,6 +252,23 @@ def berlin_expired() -> adapter.RoomBinding:
     return binding
 
 
+def live(name):
+    """The package module as it is now (F2): other test modules call load_adapter() again, which
+    re-executes state, protocol, cli and adapter (never renewal), and renewal.resume imports .cli
+    at call time."""
+    return sys.modules[f"{adapter.__name__.rsplit('.', 1)[0]}.{name}"]
+
+
+@contextmanager
+def live_renewal(shared):
+    """The fake Room on the live cli, and the renewal engine on the live state module."""
+    engine, current = live("renewal"), live("state")
+    with mock.patch.object(live("cli"), "RoomProtocol", renewal_api(shared)), \
+            mock.patch.object(engine, "state_path_scope", current.state_path_scope), \
+            mock.patch.object(engine, "load", current.load):
+        yield
+
+
 def renewal_api(shared):
     """The renewal routes of one fake Room; ``shared`` holds the answers and the calls."""
 
@@ -322,7 +341,7 @@ class RenewalFixture:
         return _Raises(kind)
 
     def resume(self, shared, intent=None):
-        with mock.patch.object(cli, "RoomProtocol", renewal_api(shared)):
+        with live_renewal(shared):
             renewal.resume(self.path, ROOM, intent)
 
     def binding(self):
@@ -382,7 +401,7 @@ class AckAheadRenewalTests(unittest.IsolatedAsyncioTestCase):
         instance = maintenance_instance(fixture.path)
         shared = {"ack": 3222, "calls": []}
         target = fixture.binding()
-        with mock.patch.object(cli, "RoomProtocol", renewal_api(shared)), \
+        with live_renewal(shared), \
                 mock.patch.object(renewal, "discover", return_value=None) as discover:
             await instance._maintain_renewal(target)
             self.assertEqual(fixture.binding().credential_rotation, {})
@@ -421,7 +440,7 @@ class AckAheadRenewalTests(unittest.IsolatedAsyncioTestCase):
         fixture = RenewalFixture()
         instance = maintenance_instance(fixture.path)
         shared = {"ack": 3222, "calls": [], "state": "expired"}
-        with mock.patch.object(cli, "RoomProtocol", renewal_api(shared)), \
+        with live_renewal(shared), \
                 mock.patch.object(renewal, "discover", return_value=None):
             with self.assertLogs(adapter.logger, level=logging.WARNING) as logs:
                 await instance._maintain_renewal(fixture.binding())
@@ -500,6 +519,17 @@ class AckAheadSiteMatrixTests(unittest.TestCase):
                 with self.assertRaises(Exception) as raised:
                     getattr(self, site)(3219)
                 self.assertEqual(getattr(raised.exception, "code", ""), "ack_frontier_mismatch", site)
+
+    def test_every_site_reports_a_non_integer_room_ack_as_the_one_conflict(self):
+        # OP-12 r3 F1: a Room acknowledgement that is a string, a float or missing is the one
+        # conflict at every site, never coerced into a fence.
+        for site in self.SITES:
+            for value in ("3222", 3222.0, None):
+                with self.subTest(site=site, value=value):
+                    with self.assertRaises(Exception) as raised:
+                        getattr(self, site)(value)
+                    self.assertEqual(getattr(raised.exception, "code", ""), "ack_frontier_mismatch", (site, value))
+
 
 if __name__ == "__main__":
     unittest.main()
