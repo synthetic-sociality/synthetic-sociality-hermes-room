@@ -226,7 +226,7 @@ class LocalStatus:
              error_code: str | None = None, connected: bool = False, registered: bool = False,
              inactive: bool | None = None, gate_wait_seconds: float | None = None,
              gate_wait_reason: str | None = None, ledger: dict[str, Any] | None = None,
-             stuck: dict[str, Any] | None = None) -> None:
+             stuck: dict[str, Any] | None = None, renewal_code: str | None = None) -> None:
         """Update one membership's entry and its Room summary; write only when something changed."""
         if not room_id:
             return
@@ -299,6 +299,8 @@ class LocalStatus:
                 code = _code(error_code)
                 entry["lastErrorCode"] = code
                 entry["lastErrorAt"] = _now() if code else entry["lastErrorAt"]
+            if renewal_code is not None:
+                entry["lastRenewalCode"] = _code(renewal_code)
             if ledger is not None:
                 # Contract P3-3: holes and quarantines as codes and seqs only.
                 entry["acknowledgedSeq"] = int(ledger.get("acknowledgedSeq") or 0)

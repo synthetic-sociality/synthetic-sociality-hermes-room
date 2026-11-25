@@ -93,6 +93,8 @@ PAYLOAD = (
     "tests/test_stuck_events.py",
     "tests/test_ack_ahead.py",
     "tests/test_renew_inflight.py",
+    "tests/test_renew_stale.py",
+    "tests/fixtures/berlin-ds-1.0.113-generated.json",
     "tests/test_parity_p1.py",
     "tests/test_parity_p1a.py",
     "tests/test_parity_p2a.py",

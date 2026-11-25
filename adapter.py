@@ -111,7 +111,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.118"
+CONNECTOR_VERSION = "1.0.119"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -2214,7 +2214,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if self._renewal_task is None or self._renewal_task.done():
                 self._renewal_task = asyncio.create_task(self._renewal_loop(), name="room-renewal-maintenance")
         for binding in self._state.bindings:
-            if binding.enabled and not binding.revoked and not binding.credential_rotation and binding.room_id not in self._tasks:
+            if renewal.can_start(binding) and binding.room_id not in self._tasks:
                 self._status_room(binding, connection="connecting")
                 self._tasks[binding.room_id] = asyncio.create_task(
                     self._watch(binding, is_reconnect=is_reconnect),
@@ -4789,15 +4789,19 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         asked = self._room_map("_renewal_asked_at").get(binding.room_id)
         return asked is None or _clock() - asked >= RENEWAL_INTENT_HEALTHY_SECONDS
 
+    def _renewal_status(self, binding: RoomBinding, code: str) -> None:
+        # A stopped membership keeps its stop reason while renewal is probed.
+        self._status_room(binding, renewal_code=code, error_code=code if binding.enabled and not binding.revoked else None)
+
     async def _maintain_renewal(self, binding: RoomBinding) -> None:
         room_id = binding.room_id
         if self._control_fenced():
             return  # Contract P17-3: no renewal starts while owner control is fenced.
-        if not await self._membership_active(binding):
-            return
         if self._renewal_retry_after.get(room_id, 0) > time.monotonic():
             return
         try:
+            if not await self._membership_active(binding):
+                return
             if room_id in self._active_dispatch_rooms or not renewal.quiescent(binding, for_renewal=True):
                 return
             intent = None
@@ -4838,15 +4842,22 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         except renewal.RenewalClosed as closed:
             # ACK-AHEAD-07: the journal is closed with its reason; no retry
             # loop drains this room again until a new owner Renew arrives.
-            logger.warning("Room %s renewal journal closed (%s); a new owner Renew is needed", room_id, closed.reason)
-            self._status_room(binding, error_code=f"renewal_{closed.reason}")
+            self._room_map("_renewal_asked_at").pop(room_id, None)
+            logger.warning("Room %s renewal journal closed (renewal_%s); a new owner Renew is needed for rotation",
+                           room_id, closed.reason)
+            self._renewal_status(binding, f"renewal_{closed.reason}")
         except ProtocolError as error:
+            code = (error.code if error.revoked or error.expired else
+                    f"renewal_http_{error.status}" if error.status else "renewal_transport_error")
+            self._renewal_retry_after[room_id] = time.monotonic() + max(60, error.retry_after)
+            logger.warning("Room %s renewal deferred (%s); exact journal retained", room_id, code)
+            self._renewal_status(binding, code)
             if self._membership_denied(error):
                 await self._membership_active(binding, refresh=True)
-            self._renewal_retry_after[room_id] = time.monotonic() + 60
         except Exception:
             self._renewal_retry_after[room_id] = time.monotonic() + 60
-            logger.warning("Room %s renewal needs attention; exact journal retained", room_id)
+            logger.warning("Room %s renewal deferred (renewal_maintenance_error); exact journal retained", room_id)
+            self._renewal_status(binding, "renewal_maintenance_error")
         finally:
             if room_id in self._renewing_rooms:
                 self._renewing_rooms.discard(room_id)
@@ -4857,8 +4868,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                     # One live binding per Room: a listener still registered
                     # here and the send path keep the same object.
                     live = self._adopt_binding(latest)
-                    if (not self._stop.is_set() and live.enabled and not live.revoked
-                            and not live.credential_rotation and room_id not in self._tasks):
+                    if (not self._stop.is_set() and not self._control_fenced()
+                            and renewal.can_start(live) and room_id not in self._tasks):
                         self._tasks[room_id] = asyncio.create_task(
                             self._watch(live, is_reconnect=True), name=f"synthetic-sociality:{room_id}",
                         )
@@ -9400,8 +9411,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         baseline: dict[str, int] = {}
         for live in self._state.bindings:
             room_id = live.room_id
-            if (not self._stop.is_set() and live.enabled and not live.revoked
-                    and not live.credential_rotation and room_id not in self._tasks):
+            if not self._stop.is_set() and renewal.can_start(live) and room_id not in self._tasks:
                 baseline[room_id] = self._registration_count(room_id)
                 self._status_room(live, connection="connecting")
                 self._tasks[room_id] = asyncio.create_task(

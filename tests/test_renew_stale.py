@@ -4,7 +4,6 @@ Room ACK 3222. The historical preflight failed *after* the writer durably
 recorded the grant. In particular its protected snapshot lacks renewal_closed.
 """
 import asyncio
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,7 +38,7 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
             return base.request_credential_renewal(api, room, request_id, digest, **options)
 
         def status(api, room, request_id):
-            return {**base.credential_renewal_request(api, room, request_id), "baseCredentialGeneration": test.generation}
+            return {**base.credential_renewal_request(api, room, request_id), "baseCredentialGeneration": test.generation, "grantId": "masked-grant"}
 
         def redeem(api, *args):
             if test.error_stage == "redeem":
@@ -56,6 +55,12 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
                 raise live("protocol").ProtocolError("base credential was revoked", status=401, code="credential_revoked")
             return base.room_state(api, room)
 
+        # The persisted trace predates February 2027; keep it reproducible
+        # when the suite runs beyond the fixture's historical expiry date.
+        passed = adapter.renewal._passed
+        clock = mock.patch.object(adapter.renewal, "_passed", lambda raw, now: passed(raw, 1795597200))
+        clock.start()
+        self.addCleanup(clock.stop)
         self.api.request_credential_renewal = request
         self.api.credential_renewal_request = status
         self.api.redeem_credential_renewal = redeem
@@ -63,6 +68,7 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
         self.api.room_state = state
         for obj, field, value in [
             (live("cli"), "RoomProtocol", self.api),
+            (adapter, "ProtocolError", live("cli").ProtocolError),
             (adapter.renewal, "load", live("state").load),
             (adapter.renewal, "state_path_scope", live("state").state_path_scope),
         ]:
@@ -92,17 +98,19 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.terminal_evidence, initial.terminal_evidence)
         self.assertEqual(saved.acknowledged_cursor, 3220)
         self.instance._watch.assert_awaited_once()
-        self.instance._status_room.assert_called_with(mock.ANY, error_code="renewal_grant_expired")
+        self.instance._status_room.assert_called_with(mock.ANY, renewal_code="renewal_grant_expired", error_code="renewal_grant_expired")
         self.assertEqual(len(logs.output), 1)
         # Normal ACK recovery after the watcher restarts advances the frontier
         # without dispatching a turn for previously acknowledged evidence.
-        harness = Harness(saved, AheadRoom(room_max(3222)), self.path.parent, persist=True)
+        harness = Harness(saved, AheadRoom(room_max(3224)), self.path.parent, persist=True)
+        self.addCleanup(harness.scratch.cleanup)
         harness.save()
-        await harness.instance._complete_event(saved, 3221)
-        self.assertEqual(harness.reload().acknowledged_cursor, 3222)
+        with state_store.state_path_scope(harness.state_file):
+            await harness.instance._complete_event(saved, 3221)
+            await harness.instance._consume_locked(saved, {"id": "ev3221", "seq": 3221})
+        self.assertEqual(harness.reload().acknowledged_cursor, 3224)
         self.assertEqual(harness.reload().delivery_intents, {})
-        await harness.instance._complete_event(saved, 3224)
-        self.assertGreater(harness.reload().acknowledged_cursor, 3222)
+        self.assertEqual(harness.api.acks, [3221])
 
     async def test_renew_stale_02_fresh_intent(self):
         await self.maintain()
@@ -144,7 +152,7 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(logs.output), 1)
         self.assertNotIn("SENSITIVE-CANARY", logs.output[0])
         self.instance._watch.assert_not_awaited()
-        self.instance._status_room.assert_called_with(mock.ANY, error_code="renewal_http_503")
+        self.instance._status_room.assert_called_with(mock.ANY, renewal_code="renewal_http_503", error_code="renewal_http_503")
 
     async def test_other_conflict_or_revocation_does_not_discard_the_journal(self):
         for status, code, msg in [
@@ -158,3 +166,21 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
                 await self.maintain()
                 self.assertEqual(self.binding().credential_rotation, original)
                 self.instance._watch.assert_not_awaited()
+
+    async def test_expired_base_never_starts_after_closure(self):
+        b = self.binding()
+        b.credential_expires_at = "2026-01-01T00:00:00Z"
+        b.credential_rotation["base_credential_expires_at"] = b.credential_expires_at
+        state_store.save(state_store.PluginState(bindings=[b]), self.path)
+        await self.maintain()
+        self.assertEqual(self.binding().renewal_closed["reason"], "grant_expired")
+        self.instance._watch.assert_not_awaited()
+        self.assertFalse(adapter.renewal.can_start(self.binding()))
+
+    async def test_changed_protected_field_keeps_the_original_journal(self):
+        b = self.binding()
+        b.display_name = "different"
+        state_store.save(state_store.PluginState(bindings=[b]), self.path)
+        await self.maintain()
+        self.assertEqual(self.binding().credential_rotation, b.credential_rotation)
+        self.instance._watch.assert_not_awaited()

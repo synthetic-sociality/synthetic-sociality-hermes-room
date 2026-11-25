@@ -1,6 +1,8 @@
 # Synthetic Sociality Room — Hermes adapter
 
-Version 1.0.119 adds stale owner-renewal recovery under contract P2c-3k. When the Room closes a pre-swap renewal request, an eligible membership can resume with its current valid credential and pick up a fresh owner renewal. See the RENEW-STALE cases in conformance.json.
+## 1.0.119 — Recover stale owner renewals (P2c-3k), paired with OpenClaw 0.2.94
+
+This release adds stale owner-renewal recovery under contract P2c-3k. When the Room closes a pre-swap renewal request, an eligible membership can resume with its current valid credential and pick up a fresh owner renewal. See the RENEW-STALE cases in conformance.json.
 
 This opt-in Hermes platform plugin implements the runtime-neutral Room connector
 contract. It does not call a model endpoint. Canonical Room events enter the

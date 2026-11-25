@@ -52,6 +52,12 @@ def base_expired(binding: RoomBinding, now: float | None = None) -> bool:
             or (bool(rotation) and _passed(rotation.get("base_credential_expires_at"), now)))
 
 
+def can_start(binding: RoomBinding) -> bool:
+    """Start a watcher only after rotation settles and the retained base is usable."""
+    return (binding.enabled and not binding.revoked and not binding.credential_rotation
+            and not (binding.renewal_closed and base_expired(binding)))
+
+
 def quiescent(binding: RoomBinding, *, for_renewal: bool = False) -> bool:
     # Contract P2c-3j: for a renewal, an expired base never waits for work that
     # needs a valid credential to finish; the work is kept unchanged and resumes

@@ -1291,17 +1291,36 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
         # after the replacement credential becomes active.
         server_state = protocol.room_state(room_id)
         journal = _record_renewal_delivery_snapshot(room_id, journal, server_state)
+    def owner_request(operation, *args, **kwargs):
+        # Only the named grant/request routes, before a replacement can be
+        # activated, can prove that this owner journal is terminal.
+        try:
+            return operation(*args, **kwargs)
+        except ProtocolError as error:
+            if journal.get("owner_initiated") and not error.retryable and not error.non_json:
+                reason = {
+                    (401, "unauthorized", "credential renewal grant expired"): "grant_expired",
+                    (404, "not_found", "room or object not found"): "request_not_found",
+                    (409, "idempotency_mismatch", "credential renewal request was rejected"): "request_rejected",
+                }.get((error.status, error.code, str(error)))
+                if reason:
+                    _close_owner_renewal(room_id, journal, None, reason, report)
+            raise
+
+    def check_owner_status(status):
+        if journal.get("owner_initiated"):
+            reason = {"expired": "owner_request_expired", "rejected": "request_rejected"}.get(status.get("state"))
+            if reason:
+                _close_owner_renewal(room_id, journal, status, reason, report)
+
     if phase == "requesting_owner":
         request_id = str(journal["request_id"])
-        status = protocol.request_credential_renewal(
+        status = owner_request(protocol.request_credential_renewal,
             room_id, request_id,
             hashlib.sha256(str(journal["grant_secret"]).encode("utf-8")).hexdigest(),
             **({"client_instance_id": str(journal["client_instance_id"])} if journal.get("owner_initiated") else {}),
         )
-        if str(status.get("state") or "") == "expired" and journal.get("owner_initiated"):
-            # ACK-AHEAD-07: an expired owner request ends the journal before
-            # any grant or counter check (it carries no grant).
-            _close_owner_renewal(room_id, journal, status, "owner_request_expired", report)
+        check_owner_status(status)
         journal = _record_owner_identity_status(room_id, journal, status)
         if journal.get("owner_initiated") and not journal.get("server_delivery_snapshot"):
             # Expired credentials deliberately cannot read ordinary /state.
@@ -1326,7 +1345,8 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
         if state == "rejected":
             raise ValueError("credential-renewal owner request was rejected; retain the journal for operator review")
         if state != "issued" or not status.get("grantId"):
-            status = protocol.credential_renewal_request(room_id, request_id)
+            status = owner_request(protocol.credential_renewal_request, room_id, request_id)
+            check_owner_status(status)
             journal = _record_owner_identity_status(room_id, journal, status)
             state = str(status.get("state") or "")
             if state == "requested":
@@ -1353,9 +1373,8 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
     if phase == "prepared":
         request_id = str(journal.get("request_id") or "")
         if request_id:
-            status = protocol.credential_renewal_request(room_id, request_id)
-            if str(status.get("state") or "") == "expired" and journal.get("owner_initiated"):
-                _close_owner_renewal(room_id, journal, status, "owner_request_expired", report)
+            status = owner_request(protocol.credential_renewal_request, room_id, request_id)
+            check_owner_status(status)
             journal = _record_owner_identity_status(room_id, journal, status)
             request_state = str(status.get("state") or "")
             if request_state in {"expired", "requested"}:
@@ -1378,7 +1397,7 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
                 raise ValueError("credential-renewal owner request was rejected; retain the journal for operator review")
             if request_state not in {"issued", "redeemed"}:
                 raise ValueError(f"credential-renewal owner request cannot be redeemed (state={request_state or 'unknown'})")
-        redemption = protocol.redeem_credential_renewal(
+        redemption = owner_request(protocol.redeem_credential_renewal,
             room_id, str(journal["grant_id"]), str(journal["grant_secret"]),
             str(journal["replacement_credential"]),
         )
@@ -1741,20 +1760,23 @@ def _reconcile_renewal_ack(room_id: str, journal: dict, member: dict, conflict: 
     return deepcopy(refreshed.credential_rotation)
 
 
-def _close_owner_renewal(room_id: str, journal: dict, status: dict, reason: str, report) -> None:
+def _close_owner_renewal(room_id: str, journal: dict, status: dict | None, reason: str, report) -> None:
     """ACK-AHEAD-07: an owner request that can no longer be issued closes the
     journal (nothing was swapped: the base credential is unchanged), records
     the reason and stops the renewal retries; a new owner Renew is needed."""
-    if (str(status.get("requestId") or "") != str(journal.get("request_id") or "")
-            or str(status.get("roomId") or "") != room_id):
+    if status is not None and (str(status.get("requestId") or "") != str(journal.get("request_id") or "")
+                               or str(status.get("roomId") or "") != room_id):
         raise ValueError("credential-renewal owner status changed request")
 
     def close(current):
         latest = _same_rotation(current, room_id, journal)
-        if str(status.get("membershipId") or latest.membership_id) != latest.membership_id:
+        if status is not None and str(status.get("membershipId") or latest.membership_id) != latest.membership_id:
             raise ValueError("credential-renewal owner status changed room or membership")
         if str(latest.credential_rotation.get("phase") or "") not in {"requesting_owner", "prepared"}:
             raise ValueError("only an unredeemed owner renewal journal can be closed")
+        if (latest.credential != journal["base_credential"]
+                or latest.credential_rotation.get("request_id") != journal.get("request_id")):
+            raise ValueError("owner renewal binding changed before closure")
         latest.renewal_closed = {
             "reason": reason,
             "requestId": str(journal.get("request_id") or ""),
@@ -1775,6 +1797,10 @@ def _same_rotation(current, room_id: str, journal: dict) -> RoomBinding:
         if latest.credential_rotation.get(field) != journal.get(field):
             raise ValueError("credential-renewal journal changed concurrently")
     protected = journal.get("protected_snapshot")
+    # 1.0.113 persisted this snapshot before renewal_closed existed. Only
+    # its known empty default may be supplied; every other field stays exact.
+    if isinstance(protected, dict) and "renewal_closed" not in protected:
+        protected = {**protected, "renewal_closed": {}}
     if protected is not None and protected != _renewal_protected_fields(latest):
         raise ValueError("protected binding state changed during credential renewal")
     return latest

@@ -159,7 +159,8 @@ class RenewInflightConformanceTests(unittest.TestCase):
         end = CONTRACT.index("\nP2c-3j>>>\n", start) + len("\nP2c-3j>>>\n")
         self.assertEqual(hashlib.sha256(CONTRACT[start:end].encode("utf-8")).hexdigest(), BLOCK_SHA256)
         self.assertTrue(CONTRACT[:start].endswith("\nP2c-3i>>>\n\n"))
-        self.assertTrue(CONTRACT[end:].startswith("\nP2c-4 Local status. "))
+        self.assertTrue(CONTRACT[end:].startswith("\n<<<P2c-3k\n"))
+        self.assertIn("\nP2c-3k>>>\n\nP2c-4 Local status. ", CONTRACT[end:])
         self.assertEqual(CONTRACT.count("<<<P2c-3j"), 1)
 
     def test_the_case_names_are_the_shared_ones_and_each_has_a_test(self):
