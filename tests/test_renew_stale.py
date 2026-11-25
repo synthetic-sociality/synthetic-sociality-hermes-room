@@ -4,11 +4,14 @@ Room ACK 3222. The historical preflight failed *after* the writer durably
 recorded the grant. In particular its protected snapshot lacks renewal_closed.
 """
 import asyncio
+import copy
+from dataclasses import asdict
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from test_delivery_lifecycle import configured_instance
 from test_ack_ahead import (
     ROOM, ROOT, AheadRoom, Harness, INTENT, adapter, live, maintenance_instance,
     renewal_api, room_max, state_store,
@@ -201,3 +204,88 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
         await self.maintain()
         self.assertTrue(released)
         self.instance._watch.assert_awaited_once()
+
+    async def test_parked_digital_sovereignty_recovers_its_frozen_post_with_networks_online(self):
+        for already_committed in (False, True):
+            with self.subTest(reply_lost_after_commit=already_committed):
+                await self._exercise_pending_post(already_committed)
+
+    async def _exercise_pending_post(self, already_committed):
+        self.path.write_bytes((ROOT / "tests/fixtures/berlin-ds-1.0.113-generated.json").read_bytes())
+        ds = self.binding()
+        networks = state_store.RoomBinding("https://room.example/api", "networks", "networks-member",
+                                           "synthetic-networks-base", installation_id="inst-1",
+                                           connector_session_id="networks-online")
+        original_networks = asdict(networks)
+        fake_events, posted_requests = {}, []
+        class DeliveryRoom:
+            def room_state(api, room_id):
+                return {"headSeq": 3224, "activeEpoch": {"id": "epoch-1"}}
+
+            def post_message(api, *args, **kwargs):
+                self.assertEqual(args[0], ROOM)
+                frozen = (args, kwargs)
+                posted_requests.append(frozen)
+                key = kwargs["idempotency_key"]
+                if len(posted_requests) == 1:
+                    if already_committed:
+                        fake_events[key] = frozen
+                    raise adapter.ProtocolError("lost reply", retryable=True)
+                if key in fake_events:
+                    self.assertEqual(fake_events[key], frozen)
+                fake_events[key] = frozen
+                return {"id":"canonical-ds-3225", "seq":3225, "ts":"2026-11-25T09:00:00Z"}
+
+        room = DeliveryRoom()
+        def sender(binding):
+            runtime = configured_instance(binding, None, [])
+            runtime._event_seq[ROOM]["evt-5"] = 3224
+            runtime._cycle_attempts = {}
+            runtime._call = lambda _, operation, **kwargs: asyncio.sleep(0, result=operation(room))
+            runtime._publish = mock.AsyncMock()
+            return runtime
+
+        source = adapter._dispatch_source_ref("evt-5", "synthetic-generation")
+        first = await sender(ds)._send_final(ROOM, source, "Frozen DS reply")
+        self.assertFalse(first.success)
+        self.assertEqual(ds.delivery_intents["evt-5"]["delivery_state"], "delivery_pending")
+        self.assertFalse(adapter.renewal.quiescent(ds, for_renewal=True))
+        state_store.save(state_store.PluginState(bindings=[ds, networks]), self.path)
+        before = asdict(self.binding())
+
+        # Both rooms share one adapter after restart. Only DS is parked.
+        self.instance = maintenance_instance(self.path)
+        online = asyncio.create_task(asyncio.Event().wait())
+        self.addAsyncCleanup(self._cancel_task, online)
+        self.instance._tasks[networks.room_id] = online
+        self.instance._state = state_store.load(self.path)
+        def get_request(api, room_id, request_id):
+            self.assertEqual((room_id, request_id), (ROOM, ds.credential_rotation["request_id"]))
+            return {"roomId":ROOM, "membershipId":ds.membership_id, "requestId":request_id, "state":"expired"}
+        with mock.patch.object(self.api, "credential_renewal_request", get_request), \
+                mock.patch.object(self.api, "request_credential_renewal", side_effect=AssertionError("no claim")), \
+                mock.patch.object(self.api, "redeem_credential_renewal", side_effect=AssertionError("no exchange")):
+            await self.maintain()
+        recovered = self.binding()
+        self.assertFalse(recovered.credential_rotation)
+        self.assertEqual({k:v for k,v in asdict(recovered).items() if k not in {"credential_rotation","renewal_closed"}},
+                         {k:v for k,v in before.items() if k not in {"credential_rotation","renewal_closed"}})
+        self.instance._watch.assert_awaited_once()
+        self.assertEqual(self.instance._watch.await_args.args[0].room_id, ROOM)
+        self.assertIs(self.instance._tasks[networks.room_id], online)
+        self.assertFalse(online.done())
+        self.assertEqual(asdict(state_store.load(self.path).binding(networks.room_id)), original_networks)
+        # Retry from disk uses the already selected payload and key, even if a
+        # new caller supplies different content. A canonical receipt ends replay.
+        runtime = sender(recovered)
+        second = await runtime._send_final(ROOM, source, "Different regenerated text")
+        self.assertTrue(second.success, second.error)
+        self.assertEqual(second.message_id, "canonical-ds-3225")
+        self.assertEqual(posted_requests[0], posted_requests[1])
+        self.assertEqual(len(fake_events), 1)
+        self.assertEqual(recovered.delivery_intents["evt-5"]["canonical_event"]["id"], second.message_id)
+
+    @staticmethod
+    async def _cancel_task(task):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
