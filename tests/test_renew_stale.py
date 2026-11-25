@@ -184,3 +184,20 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
         await self.maintain()
         self.assertEqual(self.binding().credential_rotation, b.credential_rotation)
         self.instance._watch.assert_not_awaited()
+
+    async def test_watcher_resumes_after_a_concurrent_control_refusal_lifts_its_fence(self):
+        released = False
+
+        def fenced():
+            return not released and not self.binding().credential_rotation
+
+        async def lift():
+            nonlocal released
+            self.instance._watch.assert_not_awaited()
+            released = True
+
+        self.instance._control_fenced = fenced
+        self.instance._control_fence_lifted = lift
+        await self.maintain()
+        self.assertTrue(released)
+        self.instance._watch.assert_awaited_once()

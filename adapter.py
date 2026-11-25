@@ -4860,7 +4860,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             self._renewal_status(binding, "renewal_maintenance_error")
         finally:
             if room_id in self._renewing_rooms:
-                self._renewing_rooms.discard(room_id)
+                try:
+                    # A concurrent control request observes this renewal and
+                    # refuses it, but may still be reporting the refusal.
+                    # Resume after its fence lifts, using fresh durable state.
+                    if not self._stop.is_set() and self._control_fenced():
+                        await self._control_fence_lifted()
+                finally:
+                    self._renewing_rooms.discard(room_id)
                 latest = load(self._state_file).binding(room_id)
                 if latest is not None:
                     # Contract P2c-1: a renewed credential is scrubbed too.
