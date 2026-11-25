@@ -4,6 +4,8 @@ The adapter drains one binding before calling this engine. The same journaled
 CLI engine and per-binding file lock cover crash recovery and concurrent CLI
 invocations. No process environment, active profile, model or sibling changes.
 """
+import time
+from datetime import datetime
 from pathlib import Path
 
 from .protocol import RoomProtocol
@@ -31,7 +33,32 @@ def eligible(binding: RoomBinding) -> bool:
     )
 
 
-def quiescent(binding: RoomBinding) -> bool:
+def _passed(raw, now: float | None) -> bool:
+    try:
+        expires = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return False
+    return expires <= (time.time() if now is None else now)
+
+
+def base_expired(binding: RoomBinding, now: float | None = None) -> bool:
+    """Contract P2c-3j: the base credential has expired: its stored expiry passed, or
+    the Room refused it (disabled credential_expired), or the renewal journal in
+    progress began on an expired base (after the swap the binding carries the
+    replacement's expiry)."""
+    rotation = binding.credential_rotation or {}
+    return (binding.disabled_reason == "credential_expired" or _passed(binding.credential_expires_at, now)
+            or bool(rotation.get("resume_after_expiry"))
+            or (bool(rotation) and _passed(rotation.get("base_credential_expires_at"), now)))
+
+
+def quiescent(binding: RoomBinding, *, for_renewal: bool = False) -> bool:
+    # Contract P2c-3j: for a renewal, an expired base never waits for work that
+    # needs a valid credential to finish; the work is kept unchanged and resumes
+    # after the renewal. Without for_renewal (the owner-control fence) and with a
+    # valid base the rule below is unchanged.
+    if for_renewal and base_expired(binding):
+        return True
     # Quarantine is inert evidence, not an in-flight credential user. Keep it
     # byte-for-byte; renewal must neither replay it nor acknowledge its gap.
     # Unfinished outbound/lifecycle work still has to drain under the adapter's
@@ -62,7 +89,7 @@ def resume(path: Path, room_id: str, intent: dict | None) -> None:
 
     with state_path_scope(path):
         binding = load().binding(room_id)
-        if binding is None or not eligible(binding) or not quiescent(binding):
+        if binding is None or not eligible(binding) or not quiescent(binding, for_renewal=True):
             raise ValueError("renewal requires the exact eligible quiescent binding")
         if intent is None and not binding.credential_rotation.get("owner_initiated"):
             raise ValueError("no owner-initiated renewal to resume")

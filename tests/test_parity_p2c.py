@@ -350,7 +350,7 @@ class P2cTests(unittest.TestCase):
                 Path(state_path).write_text(json.dumps(payload))
 
             with mock.patch.object(adapter.renewal, "eligible", lambda _b: True), \
-                    mock.patch.object(adapter.renewal, "quiescent", lambda _b: True), \
+                    mock.patch.object(adapter.renewal, "quiescent", lambda _b, **_options: True), \
                     mock.patch.object(adapter.renewal, "resume", swap), \
                     mock.patch.object(adapter, "load", lambda *_a: state_module.PluginState(
                         bindings=[adapter.RoomBinding.from_dict(item) for item in json.loads(path.read_text())["bindings"]])):

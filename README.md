@@ -9,6 +9,16 @@ Room identity.
 
 ## 1.0.118 — A Room acknowledgement ahead of the local cursor is adopted (P2c-3i), paired with OpenClaw 0.2.93
 
+1.0.118 also carries contract P2c-3j (block sha256 12562226, directly after P2c-3i; contract 2cf69145, parity section
+P2c d2f23ede; conformance `parityP2c3jCases` RENEW-INFLIGHT-01 to -03, the same names as OpenClaw 0.2.93): an expired
+base credential never waits for work that needs a valid credential. `renewal.quiescent(binding, for_renewal=True)`
+(used by `_maintain_renewal`, `renewal.resume` and the owner-intent preparation) passes when `renewal.base_expired`
+(disabled `credential_expired`, or the stored expiry has passed) or a journal is already in progress; the intents stay
+byte-identical through the exchange, delivery-pending ones resume through the normal frozen delivery with the new
+credential, and lifecycle work blocked only by `credential_expired` is reopened once with a fresh attempt budget when the
+renewal finishes. With a valid base, and for the owner-control fence (`renewal.quiescent` without `for_renewal`), the
+rule is unchanged. Live finding: Aura (OpenClaw, Networks and Kabeltracker). `tests/test_renew_inflight.py` covers it.
+
 The Room is the authority for the acknowledged frontier (contract P2c-3i, block sha256 917c297d, directly after
 P2c-3h; contract 823b536d, parity section P2c e986cc6d; conformance `parityP2c3iCases` ACK-AHEAD-01 to ACK-AHEAD-07,
 the same names as OpenClaw 0.2.93). A connector may only be behind the Room and catches up by adopting; only ahead of

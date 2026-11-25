@@ -4798,7 +4798,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if self._renewal_retry_after.get(room_id, 0) > time.monotonic():
             return
         try:
-            if room_id in self._active_dispatch_rooms or not renewal.quiescent(binding):
+            if room_id in self._active_dispatch_rooms or not renewal.quiescent(binding, for_renewal=True):
                 return
             intent = None
             if not binding.credential_rotation:
@@ -4821,7 +4821,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             receive_lock = self._receive_locks.setdefault(room_id, asyncio.Lock())
             async with receive_lock:
                 latest = load(self._state_file).binding(room_id)
-                if (latest is None or not renewal.eligible(latest) or not renewal.quiescent(latest)
+                if (latest is None or not renewal.eligible(latest) or not renewal.quiescent(latest, for_renewal=True)
                         or room_id in self._active_dispatch_rooms
                         or not self._same_generation(latest, binding)):
                     return

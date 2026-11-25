@@ -92,6 +92,7 @@ PAYLOAD = (
     "tests/test_renewal_terminal.py",
     "tests/test_stuck_events.py",
     "tests/test_ack_ahead.py",
+    "tests/test_renew_inflight.py",
     "tests/test_parity_p1.py",
     "tests/test_parity_p1a.py",
     "tests/test_parity_p2a.py",

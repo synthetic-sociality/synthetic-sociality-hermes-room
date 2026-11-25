@@ -14,6 +14,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +26,13 @@ from test_delivery_lifecycle import (
 
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
 CONTRACT = (ROOT / "docs" / "delivery-lifecycle-contract-v1.md").read_text(encoding="utf-8")
-renewal = adapter.renewal
+PACKAGE = adapter.__name__.rsplit(".", 1)[0]
+
+
+def live(name):
+    """The package module as it is now: other test modules call load_adapter() again, which replaces
+    the package's modules in sys.modules, and renewal.resume imports .cli at call time."""
+    return sys.modules[f"{PACKAGE}.{name}"]
 
 CASES = [
     "RENEW-INFLIGHT-01 delivery_pending",
@@ -50,8 +57,8 @@ def aura(binding, *, expired=True, refused=False):
 
 
 def delivery_pending_binding():
-    binding = adapter.RoomBinding("https://room.example/api", ROOM, MEMBER, "credential",
-                                  installation_id="installation-1", cursor=5, acknowledged_cursor=4)
+    binding = adapter.RoomBinding("https://room.example/api", ROOM, MEMBER, "credential", display_name="Aura",
+                                  identity_version=2, installation_id="installation-1", cursor=5, acknowledged_cursor=4)
     instance = configured_instance(binding, None, [])
 
     class API:
@@ -109,6 +116,9 @@ def renewal_api(calls, shared):
             return self.identity()
 
         def confirm_credential_renewal(self, room_id, grant_id, replacement):
+            if shared.pop("lose_confirm", False):
+                calls.append("confirm-lost")
+                raise OSError("lost reply")
             calls.append("confirm")
             shared["confirmed"] = True
             return {"id": "event-1", "type": "credential.renewed", "payload": self.identity()}
@@ -128,14 +138,19 @@ class Store:
         self.path.parent.mkdir(mode=0o700)
         state_store.save(state_store.PluginState(bindings=[binding]), self.path)
 
-    def renew(self):
-        calls, shared = [], {}
-        with mock.patch.object(cli, "RoomProtocol", renewal_api(calls, shared)):
-            renewal.resume(self.path, ROOM, INTENT)
+    def renew(self, shared=None):
+        calls, shared = [], ({} if shared is None else shared)
+        # load_adapter() re-executes state, protocol, cli and adapter but never renewal, so the renewal
+        # module may still hold an earlier state module; run it against the live one.
+        engine, current = live("renewal"), live("state")
+        with mock.patch.object(live("cli"), "RoomProtocol", renewal_api(calls, shared)), \
+                mock.patch.object(engine, "state_path_scope", current.state_path_scope), \
+                mock.patch.object(engine, "load", current.load):
+            engine.resume(self.path, ROOM, INTENT)
         return calls, shared
 
     def binding(self):
-        return state_store.load(self.path).binding(ROOM)
+        return live("state").load(self.path).binding(ROOM)
 
 
 class RenewInflightConformanceTests(unittest.TestCase):
@@ -176,8 +191,8 @@ class RenewInflightTests(unittest.TestCase):
                     def room_state(self, _room_id):
                         return {"headSeq": 5, "activeEpoch": {"id": "epoch-1"}}
 
-                    def post_message(self, room_id, body, *args, **kwargs):
-                        posts.append({"credential": saved.credential, "body": body})
+                    def post_message(self, room_id, turn_id, observed_seq, source_event_id, body, *args, **kwargs):
+                        posts.append({"credential": saved.credential, "body": body, "source": source_event_id})
                         return {"id": "posted-6", "seq": 6, "ts": "2026-11-25T06:00:00Z"}
 
                 instance._call = lambda _binding, operation, **_options: asyncio.sleep(0, result=operation(API()))
@@ -189,6 +204,20 @@ class RenewInflightTests(unittest.TestCase):
                 self.assertEqual(posts[0]["credential"], shared["replacement"])
                 self.assertEqual(posts[0]["body"], "A frozen answer.")
                 self.assertEqual(saved.delivery_intents["evt-5"]["delivery_state"], "posted")
+
+    def test_renew_inflight_01_a_lost_confirm_reply_resumes_after_the_swap(self):
+        store = Store(aura(delivery_pending_binding()))
+        before = copy.deepcopy(store.binding().delivery_intents["evt-5"])
+        with self.assertRaises(OSError):
+            store.renew({"lose_confirm": True})
+        swapped = store.binding()
+        self.assertEqual(swapped.credential_rotation["phase"], "swapped")
+        self.assertEqual(swapped.credential_expires_at, "2099-01-01T00:00:00Z")  # the replacement's expiry
+        self.assertTrue(live("renewal").quiescent(swapped, for_renewal=True))  # the journal began on an expired base
+        store.renew()
+        saved = store.binding()
+        self.assertEqual(saved.credential_rotation, {})
+        self.assertEqual(saved.delivery_intents["evt-5"], before)
 
     def test_renew_inflight_02_lifecycle_blocked_by_expiry_is_reopened_and_completes(self):
         store = Store(aura(lifecycle_blocked_binding()))
@@ -207,12 +236,12 @@ class RenewInflightTests(unittest.TestCase):
 
             class API:
                 def complete_discussion_attempt(self, room_id, cycle_id, attempt_id, payload):
-                    completions.append((state_store.load(store.path).binding(room_id).credential, cycle_id, payload["eventId"]))
+                    completions.append((live("state").load(store.path).binding(room_id).credential, cycle_id, payload["eventId"]))
                     return {"state": "completed"}
 
             instance._call = lambda _binding, operation, **_options: asyncio.sleep(0, result=operation(API()))
             try:
-                reloaded = state_store.load(store.path).binding(ROOM)
+                reloaded = live("state").load(store.path).binding(ROOM)
                 await instance._repair_pending_lifecycles(reloaded)
             finally:
                 adapter.update = original_update
@@ -232,8 +261,8 @@ class RenewInflightTests(unittest.TestCase):
             with self.subTest(build.__name__):
                 store = Store(aura(build(), expired=False))
                 binding = store.binding()
-                self.assertFalse(renewal.quiescent(binding, for_renewal=True))
-                self.assertFalse(renewal.quiescent(binding))
+                self.assertFalse(live("renewal").quiescent(binding, for_renewal=True))
+                self.assertFalse(live("renewal").quiescent(binding))
                 with self.assertRaisesRegex(ValueError, "eligible quiescent"):
                     store.renew()
                 self.assertEqual(store.binding().credential, "credential")
@@ -241,10 +270,10 @@ class RenewInflightTests(unittest.TestCase):
     def test_renew_inflight_03_the_owner_control_fence_rule_is_unchanged(self):
         binding = aura(delivery_pending_binding())
         # renewal.quiescent without for_renewal is the fence's rule: unfinished work is work.
-        self.assertFalse(renewal.quiescent(binding))
-        self.assertTrue(renewal.quiescent(binding, for_renewal=True))
+        self.assertFalse(live("renewal").quiescent(binding))
+        self.assertTrue(live("renewal").quiescent(binding, for_renewal=True))
         binding.revoked = True
-        self.assertFalse(renewal.eligible(binding))
+        self.assertFalse(live("renewal").eligible(binding))
 
 
 if __name__ == "__main__":

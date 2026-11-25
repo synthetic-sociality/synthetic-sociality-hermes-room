@@ -148,9 +148,12 @@ class RenewalTests(unittest.TestCase):
                 self.assertTrue(api.confirmed)
 
     def test_manual_legacy_disabled_revoked_and_active_work_fail_closed(self):
+        # Contract P2c-3j: active work blocks only while the base is valid; on an
+        # expired base it renews first (tests/test_renew_inflight.py).
+        valid = "2099-01-01T00:00:00Z"
         for changes in ({"enabled": False}, {"enabled": False, "disabled_reason": "manual"},
-                        {"revoked": True}, {"inbox": {"12": "pending"}},
-                        {"delivery_intents": {"source": {"pending": True}}}):
+                        {"revoked": True}, {"inbox": {"12": "pending"}, "credential_expires_at": valid},
+                        {"delivery_intents": {"source": {"pending": True}}, "credential_expires_at": valid}):
             binding = copy.deepcopy(self.binding)
             for key, value in changes.items():
                 setattr(binding, key, value)

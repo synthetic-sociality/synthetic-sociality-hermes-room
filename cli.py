@@ -1232,7 +1232,7 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
                 raise ValueError("renewal target changed during intent discovery")
             if owner_intent:
                 from .renewal import eligible, quiescent
-                if not eligible(binding) or not quiescent(binding):
+                if not eligible(binding) or not quiescent(binding, for_renewal=True):
                     raise ValueError("renewal target is no longer eligible and quiescent")
             binding.renewal_closed = {}
             binding.credential_rotation = {
@@ -1480,6 +1480,8 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
                 latest.enabled = True
                 latest.disabled_reason = ""
                 allowed.update({"enabled", "disabled_reason"})
+            if _reopen_expired_lifecycles(latest):
+                allowed.update({"delivery_lifecycle", "delivery_intents"})
             after = _binding_without_rotation_fields(latest)
             drift = {key for key in before if before[key] != after[key]}
             if not drift.issubset(allowed):
@@ -1658,6 +1660,27 @@ def _validate_active_room_state(
             raise ValueError("active state verification does not match monotonic local cursors")
     elif delivered != int(expected["cursor"]):
         raise ValueError("active state verification changed delivery or acknowledgement cursor")
+
+
+def _reopen_expired_lifecycles(binding: RoomBinding) -> bool:
+    """Contract P2c-3j: after a confirmed renewal, lifecycle work blocked only
+    because the Room refused the credential as expired is reopened once for
+    automatic retry with a fresh attempt budget. Anything else stays as it is."""
+    reopened = False
+    for source_id, journal in binding.delivery_lifecycle.items():
+        if (not isinstance(journal, dict) or journal.get("lifecycle_state") != "blocked"
+                or journal.get("delivery_state") != "posted"
+                or journal.get("last_error_code") != "credential_expired"
+                or not str((journal.get("receipt") or {}).get("canonical_event_id") or "")):
+            continue
+        journal.update(state="lifecycle_pending", lifecycle_state="pending", automatic_retry=True, attempts=0,
+                       last_error="", last_error_code="")
+        intent = binding.delivery_intents.get(source_id)
+        if isinstance(intent, dict) and intent.get("lifecycle_state") == "blocked":
+            intent.update(state="lifecycle_pending", lifecycle_state="pending", lifecycle_automatic_retry=True,
+                          lifecycle_error="", lifecycle_error_code="")
+        reopened = True
+    return reopened
 
 
 def _roster_member(response: dict, binding: RoomBinding, where: str) -> dict:
