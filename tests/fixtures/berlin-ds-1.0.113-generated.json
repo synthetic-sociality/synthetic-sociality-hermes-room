@@ -1,0 +1,147 @@
+{
+  "bindings": [
+    {
+      "abandoned_delivery_intents": {},
+      "acknowledged_cursor": 3220,
+      "base_url": "https://room.example/api",
+      "connector_session_id": "",
+      "credential": "masked-base",
+      "credential_expires_at": "2027-02-09T00:00:00Z",
+      "credential_rotation": {
+        "base_credential": "masked-base",
+        "base_credential_expires_at": "2027-02-09T00:00:00Z",
+        "base_credential_generation": 3,
+        "client_instance_id": "inst-1",
+        "expected": {
+          "acknowledged_cursor": 3220,
+          "cursor": 3221,
+          "display_name": "Berlin",
+          "identity_version": 3,
+          "installation_id": "inst-1",
+          "membership_id": "member-1",
+          "room_id": "duev8o1h936bl9f"
+        },
+        "grant_id": "masked-grant",
+        "grant_secret": "FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY",
+        "identity_reconciliation": {
+          "authoritative_display_name": "Berlin",
+          "authoritative_identity_version": 3,
+          "base_credential_generation": 3,
+          "grant_id": "masked-grant",
+          "local_display_name": "Berlin",
+          "local_identity_version": 3,
+          "membership_id": "member-1",
+          "request_id": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws",
+          "room_id": "duev8o1h936bl9f"
+        },
+        "owner_initiated": true,
+        "owner_intent_identity": {
+          "baseCredentialGeneration": 3,
+          "displayName": "Berlin",
+          "identityVersion": 3,
+          "membershipId": "member-1",
+          "requestId": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws",
+          "roomId": "duev8o1h936bl9f"
+        },
+        "phase": "requesting_owner",
+        "prepared_at": "2026-11-25T10:02:49.082231+00:00",
+        "protected_snapshot": {
+          "abandoned_delivery_intents": {},
+          "acknowledged_cursor": 3220,
+          "base_url": "https://room.example/api",
+          "connector_session_id": "",
+          "cursor": 3221,
+          "cycle_attempt_owners": {},
+          "delivery_authority": {},
+          "delivery_intents": {},
+          "delivery_lifecycle": {},
+          "disabled_reason": "",
+          "display_name": "Berlin",
+          "documents_given": {},
+          "enabled": true,
+          "epoch_session_routing_initialized": false,
+          "identity_version": 3,
+          "inbox": {
+            "3221": "ignored"
+          },
+          "installation_id": "inst-1",
+          "kept_reply": {},
+          "legacy_session_epoch_id": "",
+          "membership_id": "member-1",
+          "message_payload_capabilities": [],
+          "message_payload_dialect": "v1",
+          "missed_sources": [],
+          "pending_retries": {},
+          "pending_since": {},
+          "recovery_closures": {},
+          "recovery_fence_cutoff": 3222,
+          "resolved_delivery_lifecycle": {},
+          "revoked": false,
+          "room_id": "duev8o1h936bl9f",
+          "rotate_current_epoch_session": false,
+          "share_uploads": {},
+          "terminal_evidence": {
+            "3221": {
+              "canonicalEventId": "",
+              "canonicalSeq": 0,
+              "canonicalTs": "",
+              "reason": "not_addressed",
+              "sourceEventId": "ev3221",
+              "status": "ignored"
+            }
+          },
+          "transport": "long_poll",
+          "turn_observed": {},
+          "turn_sequences": {}
+        },
+        "replacement_credential": "ISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISE",
+        "request_id": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws",
+        "resume_after_expiry": false
+      },
+      "cursor": 3221,
+      "cycle_attempt_owners": {},
+      "delivery_authority": {},
+      "delivery_intents": {},
+      "delivery_lifecycle": {},
+      "disabled_reason": "",
+      "display_name": "Berlin",
+      "documents_given": {},
+      "enabled": true,
+      "epoch_session_routing_initialized": false,
+      "identity_version": 3,
+      "inbox": {
+        "3221": "ignored"
+      },
+      "installation_id": "inst-1",
+      "kept_reply": {},
+      "legacy_session_epoch_id": "",
+      "membership_id": "member-1",
+      "message_payload_capabilities": [],
+      "message_payload_dialect": "v1",
+      "missed_sources": [],
+      "pending_retries": {},
+      "pending_since": {},
+      "recovery_closures": {},
+      "recovery_fence_cutoff": 3222,
+      "resolved_delivery_lifecycle": {},
+      "revoked": false,
+      "room_id": "duev8o1h936bl9f",
+      "rotate_current_epoch_session": false,
+      "share_uploads": {},
+      "terminal_evidence": {
+        "3221": {
+          "canonicalEventId": "",
+          "canonicalSeq": 0,
+          "canonicalTs": "",
+          "reason": "not_addressed",
+          "sourceEventId": "ev3221",
+          "status": "ignored"
+        }
+      },
+      "transport": "long_poll",
+      "turn_observed": {},
+      "turn_sequences": {}
+    }
+  ],
+  "version": 1
+}
