@@ -119,6 +119,76 @@ def prune_terminal_intents(binding: Any, keep: int = TERMINAL_INTENT_RETENTION) 
     return pruned
 
 
+# Contract P2c-3i: the Room is the authority for the acknowledged frontier.
+ROOM_ACK_AHEAD = "room_ack_ahead"
+ACK_FRONTIER_MISMATCH = "ack_frontier_mismatch"
+
+
+class AckFrontierConflict(ValueError):
+    """The Room's acknowledgement is behind the local one, or not an integer."""
+
+    code = ACK_FRONTIER_MISMATCH
+
+
+def reconcile_room_ack(binding: Any, room_ack: Any, *, frontier: int | None = None,
+                       delivered: Any = None, conflict: str = "") -> dict[str, Any]:
+    """Contract P2c-3i: the one place a Room acknowledgement meets a local cursor.
+
+    ``frontier`` is the local value compared (default: the acknowledged
+    cursor; the live acknowledgement passes its walked frontier). Equal: no
+    change. Room ahead: adopted as a fence; every seq up to it without
+    terminal evidence becomes ``ignored`` with reason room_ack_ahead (existing
+    evidence is kept and the adopted range keeps its records until the next
+    frontier advance prunes them), the cursors move and the binding's maps are
+    pruned. Room behind, a non-integer answer, or a ``delivered`` below the
+    Room's acknowledgement or the local read cursor: AckFrontierConflict, and
+    nothing changes. The caller persists and logs (``room_ack_ahead_message``).
+    """
+    local = int(binding.acknowledged_cursor if frontier is None else frontier)
+    message = conflict or "Room acknowledgement did not confirm the locally proven contiguous frontier"
+    if type(room_ack) is not int or room_ack < local or room_ack < int(binding.acknowledged_cursor):
+        raise AckFrontierConflict(message)
+    if delivered is not None and (type(delivered) is not int or delivered < room_ack
+                                  or delivered < int(binding.cursor)):
+        raise AckFrontierConflict(message)
+    if room_ack == local:
+        return {"adopted": False, "frontier": local, "acknowledged": room_ack, "seqs": []}
+    previous = int(binding.acknowledged_cursor)
+    marked: list[int] = []
+    for seq in range(previous + 1, room_ack + 1):
+        key = str(seq)
+        status = binding.inbox.get(key)
+        evidence = binding.terminal_evidence.get(key)
+        if status in TERMINAL_EVENT_STATES and isinstance(evidence, dict) and evidence.get("status") == status:
+            continue
+        source_id = next((source for source, source_seq in binding.turn_sequences.items() if source_seq == seq), "")
+        binding.inbox[key] = "ignored"
+        binding.terminal_evidence[key] = {
+            "status": "ignored", "sourceEventId": source_id, "canonicalEventId": "",
+            "canonicalSeq": 0, "canonicalTs": "", "reason": ROOM_ACK_AHEAD,
+        }
+        marked.append(seq)
+    binding.acknowledged_cursor = room_ack
+    binding.cursor = max(int(binding.cursor), room_ack)
+    binding.inbox = {key: value for key, value in binding.inbox.items() if int(key) > previous}
+    binding.terminal_evidence = {key: value for key, value in binding.terminal_evidence.items() if int(key) > previous}
+    binding.pending_since = {key: value for key, value in binding.pending_since.items()
+                             if int(key) > room_ack and binding.inbox.get(key) in {"pending", "quarantined"}}
+    binding.pending_retries = {key: value for key, value in binding.pending_retries.items() if int(key) > room_ack}
+    for source_id in [source for source, source_seq in binding.turn_sequences.items() if source_seq <= room_ack]:
+        binding.turn_sequences.pop(source_id, None)
+        binding.turn_observed.pop(source_id, None)
+    prune_terminal_intents(binding)
+    return {"adopted": True, "frontier": local, "acknowledged": room_ack, "seqs": marked}
+
+
+def room_ack_ahead_message(room_id: str, result: dict[str, Any], where: str) -> str:
+    """The one warning line per adoption (contract P2c-3i)."""
+    return (f"Room {room_id} acknowledgement ahead of the local cursor adopted ({where}): frontier "
+            f"{result['frontier']}, Room {result['acknowledged']}, {len(result['seqs'])} seqs ignored with reason "
+            f"{ROOM_ACK_AHEAD} where no terminal evidence existed")
+
+
 def stuck_intents(binding: Any) -> list[dict[str, Any]]:
     """Intents that cannot progress by themselves: quarantined, or open with an acknowledged source."""
     stuck: list[dict[str, Any]] = []

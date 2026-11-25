@@ -4835,6 +4835,11 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 self._renewal_retry_after.pop(room_id, None)
         except asyncio.CancelledError:
             raise
+        except renewal.RenewalClosed as closed:
+            # ACK-AHEAD-07: the journal is closed with its reason; no retry
+            # loop drains this room again until a new owner Renew arrives.
+            logger.warning("Room %s renewal journal closed (%s); a new owner Renew is needed", room_id, closed.reason)
+            self._status_room(binding, error_code=f"renewal_{closed.reason}")
         except ProtocolError as error:
             if self._membership_denied(error):
                 await self._membership_active(binding, refresh=True)
@@ -7653,15 +7658,14 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             return
         try:
             response = await self._call(binding, lambda api: api.acknowledge(binding.room_id, cursor), background=True)
-            authoritative = (response or {}).get("acknowledgedSeq")
-            # Contract P2c-3i: the Room already holds a higher acknowledgement
-            # (earlier instance, fence, lost state write); it is adopted below.
-            ahead = type(authoritative) is int and authoritative > cursor
-            if not ahead and (type(authoritative) is not int or authoritative != cursor):
-                raise ProtocolError(
-                    "Room acknowledgement did not confirm the locally proven contiguous frontier",
-                    code="ack_frontier_mismatch", retryable=True,
-                )
+            # Contract P2c-3i: the Room is the authority for the acknowledged
+            # frontier; one helper reconciles it (a Room ahead is adopted as a
+            # fence, a Room behind or a non-integer answer is the conflict).
+            try:
+                reconciled = recovery.reconcile_room_ack(
+                    binding, (response or {}).get("acknowledgedSeq"), frontier=cursor)
+            except recovery.AckFrontierConflict as conflict:
+                raise ProtocolError(str(conflict), code=conflict.code, retryable=True) from None
         except Exception as error:
             if not defer_ack_failure:
                 raise
@@ -7675,8 +7679,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if _uncoded_contact_failure(error):
                 self._retry_acknowledgement(binding, error)
             return
-        if ahead:
-            self._adopt_room_ack_ahead(binding, cursor, authoritative)
+        if reconciled["adopted"]:
+            logger.warning("%s", recovery.room_ack_ahead_message(binding.room_id, reconciled, "acknowledgement"))
+            self._persist_binding(binding)
             return
         binding.acknowledged_cursor = cursor
         binding.cursor = max(binding.cursor, cursor)
@@ -7704,57 +7709,6 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding.turn_sequences.pop(source_id, None)
             binding.turn_observed.pop(source_id, None)
         # Contract P3-2: terminal intents beyond the newest 32 are pruned.
-        pruned = recovery.prune_terminal_intents(binding)
-        if pruned:
-            logger.info("Room %s pruned %d terminal delivery intents", binding.room_id, len(pruned))
-        self._persist_binding(binding)
-
-    def _adopt_room_ack_ahead(self, binding: RoomBinding, frontier: int, authoritative: int) -> None:
-        """Contract P2c-3i: adopt a Room acknowledgement ahead of the frontier.
-
-        Every seq up to ``authoritative`` without terminal evidence becomes
-        ``ignored`` with reason room_ack_ahead; existing evidence is kept. The
-        adopted range keeps its evidence until the next frontier advance prunes
-        it as usual. One warning per adoption; delivery continues after it.
-        """
-        previous = binding.acknowledged_cursor
-        for seq in range(previous + 1, authoritative + 1):
-            key = str(seq)
-            if self._terminal_evidence_valid(
-                    str(binding.inbox.get(key) or ""), dict(binding.terminal_evidence.get(key) or {})):
-                continue
-            source_id = next(
-                (source for source, source_seq in binding.turn_sequences.items() if source_seq == seq), "")
-            binding.inbox[key] = "ignored"
-            binding.terminal_evidence[key] = {
-                "status": "ignored",
-                "sourceEventId": source_id,
-                "canonicalEventId": "",
-                "canonicalSeq": 0,
-                "canonicalTs": "",
-                "reason": "room_ack_ahead",
-            }
-        binding.acknowledged_cursor = authoritative
-        binding.cursor = max(binding.cursor, authoritative)
-        binding.inbox = {key: status for key, status in binding.inbox.items() if int(key) > previous}
-        binding.terminal_evidence = {
-            key: evidence for key, evidence in binding.terminal_evidence.items() if int(key) > previous
-        }
-        binding.pending_since = {
-            key: started for key, started in binding.pending_since.items()
-            if int(key) > authoritative and binding.inbox.get(key) in {"pending", "quarantined"}
-        }
-        binding.pending_retries = {
-            key: retries for key, retries in binding.pending_retries.items() if int(key) > authoritative
-        }
-        for source_id in [source for source, source_seq in binding.turn_sequences.items() if source_seq <= authoritative]:
-            binding.turn_sequences.pop(source_id, None)
-            binding.turn_observed.pop(source_id, None)
-        logger.warning(
-            "Room %s acknowledgement ahead of the local cursor adopted: frontier %s, Room %s, seqs %s-%s ignored "
-            "with reason room_ack_ahead where no terminal evidence existed",
-            binding.room_id, frontier, authoritative, frontier + 1, authoritative,
-        )
         pruned = recovery.prune_terminal_intents(binding)
         if pruned:
             logger.info("Room %s pruned %d terminal delivery intents", binding.room_id, len(pruned))
@@ -7995,8 +7949,12 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             key = str(seq)
             mark = binding.recovery_closures.get(key) or {}
             try:
-                if recovery.valid_stuck_reason(mark.get("reason")) and binding.inbox.get(key) == recovery.STUCK_STATE:
-                    # Recorded earlier; only the acknowledgement is retried.
+                if ((recovery.valid_stuck_reason(mark.get("reason")) and binding.inbox.get(key) == recovery.STUCK_STATE)
+                        or self._terminal_evidence_valid(str(binding.inbox.get(key) or ""),
+                                                         dict(binding.terminal_evidence.get(key) or {}))):
+                    # Recorded earlier (stuck or any durable terminal evidence at
+                    # the frontier); only the acknowledgement is retried, and the
+                    # Room's answer is reconciled (contract P2c-3i).
                     await self._complete_event(binding, seq)
                     if binding.acknowledged_cursor < seq:
                         return

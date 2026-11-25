@@ -161,6 +161,10 @@ class RoomBinding:
     # credential material needed to resume an ambiguous redeem/swap/confirm
     # boundary. The CLI mutates it only under the same 0600 atomic state lock.
     credential_rotation: dict[str, Any] = field(default_factory=dict)
+    # Contract P2c-3i (ACK-AHEAD-07): why the last owner-initiated renewal
+    # journal was closed without a new credential (reason, requestId,
+    # closedAt), so a new owner Renew is visibly needed. Cleared by the next one.
+    renewal_closed: dict[str, Any] = field(default_factory=dict)
     # Upgrade boundary for epoch-scoped Hermes transcripts. Existing bindings
     # keep their current epoch on the legacy route; later epochs rotate. An
     # operator-authorized current reset sets rotate_current_epoch_session before
@@ -241,6 +245,9 @@ class RoomBinding:
             for key, value in binding.recovery_closures.items()
         ):
             raise ValueError("Room recovery closures are invalid")
+        if not isinstance(binding.renewal_closed, dict) or (binding.renewal_closed and (
+                not isinstance(binding.renewal_closed.get("reason"), str) or not binding.renewal_closed["reason"])):
+            raise ValueError("Room renewal closure is invalid")
         if not isinstance(binding.delivery_lifecycle, dict):
             raise ValueError("Room delivery lifecycle journal must be an object")
         if not isinstance(binding.resolved_delivery_lifecycle, dict):

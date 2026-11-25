@@ -6,6 +6,7 @@ import argparse
 import getpass
 import hashlib
 import json
+import logging
 import os
 import platform
 import re
@@ -18,7 +19,10 @@ from urllib.parse import urlsplit
 from .protocol import ProtocolError, RoomProtocol, parse_invitation_url, stable_key
 from . import link as device_link
 from . import recovery
-from .state import RoomBinding, binding_renewal_lock, load, remove, state_path, update, upsert
+from .renewal import RenewalClosed
+from .state import RoomBinding, StateUnchanged, binding_renewal_lock, load, remove, state_path, update, upsert
+
+logger = logging.getLogger(__name__)
 
 
 LEGACY_IDEMPOTENCY_MISMATCH_ERROR = "idempotency key payload mismatch"
@@ -1230,6 +1234,7 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
                 from .renewal import eligible, quiescent
                 if not eligible(binding) or not quiescent(binding):
                     raise ValueError("renewal target is no longer eligible and quiescent")
+            binding.renewal_closed = {}
             binding.credential_rotation = {
                 "phase": "requesting_owner" if request_owner else "prepared",
                 "grant_id": grant_id,
@@ -1293,6 +1298,10 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
             hashlib.sha256(str(journal["grant_secret"]).encode("utf-8")).hexdigest(),
             **({"client_instance_id": str(journal["client_instance_id"])} if journal.get("owner_initiated") else {}),
         )
+        if str(status.get("state") or "") == "expired" and journal.get("owner_initiated"):
+            # ACK-AHEAD-07: an expired owner request ends the journal before
+            # any grant or counter check (it carries no grant).
+            _close_owner_renewal(room_id, journal, status, "owner_request_expired", report)
         journal = _record_owner_identity_status(room_id, journal, status)
         if journal.get("owner_initiated") and not journal.get("server_delivery_snapshot"):
             # Expired credentials deliberately cannot read ordinary /state.
@@ -1344,6 +1353,8 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
         request_id = str(journal.get("request_id") or "")
         if request_id:
             status = protocol.credential_renewal_request(room_id, request_id)
+            if str(status.get("state") or "") == "expired" and journal.get("owner_initiated"):
+                _close_owner_renewal(room_id, journal, status, "owner_request_expired", report)
             journal = _record_owner_identity_status(room_id, journal, status)
             request_state = str(status.get("state") or "")
             if request_state in {"expired", "requested"}:
@@ -1370,6 +1381,7 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
             room_id, str(journal["grant_id"]), str(journal["grant_secret"]),
             str(journal["replacement_credential"]),
         )
+        journal = _reconcile_renewal_ack(room_id, journal, redemption, "renewal verification changed acknowledged_cursor")
         _validate_renewal_identity(redemption, journal["expected"])
 
         def mark_redeemed(current):
@@ -1387,6 +1399,7 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
         verification = RoomProtocol(binding.base_url).verify_credential_renewal(
             room_id, str(journal["grant_id"]), str(journal["replacement_credential"]),
         )
+        journal = _reconcile_renewal_ack(room_id, journal, verification, "renewal verification changed acknowledged_cursor")
         _validate_renewal_identity(verification, journal["expected"])
 
         def swap(current):
@@ -1440,6 +1453,10 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
         # recorded, prove the normal active-credential state route and exact
         # identity/cursors before declaring the local operation complete.
         state = RoomProtocol(binding.base_url, binding.credential).room_state(room_id)
+        member = _roster_member(state, binding, "active state verification")
+        journal = _reconcile_renewal_ack(
+            room_id, journal, member, "active state verification changed delivery or acknowledgement cursor")
+        binding = load().binding(room_id)
         _validate_active_room_state(
             state, binding, journal["expected"], allow_monotonic=confirmed_at_entry,
         )
@@ -1585,8 +1602,10 @@ def _record_renewal_delivery_snapshot(room_id: str, journal: dict, response: dic
                 raise ValueError("credential-renewal state preflight changed identity version")
         delivered = int(member.get("deliveredSeq") or 0)
         acknowledged = int(member.get("acknowledgedSeq") or 0)
-        if delivered < latest.cursor or acknowledged != latest.acknowledged_cursor or delivered < acknowledged:
-            raise ValueError("credential-renewal state preflight conflicts with local replay cursors")
+        # Contract P2c-3i: the Room's acknowledgement is reconciled first; a
+        # Room ahead is adopted as a fence, only a Room behind is a conflict.
+        _apply_room_ack(latest, acknowledged, delivered,
+                        "credential-renewal state preflight conflicts with local replay cursors", "renewal preflight")
         frozen = {"delivered_seq": delivered, "acknowledged_seq": acknowledged}
         existing = latest.credential_rotation.get("server_delivery_snapshot")
         if existing and existing != frozen:
@@ -1609,12 +1628,12 @@ def _validate_renewal_identity(response: dict, expected: dict) -> None:
         "display_name": str(response.get("displayName") or ""),
         "identity_version": int(response.get("identityVersion") or 0),
         "cursor": int(response.get("deliveredSeq") or 0),
-        "acknowledged_cursor": int(response.get("acknowledgedSeq") or 0),
     }
     for field, actual in comparisons.items():
         wanted = expected.get(field)
         # Legacy local bindings may not have cached descriptive identity, but
-        # room/membership and both cursor invariants are always exact.
+        # room/membership and the delivered snapshot are always exact. The
+        # acknowledgement was reconciled before (_reconcile_renewal_ack, P2c-3i).
         if field in {"display_name", "identity_version"} and not wanted:
             continue
         if actual != wanted:
@@ -1624,30 +1643,96 @@ def _validate_renewal_identity(response: dict, expected: dict) -> None:
 def _validate_active_room_state(
     response: dict, binding: RoomBinding, expected: dict, *, allow_monotonic: bool = False,
 ) -> None:
-    if str(response.get("roomId") or "") != binding.room_id:
-        raise ValueError("active state verification returned a different room")
-    roster = response.get("roster") or []
-    member = next((item for item in roster if str(item.get("membershipId") or "") == binding.membership_id), None)
-    if member is None:
-        raise ValueError("active state verification omitted the renewed membership")
+    member = _roster_member(response, binding, "active state verification")
     expected_name = str(expected.get("display_name") or "")
     if expected_name and member.get("displayName") is not None and str(member.get("displayName")) != expected_name:
         raise ValueError("active state verification changed display name")
     expected_version = int(expected.get("identity_version") or 0)
     if expected_version and int(member.get("identityVersion") or 0) != expected_version:
         raise ValueError("active state verification changed identity version")
+    # The acknowledgement was reconciled with the local cursor before
+    # (_reconcile_renewal_ack, contract P2c-3i); delivered stays exact.
     delivered = int(member.get("deliveredSeq") or 0)
-    acknowledged = int(member.get("acknowledgedSeq") or 0)
     if allow_monotonic:
-        if (
-            delivered < int(binding.cursor)
-            or acknowledged != int(binding.acknowledged_cursor)
-            or delivered < int(expected["cursor"])
-            or acknowledged < int(expected["acknowledged_cursor"])
-        ):
+        if delivered < int(binding.cursor) or delivered < int(expected["cursor"]):
             raise ValueError("active state verification does not match monotonic local cursors")
-    elif delivered != int(expected["cursor"]) or acknowledged != int(expected["acknowledged_cursor"]):
+    elif delivered != int(expected["cursor"]):
         raise ValueError("active state verification changed delivery or acknowledgement cursor")
+
+
+def _roster_member(response: dict, binding: RoomBinding, where: str) -> dict:
+    if str(response.get("roomId") or "") != binding.room_id:
+        raise ValueError(f"{where} returned a different room")
+    roster = response.get("roster") or []
+    member = next((item for item in roster if str(item.get("membershipId") or "") == binding.membership_id), None)
+    if member is None:
+        raise ValueError(f"{where} omitted the renewed membership")
+    return member
+
+
+def _apply_room_ack(latest: RoomBinding, acknowledged: int, delivered: int, conflict: str, where: str) -> bool:
+    """Contract P2c-3i inside a renewal transaction: reconcile, and on adoption
+    re-take the protected snapshot and the expected cursors (the adoption is the
+    only change, made under the renewal lock)."""
+    # A Room behind, or delivered below it or the local read cursor, raises
+    # recovery.AckFrontierConflict (a ValueError, code ack_frontier_mismatch).
+    result = recovery.reconcile_room_ack(latest, acknowledged, delivered=delivered, conflict=conflict)
+    if not result["adopted"]:
+        return False
+    rotation = latest.credential_rotation
+    if rotation.get("protected_snapshot") is not None:
+        rotation["protected_snapshot"] = _renewal_protected_fields(latest)
+    expected = rotation.get("expected")
+    if isinstance(expected, dict):
+        expected["acknowledged_cursor"] = latest.acknowledged_cursor
+        expected["cursor"] = max(int(expected.get("cursor") or 0), delivered)
+    logger.warning("%s", recovery.room_ack_ahead_message(latest.room_id, result, where))
+    return True
+
+
+def _reconcile_renewal_ack(room_id: str, journal: dict, member: dict, conflict: str) -> dict:
+    """Contract P2c-3i: the Room's acknowledgement in a renewal answer meets the
+    local cursor only here, before any identity or cursor comparison."""
+    def persist(latest_state):
+        latest = _same_rotation(latest_state, room_id, journal)
+        if not _apply_room_ack(latest, int(member.get("acknowledgedSeq") or 0),
+                               int(member.get("deliveredSeq") or 0), conflict, "renewal"):
+            raise StateUnchanged(None)
+
+    try:
+        update(persist)
+    except StateUnchanged:
+        return journal
+    refreshed = load().binding(room_id)
+    if refreshed is None:
+        raise ValueError(f"room {room_id!r} is not configured")
+    return deepcopy(refreshed.credential_rotation)
+
+
+def _close_owner_renewal(room_id: str, journal: dict, status: dict, reason: str, report) -> None:
+    """ACK-AHEAD-07: an owner request that can no longer be issued closes the
+    journal (nothing was swapped: the base credential is unchanged), records
+    the reason and stops the renewal retries; a new owner Renew is needed."""
+    if (str(status.get("requestId") or "") != str(journal.get("request_id") or "")
+            or str(status.get("roomId") or "") != room_id):
+        raise ValueError("credential-renewal owner status changed request")
+
+    def close(current):
+        latest = _same_rotation(current, room_id, journal)
+        if str(status.get("membershipId") or latest.membership_id) != latest.membership_id:
+            raise ValueError("credential-renewal owner status changed room or membership")
+        if str(latest.credential_rotation.get("phase") or "") not in {"requesting_owner", "prepared"}:
+            raise ValueError("only an unredeemed owner renewal journal can be closed")
+        latest.renewal_closed = {
+            "reason": reason,
+            "requestId": str(journal.get("request_id") or ""),
+            "closedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        latest.credential_rotation = {}
+
+    update(close)
+    report(f"{room_id} renewal closed: {reason}. The room owner must click Renew again.")
+    raise RenewalClosed(reason)
 
 
 def _same_rotation(current, room_id: str, journal: dict) -> RoomBinding:

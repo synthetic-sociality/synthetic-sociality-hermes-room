@@ -9,16 +9,21 @@ Room identity.
 
 ## 1.0.118 — A Room acknowledgement ahead of the local cursor is adopted (P2c-3i), paired with OpenClaw 0.2.93
 
-When the Room answers an acknowledgement with an `acknowledgedSeq` above the frontier the connector acknowledged, the
-Room already holds that acknowledgement (an earlier instance, a fence or a lost state write); the connector now adopts
-it as a fence instead of raising the retryable `ack_frontier_mismatch` on every poll (contract P2c-3i, block sha256
-760f6be0, directly after P2c-3h; contract 0fa6c2fe, parity section P2c 0befba09; conformance `parityP2c3iCases`
-ACK-AHEAD-01 to ACK-AHEAD-05, the same names as OpenClaw 0.2.93). `_adopt_room_ack_ahead` records every seq up to the
-Room's value without terminal evidence as `ignored` with reason `room_ack_ahead` (existing evidence stays unchanged and
-the adopted range keeps its evidence until the next frontier advance prunes it as usual), moves the acknowledged
-cursor, persists and logs one warning per adoption; delivery continues from the next seq, and a later equal answer
-logs nothing. An answer below the frontier, or a missing or non-integer one, stays `ack_frontier_mismatch`. Trace: Berlin in
-Digital sovereignty, cursor 3220, evidence 3221 ignored, Room 3222. `tests/test_ack_ahead.py` covers it.
+The Room is the authority for the acknowledged frontier (contract P2c-3i, block sha256 917c297d, directly after
+P2c-3h; contract 823b536d, parity section P2c e986cc6d; conformance `parityP2c3iCases` ACK-AHEAD-01 to ACK-AHEAD-07,
+the same names as OpenClaw 0.2.93). A connector may only be behind the Room and catches up by adopting; only ahead of
+the Room is an error. One helper, `recovery.reconcile_room_ack`, is the only place a Room acknowledgement meets a local
+cursor: equal changes nothing; a Room ahead is adopted as a fence (every seq up to it without terminal evidence becomes
+`ignored` with reason `room_ack_ahead`, existing evidence is kept, the cursor moves and is persisted, one warning per
+adoption); a Room behind, a missing or non-integer value, or a delivered seq below it or below the local read cursor is
+the one conflict `ack_frontier_mismatch` and changes nothing. It serves the acknowledgement answer (and so every replay
+after a reconnect or restart), the scan (durable terminal evidence at the frontier is acknowledged there too), the
+credential-renewal preflight and each renewal verification (redeem, verify, active state); during a renewal an adoption
+also renews the journal's expected and protected cursors, so the 60-second drain-and-retry loop ends (Berlin: owner
+journal at 3220, Room 3222). An owner-initiated renewal whose request expired before it was issued closes its journal
+without changing the credential, records `renewal_closed` (reason `owner_request_expired`) and logs that a new owner
+Renew is needed; it is not retried. Trace: Berlin in Digital sovereignty, cursor 3220, evidence 3221 ignored, Room 3222.
+`tests/test_ack_ahead.py` covers it, with a matrix over the six sites.
 
 ## 1.0.117 — Stuck events never hold a cursor (P2c-3h), paired with OpenClaw 0.2.92
 

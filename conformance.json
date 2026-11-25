@@ -381,7 +381,9 @@
     "ACK-AHEAD-02 one_warning",
     "ACK-AHEAD-03 behind_errors",
     "ACK-AHEAD-04 non_int_errors",
-    "ACK-AHEAD-05 restart_keeps_cursor"
+    "ACK-AHEAD-05 restart_keeps_cursor",
+    "ACK-AHEAD-06 renewal_resumes",
+    "ACK-AHEAD-07 expired_intent_ends_cleanly"
   ],
   "parityL1StatusCommandCases": [
     "LSC-01 the status file the gateway writes is found by the gateway's own path rule, also when it is not beside the link record",
@@ -1443,7 +1445,7 @@
     "L1": "94a5809aa1b1a9121404e15769e69487d5919efb641a8b0c358ba1793dc3842c",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "0befba0977b5b3a9b636a00d79343b8409b57acc3489b32de6c9074f5bc8c3fa",
+    "P2c": "e986cc6dd0b6a05e1415899b1a7b4cb121a695c6d2a2f59ee8cde8bf26e2c8d9",
     "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
@@ -1767,5 +1769,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "0fa6c2fe86da3b925414862ba47edc4d151f5c9939bc248a94b91a66ce637c56"
+  "contractSha256": "823b536d949e60aae6fcefa1587c7e38f1b1a46afe6651d0cc5ee09f3b7b145e"
 }

@@ -11,6 +11,18 @@ from .recovery import TERMINAL_EVENT_STATES, is_terminal_intent
 from .state import RoomBinding, load, state_path_scope
 
 
+class RenewalClosed(ValueError):
+    """Contract P2c-3i (ACK-AHEAD-07): the journal was closed without a credential.
+
+    The owner request expired before it was issued; nothing was swapped. The
+    binding records the reason and a new owner Renew is needed.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"owner renewal journal closed: {reason}; a new owner Renew is needed")
+        self.reason = reason
+
+
 def eligible(binding: RoomBinding) -> bool:
     return bool(
         binding.installation_id and not binding.revoked
