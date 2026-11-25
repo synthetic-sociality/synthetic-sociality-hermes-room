@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.116",
+  "adapterVersion": "1.0.117",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -361,6 +361,20 @@
     "RDC-06 pending grant/debounce waits do not delay heartbeat, post, acknowledgement or stop; stop cancels the wait and causes no later read/activity",
     "RDC-07 a Room-stopped membership makes no grant-state read or preparing_response and retains its stop reason; sibling memberships continue",
     "RDC-08 a failed contact or Retry-After cannot create a tight poll or shorten the minimum wait; an event grant still ends waiting"
+  ],
+  "parityP2c3hCases": [
+    "STK-01 epoch_closed",
+    "STK-02 cycle_terminal",
+    "STK-03 cycle_superseded",
+    "STK-04 age",
+    "STK-05 hole_epoch_closed",
+    "STK-06 inflight",
+    "STK-07 retry_pending",
+    "STK-08 under_24h",
+    "STK-09 canonical_receipt",
+    "STK-10 open_epoch_hole",
+    "STK-11 reason_grammar",
+    "STK-12 terminal_set_parity"
   ],
   "parityL1StatusCommandCases": [
     "LSC-01 the status file the gateway writes is found by the gateway's own path rule, also when it is not beside the link record",
@@ -1422,7 +1436,7 @@
     "L1": "94a5809aa1b1a9121404e15769e69487d5919efb641a8b0c358ba1793dc3842c",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "e8df2e3e637e144c5399a8f4c3f5c0c5f6dac5f68141eaf27dd56029e4573018",
+    "P2c": "e3315762bfda42f3601d0b47deb1f78363a8d7377e7a6eff49d184851972f0a6",
     "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
@@ -1746,5 +1760,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "0dc18a4ffe2b227728148a24c7a4a5835721c226bf68137423a95732ec146969"
+  "contractSha256": "cf182f6b96bc922f70ca169024f6a62a392a2ed4e7f6a4ba3b6c89b87e2bc694"
 }

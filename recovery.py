@@ -17,11 +17,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 REASONS = ("cycle_terminal", "cycle_superseded", "epoch_closed")
+# Contract P2c-3h: the one terminal-state set of this connector. Every terminal
+# check (frontier walk, retention, renewal quiescence, owner-control fence)
+# uses it; ``stuck`` is terminal evidence written by the stuck rule.
+STUCK_STATE = "stuck"
+TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "failed", "cancelled", "superseded", "ignored", STUCK_STATE})
+STUCK_TRIGGERS = ("epoch_closed", "cycle_terminal", "cycle_superseded", "age", "hole_epoch_closed")
+STUCK_REASON = re.compile(r"^stuck:(epoch_closed|cycle_terminal|cycle_superseded|age|hole_epoch_closed):([a-z0-9_]{1,100})$")
 TERMINAL_CYCLE_STATES = frozenset({"completed", "interrupted", "timed_out", "failed"})
 TERMINAL_INTENT_RETENTION = 32
 REPORT_LIMIT = 32
@@ -98,7 +106,8 @@ def is_terminal_intent(intent: Any) -> bool:
         return False
     if delivery == "posted" and lifecycle in {"complete", "not_required"} and state in {"posted", ""}:
         return True
-    return delivery in {"superseded", "skipped"} and state in {"superseded", "skipped", ""}
+    return (delivery in {"superseded", "skipped"} & TERMINAL_EVENT_STATES
+            and state in {"superseded", "skipped", ""})
 
 
 def prune_terminal_intents(binding: Any, keep: int = TERMINAL_INTENT_RETENTION) -> list[str]:
@@ -150,11 +159,8 @@ def prior_state(binding: Any, seq: int) -> dict[str, Any]:
 # --- server proof (read-only, the member's own credential) -------------------
 
 
-def server_proof(api: Any, room_id: str, membership_id: str, seq: int, reason: str,
-                 evidence_ref: str) -> dict[str, Any]:
-    """The Room's proof that seq is terminal for this member, or RecoveryRefused."""
-    if reason not in REASONS:
-        raise RecoveryRefused("unknown_reason", f"reason must be one of {', '.join(REASONS)}")
+def _read_event(api: Any, room_id: str, seq: int) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The epoch holding seq, the event, its epoch page and the Room state (read-only)."""
     listing = api.epochs(room_id) or {}
     epochs = sorted(
         (item for item in (listing.get("epochs") if isinstance(listing, dict) else listing) or []
@@ -172,6 +178,16 @@ def server_proof(api: Any, room_id: str, membership_id: str, seq: int, reason: s
     if not isinstance(event, dict):
         raise RecoveryRefused("event_not_found", f"the Room returned no event at seq {seq}")
     state = api.room_state(room_id) or {}
+    return epoch, event, page, state
+
+
+def server_proof(api: Any, room_id: str, membership_id: str, seq: int, reason: str,
+                 evidence_ref: str) -> dict[str, Any]:
+    """The Room's proof that seq is terminal for this member, or RecoveryRefused."""
+    if reason not in REASONS:
+        raise RecoveryRefused("unknown_reason", f"reason must be one of {', '.join(REASONS)}")
+    epoch, event, page, state = _read_event(api, room_id, seq)
+    epoch_id = str(epoch.get("id") or "")
     active_epoch_id = str((state.get("activeEpoch") or {}).get("id") or "")
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     proof: dict[str, Any] = {
@@ -211,6 +227,95 @@ def server_proof(api: Any, room_id: str, membership_id: str, seq: int, reason: s
     return {**facts, "proof": proof}
 
 
+# --- stuck events (contract P2c-3h) ----------------------------------------------
+
+
+def stuck_code(code: Any) -> str:
+    """The original code in a stuck reason: lower-case [a-z0-9_], else the literal none."""
+    text = re.sub(r"[^a-z0-9_]+", "_", str(code or "").strip().lower()).strip("_")[:100].strip("_")
+    return text or "none"
+
+
+def stuck_reason(trigger: str, original_code: Any) -> str:
+    """stuck:<trigger>:<original code|none>; a hole never carries a code."""
+    if trigger not in STUCK_TRIGGERS:
+        raise ValueError(f"stuck trigger must be one of {', '.join(STUCK_TRIGGERS)}")
+    return f"stuck:{trigger}:{'none' if trigger == 'hole_epoch_closed' else stuck_code(original_code)}"
+
+
+def valid_stuck_reason(reason: Any) -> bool:
+    return isinstance(reason, str) and STUCK_REASON.fullmatch(reason) is not None
+
+
+def stuck_proof(api: Any, room_id: str, membership_id: str, seq: int) -> dict[str, Any]:
+    """What the Room proves about seq for the stuck rule, in one read set.
+
+    ``trigger`` is epoch_closed, cycle_terminal, cycle_superseded or "" (not
+    proven). ``proofBytes`` is the canonical JSON of the Room's own objects the
+    proof rests on (the event's epoch, the active epoch, the cycle when read).
+    Raises RecoveryRefused when the Room has no such event.
+    """
+    epoch, event, page, state = _read_event(api, room_id, seq)
+    epoch_id = str(epoch.get("id") or "")
+    active = state.get("activeEpoch") if isinstance(state.get("activeEpoch"), dict) else {}
+    active_epoch_id = str(active.get("id") or "")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    proof: dict[str, Any] = {
+        "activeEpochId": active_epoch_id,
+        "eventEpochStatus": str(epoch.get("status") or ""),
+        "cycleId": "", "cycleState": "", "cycleGeneration": 0, "eventGeneration": 0,
+        "deliveredSeq": int(page.get("deliveredSeq") or 0),
+        "fetchedAt": _now(),
+    }
+    facts = {"eventId": str(event.get("id") or ""), "eventType": str(event.get("type") or ""), "eventEpochId": epoch_id}
+    raw: dict[str, Any] = {"event": {"id": facts["eventId"], "seq": seq, "type": facts["eventType"]},
+                           "epoch": epoch, "activeEpoch": active}
+    trigger, evidence_ref = "", ""
+    if epoch_id and epoch_id != active_epoch_id and proof["eventEpochStatus"] != "active":
+        trigger, evidence_ref = "epoch_closed", f"epoch:{epoch_id}"
+    else:
+        cycle_id = str(payload.get("cycleId") or "")
+        target = str(payload.get("membershipId") or "")
+        other_member = facts["eventType"] == "discussion.cycle_attempt_ready" and target and target != membership_id
+        if cycle_id and not other_member:
+            cycle = api.get_discussion_cycle(room_id, cycle_id) or {}
+            cycle = cycle.get("cycle") if isinstance(cycle.get("cycle"), dict) else cycle
+            raw["cycle"] = cycle
+            proof.update({
+                "cycleId": cycle_id,
+                "cycleState": str(cycle.get("state") or ""),
+                "cycleGeneration": int(cycle.get("generation") or 0),
+                "eventGeneration": int(payload.get("generation") or 0),
+            })
+            if proof["cycleState"] in TERMINAL_CYCLE_STATES:
+                trigger, evidence_ref = "cycle_terminal", f"cycle:{cycle_id}"
+            elif proof["eventGeneration"] and proof["cycleGeneration"] > proof["eventGeneration"]:
+                trigger, evidence_ref = "cycle_superseded", f"cycle:{cycle_id}"
+    return {**facts, "trigger": trigger, "evidenceRef": evidence_ref, "proof": proof, "proofBytes": canonical(raw)}
+
+
+def stuck_summary(binding: Any) -> dict[str, Any]:
+    """Local status fields for the stuck events this binding recorded (P2c-3h)."""
+    reasons = {
+        int(key): str(mark.get("reason") or "")
+        for key, mark in binding.recovery_closures.items()
+        if str(key).isdigit() and isinstance(mark, dict) and valid_stuck_reason(mark.get("reason"))
+    }
+    seqs = sorted(reasons)
+    counts: dict[str, int] = {}
+    for reason in reasons.values():
+        trigger = reason.split(":")[1]
+        counts[trigger] = counts.get(trigger, 0) + 1
+    recent = seqs[-REPORT_LIMIT:]
+    return {
+        "stuckSeqs": recent,
+        "stuckReasons": {str(seq): reasons[seq] for seq in recent},
+        "stuckCount": len(seqs),
+        "stuckCounts": counts,
+        "lastStuckSeq": seqs[-1] if seqs else 0,
+    }
+
+
 # --- audit record ---------------------------------------------------------------
 
 
@@ -242,6 +347,26 @@ def build_record(*, connector: str, room_id: str, membership_id: str, client_ins
     return record
 
 
+def build_stuck_record(*, connector: str, room_id: str, membership_id: str, client_instance_id: str, seq: int,
+                       trigger: str, original_code: Any, facts: dict[str, Any], evidence_ref: str,
+                       proof: dict[str, Any], proof_bytes: str, prior: dict[str, Any]) -> dict[str, Any]:
+    """Contract P2c-3h: the connector's own audit record for a stuck event (verb ``stuck``).
+
+    Same envelope as a closure record; it is never read as an operator closure.
+    """
+    record = {
+        "version": 1, "verb": STUCK_STATE, "connector": connector,
+        "room": room_id, "membership": membership_id, "clientInstanceId": client_instance_id,
+        "seq": seq, "eventId": str(facts.get("eventId") or ""), "eventType": str(facts.get("eventType") or ""),
+        "eventEpochId": str(facts.get("eventEpochId") or ""), "reason": stuck_reason(trigger, original_code),
+        "evidenceRef": evidence_ref, "proof": dict(proof), "priorState": dict(prior),
+        "proofBytes": proof_bytes, "proofSha256": hashlib.sha256(proof_bytes.encode("utf-8")).hexdigest(),
+        "operator": "connector", "confirmToken": "", "recordedAt": "", "recordDigest": "",
+    }
+    record["confirmToken"] = confirm_token(record)
+    return record
+
+
 def seal(record: dict[str, Any]) -> dict[str, Any]:
     sealed = dict(record, recordedAt=_now())
     sealed["recordDigest"] = record_digest(sealed)
@@ -264,7 +389,7 @@ def append_record(path: Path, record: dict[str, Any]) -> None:
         os.close(fd)
 
 
-def read_records(path: Path) -> list[dict[str, Any]]:
+def read_records(path: Path, verb: str = "close") -> list[dict[str, Any]]:
     """Valid sealed records; a malformed, undecodable or altered line is skipped.
 
     Contract P3-4: an unreadable journal line or record is never fatal.
@@ -277,7 +402,7 @@ def read_records(path: Path) -> list[dict[str, Any]]:
     for line in lines:
         try:
             record = json.loads(line)
-            if (isinstance(record, dict) and record.get("version") == 1 and record.get("verb") == "close"
+            if (isinstance(record, dict) and record.get("version") == 1 and record.get("verb") == verb
                     and isinstance(record.get("proof"), dict) and isinstance(record.get("priorState"), dict)
                     and record.get("recordDigest") == record_digest(record)
                     and record.get("confirmToken") == confirm_token(record)):
@@ -285,6 +410,11 @@ def read_records(path: Path) -> list[dict[str, Any]]:
         except Exception:  # noqa: BLE001 - one bad line never hides the others
             continue
     return records
+
+
+def read_stuck_records(path: Path) -> list[dict[str, Any]]:
+    """Contract P2c-3h: the connector's sealed stuck records (never closures)."""
+    return [record for record in read_records(path, STUCK_STATE) if valid_stuck_reason(record.get("reason"))]
 
 
 def _journal_identity(path: Path) -> tuple[int, ...] | None:

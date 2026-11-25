@@ -111,7 +111,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.116"
+CONNECTOR_VERSION = "1.0.117"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -627,7 +627,14 @@ PENDING_EVENT_MAX_RETRIES = 2
 # this bound so later events can proceed; the server-side attempt cap has
 # already timed the attempt out well before.
 DISPATCH_INFLIGHT_MAX_SECONDS = 900.0
-TERMINAL_EVENT_STATES = frozenset({"posted", "skipped", "failed", "cancelled", "superseded", "ignored"})
+# Contract P2c-3h: the one terminal-state set, defined in recovery.
+TERMINAL_EVENT_STATES = recovery.TERMINAL_EVENT_STATES
+# Contract P2c-3h: a quarantine this old with no retry pending is stuck; an
+# unproven frontier is read from the Room again at most this often; one scan
+# marks at most this many frontier events stuck.
+STUCK_AGE_SECONDS = 24 * 3600.0
+STUCK_PROOF_RECHECK_SECONDS = 300.0
+STUCK_SCAN_LIMIT = 32
 # Contract P1-2: a POST /messages refusal without a canonical receipt that
 # proves the attempt, turn or epoch is no longer ours. The reply cannot
 # succeed by retrying, so it is a terminal superseded outcome with evidence,
@@ -1799,7 +1806,7 @@ def env_enablement() -> dict[str, Any] | None:
 
 # Inbox outcomes that carry no open or quarantined work (same set as the
 # OpenClaw connector's settled terminal evidence, OP-12 R5 B-F010).
-_SETTLED_INBOX = frozenset({"posted", "skipped", "superseded", "ignored", "cancelled"})
+_SETTLED_INBOX = TERMINAL_EVENT_STATES - {"failed"}
 _STALE_REASONS = frozenset({"credential_expired", "credential_revoked"})
 
 
@@ -4271,6 +4278,8 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                             ))
                     if not self._membership_gate(binding).paused:
                         await self._muted_fail_fast(binding, self._apply_recovery_closures)
+                    if not self._membership_gate(binding).paused:
+                        await self._muted_fail_fast(binding, self._apply_stuck_events)
                     await self._transport_cycle(binding)
                     self._report_ledger(binding)
                     self._persist_binding(binding)
@@ -5521,6 +5530,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             # posted/skip/cancel/supersede/ignore after upgrade, so preserve
             # the cursor and intent for operator review.
             binding.inbox[key] = "quarantined"
+            binding.pending_since[key] = time.time()  # P2c-3h: the quarantine's time
             logger.error(
                 "Room %s quarantined legacy unclassified completion at sequence %s",
                 binding.room_id, seq,
@@ -5558,7 +5568,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         if selected is not None:
             if not self._intent_matches_binding(binding, selected):
                 binding.inbox[key] = "quarantined"
-                binding.pending_since.pop(key, None)
+                binding.pending_since[key] = time.time()  # P2c-3h: the quarantine's time
                 self._persist_binding(binding)
                 logger.error(
                     "Room %s quarantined delivery intent %s from a replaced binding generation",
@@ -7481,6 +7491,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
     def _terminal_evidence_valid(status: str, evidence: dict[str, Any]) -> bool:
         if status not in TERMINAL_EVENT_STATES or evidence.get("status") != status:
             return False
+        if status == recovery.STUCK_STATE:
+            # Contract P2c-3h: the closed grammar stuck:<trigger>:<original code|none>.
+            return recovery.valid_stuck_reason(evidence.get("reason"))
         if status == "posted":
             return (
                 isinstance(evidence.get("canonicalEventId"), str)
@@ -7541,7 +7554,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             }
             binding.pending_since = {
                 key: started for key, started in binding.pending_since.items()
-                if int(key) > binding.acknowledged_cursor and binding.inbox.get(key) == "pending"
+                if int(key) > binding.acknowledged_cursor and binding.inbox.get(key) in {"pending", "quarantined"}
             }
             binding.pending_retries = {
                 key: retries for key, retries in binding.pending_retries.items()
@@ -7667,7 +7680,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         }
         binding.pending_since = {
             key: started for key, started in binding.pending_since.items()
-            if int(key) > cursor and binding.inbox.get(key) == "pending"
+            if int(key) > cursor and binding.inbox.get(key) in {"pending", "quarantined"}
         }
         binding.pending_retries = {
             key: retries for key, retries in binding.pending_retries.items()
@@ -7843,6 +7856,177 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             if not recorded:
                 logger.warning("Room %s recovery closure applied: seq %s, reason %s, operator %s",
                                binding.room_id, seq, record["reason"], record["operator"])
+
+    def _stuck_candidate(self, binding: RoomBinding, seq: int, now: float) -> dict[str, Any] | None:
+        """Contract P2c-3h: the frontier seq the stuck rule may judge, or None.
+
+        A quarantine or a hole (no local evidence below later evidence) with no
+        delivery attempt in flight and no complete canonical receipt. A
+        quarantine without a recorded time is stamped now (first scan after an
+        upgrade), so it is never freed by age at once.
+        """
+        key = str(seq)
+        status = str(binding.inbox.get(key) or "")
+        intent_key, intent = "", {}
+        for candidate, value in binding.delivery_intents.items():
+            if isinstance(value, dict) and recovery.intent_source_seq(value) == seq:
+                intent_key, intent = candidate, value
+        event_ids = {intent_key} if intent_key else set()
+        event_ids.update(event_id for event_id, event_seq in getattr(self, "_event_seq", {}).get(binding.room_id, {}).items()
+                         if event_seq == seq)
+        event_ids.update(source for source, source_seq in binding.turn_sequences.items() if source_seq == seq)
+        event_ids.discard("")
+        inflight = getattr(self, "_inflight_events", None) or set()
+        generations = getattr(self, "_event_dispatch_generation", None) or {}
+        holder = (getattr(self, "_active_dispatch_rooms", None) or {}).get(binding.room_id)
+        if any(event_id in inflight or (holder and generations.get(event_id) == holder) for event_id in event_ids):
+            return None
+        receipt = intent.get("canonical_event") if isinstance(intent.get("canonical_event"), dict) else {}
+        journal = ((binding.delivery_lifecycle.get(intent_key) or {}).get("receipt") or {}) if intent_key else {}
+        if (isinstance(receipt.get("id"), str) and receipt["id"] and type(receipt.get("seq")) is int
+                and receipt["seq"] > 0 and _valid_canonical_timestamp(receipt.get("ts"))) or journal.get("canonical_event_id"):
+            return None  # Contract P2c-3h: a complete canonical receipt is never stuck.
+        if status == "quarantined":
+            since = binding.pending_since.get(key)
+            if not isinstance(since, (int, float)) or isinstance(since, bool) or since <= 0:
+                failed_at = intent.get("failed_at")
+                since = failed_at if isinstance(failed_at, (int, float)) and not isinstance(failed_at, bool) and failed_at > 0 else now
+                binding.pending_since[key] = float(since)
+                self._persist_binding(binding)
+            queued = (getattr(self, "_queued_events", None) or {}).get(binding.room_id, {})
+            retry_pending = (
+                intent.get("state") == "failed-retryable" or intent.get("delivery_state") == "delivery_pending"
+                or seq in queued
+            )
+            return {"kind": "quarantine", "intentKey": intent_key, "lastErrorCode": str(intent.get("last_error_code") or ""),
+                    "eventId": intent_key or next(iter(sorted(event_ids)), ""), "since": float(since),
+                    "retryPending": retry_pending}
+        if status or key in binding.terminal_evidence:
+            return None
+        try:
+            prior = recovery.prior_state(binding, seq)
+        except recovery.RecoveryRefused:
+            return None
+        if prior["kind"] != "hole":
+            return None
+        return {"kind": "hole", "intentKey": "", "lastErrorCode": "", "eventId": "", "since": 0.0, "retryPending": False}
+
+    async def _apply_stuck_events(self, binding: RoomBinding) -> None:
+        """Contract P2c-3h: a quarantined or proven-dead frontier never holds the acknowledgement.
+
+        At the frontier (acknowledgement + 1), a quarantine becomes stuck when
+        the Room proves its epoch closed or its cycle terminal or superseded,
+        or after 24 hours with no retry pending; a hole only when the Room
+        proves its epoch closed. The connector first appends a sealed ``stuck``
+        audit record (with the Room's proof bytes), then records terminal
+        evidence ``stuck`` through the normal completion path with the intent
+        kept as evidence. Nothing is replayed or deleted; the contiguous walk
+        acknowledges. A failure is logged once and tried at the next scan.
+        """
+        state_file = getattr(self, "_state_file", None)
+        if state_file is None:
+            return
+        checked = getattr(self, "_stuck_checked", None)
+        if checked is None:
+            checked = self._stuck_checked = {}
+        notices = getattr(self, "_stuck_notices", None)
+        if notices is None:
+            notices = self._stuck_notices = set()
+        journal = recovery.journal_path(state_file)
+        for _ in range(STUCK_SCAN_LIMIT):
+            seq = binding.acknowledged_cursor + 1
+            key = str(seq)
+            mark = binding.recovery_closures.get(key) or {}
+            try:
+                if recovery.valid_stuck_reason(mark.get("reason")) and binding.inbox.get(key) == recovery.STUCK_STATE:
+                    # Recorded earlier; only the acknowledgement is retried.
+                    await self._complete_event(binding, seq)
+                    if binding.acknowledged_cursor < seq:
+                        return
+                    continue
+                now = time.time()
+                candidate = self._stuck_candidate(binding, seq, now)
+                if candidate is None:
+                    return
+                marker = (binding.room_id, binding.membership_id, seq)
+                proven: dict[str, Any] = {}
+                if now - checked.get(marker, float("-inf")) >= STUCK_PROOF_RECHECK_SECONDS:
+                    checked[marker] = now
+                    try:
+                        proven = await self._call(binding, lambda api: recovery.stuck_proof(
+                            api, binding.room_id, binding.membership_id, seq,
+                        ), background=True)
+                    except recovery.RecoveryRefused:
+                        proven = {}
+                    except ProtocolError as error:
+                        if error.code == "membership_inactive":
+                            raise
+                        proven = {}
+                trigger = str(proven.get("trigger") or "")
+                if candidate["kind"] == "hole":
+                    if trigger != "epoch_closed":
+                        return
+                    trigger = "hole_epoch_closed"
+                elif not trigger:
+                    if candidate["retryPending"] or now - candidate["since"] < STUCK_AGE_SECONDS:
+                        return
+                    trigger = "age"
+                since_text = (datetime.fromtimestamp(candidate["since"], timezone.utc).isoformat(timespec="seconds")
+                              .replace("+00:00", "Z")) if candidate["since"] else ""
+                if trigger == "age":
+                    proof = {"quarantinedSince": since_text, "ageSeconds": int(now - candidate["since"]),
+                             "fetchedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
+                    proof_bytes = recovery.canonical(proof)
+                    evidence_ref = "age:24h"
+                else:
+                    proof, proof_bytes, evidence_ref = proven["proof"], proven["proofBytes"], proven["evidenceRef"]
+                facts = {"eventId": proven.get("eventId") or candidate["eventId"],
+                         "eventType": proven.get("eventType") or "", "eventEpochId": proven.get("eventEpochId") or ""}
+                record = recovery.seal(recovery.build_stuck_record(
+                    connector="hermes", room_id=binding.room_id, membership_id=binding.membership_id,
+                    client_instance_id=binding.installation_id, seq=seq, trigger=trigger,
+                    original_code=candidate["lastErrorCode"], facts=facts, evidence_ref=evidence_ref,
+                    proof=proof, proof_bytes=proof_bytes,
+                    prior={"kind": candidate["kind"], "intentKey": candidate["intentKey"],
+                           "lastErrorCode": candidate["lastErrorCode"], "quarantinedSince": since_text},
+                ))
+                # The audit record is durable before any state changes.
+                recovery.append_record(journal, record)
+                binding.recovery_closures[key] = {"recordDigest": record["recordDigest"],
+                                                  "appliedAt": record["recordedAt"], "reason": record["reason"]}
+                self._persist_binding(binding)
+                logger.warning("Room %s seq %s is stuck: %s; acknowledgement advances past it",
+                               binding.room_id, seq, record["reason"])
+                await self._complete_event(binding, seq, terminal_status=recovery.STUCK_STATE,
+                                           source_id=facts["eventId"], reason=record["reason"], preserve_intents=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - the stuck rule never stalls the watch loop
+                if isinstance(error, ProtocolError) and error.code == "membership_inactive":
+                    raise
+                code = getattr(error, "code", "") or type(error).__name__
+                if (binding.room_id, seq, code) not in notices:
+                    notices.add((binding.room_id, seq, code))
+                    logger.warning("Room %s stuck rule for seq %s not applied yet: %s", binding.room_id, seq, code)
+                return
+            finally:
+                self._report_stuck(binding)
+            if binding.acknowledged_cursor < seq:
+                return
+
+    def _report_stuck(self, binding: RoomBinding) -> None:
+        """Contract P2c-3h: stuckSeqs, reasons and counts, and execution failure events_stuck."""
+        summary = recovery.stuck_summary(binding)
+        if summary["stuckCount"]:
+            key = (binding.room_id, binding.membership_id)
+            reported = getattr(self, "_stuck_reported", None)
+            if reported is None:
+                reported = self._stuck_reported = {}
+            if reported.get(key) != (summary["stuckCount"], summary["lastStuckSeq"]):
+                reported[key] = (summary["stuckCount"], summary["lastStuckSeq"])
+                logger.warning("Room %s execution failure events_stuck: count %s, last seq %s",
+                               binding.room_id, summary["stuckCount"], summary["lastStuckSeq"])
+        self._status_room(binding, stuck=summary)
 
     async def _release_cycle_attempt_after_failure(
         self, binding: RoomBinding, event_id: str, reason: str,
@@ -8289,6 +8473,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 )
             else:
                 binding.inbox[key] = "quarantined"
+                binding.pending_since[key] = now  # P2c-3h: the quarantine's time
                 logger.error(
                     "Room %s quarantined unprocessed event sequence %s after %s bounded retries; acknowledgement remains at %s",
                     binding.room_id, seq, PENDING_EVENT_MAX_RETRIES,
@@ -8342,6 +8527,7 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 binding.inbox[key] = "failed-retryable"
             else:
                 binding.inbox[key] = "quarantined"
+                binding.pending_since[key] = intent["failed_at"]  # P2c-3h: the quarantine's time
                 attempt_id = str((
                     (getattr(self, "_cycle_attempts", {}).get(source_id) or {}).get("attempt") or {}
                 ).get("id") or "-")

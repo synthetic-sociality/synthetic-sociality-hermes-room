@@ -303,6 +303,10 @@ delay a heartbeat (P2c-3e), a post, an acknowledgement or a stop (P2c-3d); their
 still apply. A membership stopped by the Room starts none of these waits or activities until its existing renewal or
 re-admission rules permit it.
 
+<<<P2c-3h
+A Room event that the connector has quarantined never holds the member's acknowledgement frontier indefinitely. On every scan, a quarantined event at the frontier with no delivery attempt in flight becomes stuck when (a) the Room proves its epoch closed or its cycle terminal or superseded, or (b) it has been quarantined for at least 24 hours with no retry pending. A sequence at the frontier with no local evidence at all becomes stuck only under (a), with reason hole_epoch_closed; open-epoch holes still hold the frontier. Stuck is a terminal state: the connector writes terminal evidence "stuck" with reason stuck:<trigger>:<original code>, where trigger is one of epoch_closed, cycle_terminal, cycle_superseded, age or hole_epoch_closed and original code is the prior lastErrorCode or the literal none. It keeps the intent and event bytes unchanged as audited evidence; for hole_epoch_closed, where no local bytes exist, it persists the Room's epoch-closed proof bytes as that evidence. It replays nothing, deletes nothing, and then advances the frontier by the normal contiguous walk. A delivery with a complete canonical receipt is never stuck. The terminal-state set is defined once per connector and every terminal check (frontier walk, retention, renewal quiescence, owner-control fence) uses it. Local status reports stuckSeqs with reasons and counts; the connector reports execution failure code events_stuck with the count and last stuck sequence. Recovery verbs remain available as optional forensics.
+P2c-3h>>>
+
 P2c-4 Local status. Each connector keeps a machine-readable local status per installation (plugin loaded, version, per-Room
 connection state, last error code, last gate wait and its reason, last reconnect and outage length, web reading per P2c-6),
 with no secrets and no message bodies, for the host watchdog. Additions to the file are additive: the schema name stays.

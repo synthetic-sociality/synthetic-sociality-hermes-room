@@ -7,6 +7,27 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.117 — Stuck events never hold a cursor (P2c-3h), paired with OpenClaw 0.2.92
+
+A Room event the connector quarantined no longer holds the member's acknowledgement frontier for ever (contract
+P2c-3h, block sha256 80258410, directly after P2c-3f; contract cf182f6b, parity section P2c e3315762; conformance
+`parityP2c3hCases` STK-01 to STK-12, the same names as OpenClaw 0.2.92). On every scan, after the audited closures,
+`_apply_stuck_events` judges the frontier (acknowledgement + 1). A quarantine there with no delivery attempt in flight
+and no complete canonical receipt becomes stuck when the Room proves its epoch closed or its cycle terminal or
+superseded (`recovery.stuck_proof`, one read set, at most every 300 s per seq), or after 24 hours with no retry
+pending. A hole there becomes stuck only when the Room proves its epoch closed (`hole_epoch_closed`); open-epoch holes
+still hold. The connector first appends a sealed `stuck` record to the recovery audit journal (verb `stuck`, never read
+as an operator closure; it carries the Room's proof bytes and their sha256), marks the seq in `recovery_closures` with
+its reason, and then records terminal evidence `stuck` with reason `stuck:<trigger>:<original code|none>` through the
+normal completion path with the intent kept byte-for-byte. Nothing is replayed or deleted; the contiguous walk
+acknowledges. `recovery.TERMINAL_EVENT_STATES` (stuck included) is the one terminal-state set: the frontier walk,
+retention, `renewal.quiescent` and the owner-control fence use it. A quarantine now keeps its time in `pending_since`;
+one without a time is stamped on its first scan after the upgrade (never freed by age at once). Local status adds
+`stuckSeqs`, `stuckReasons`, `stuckCount`, `stuckCounts` and `executionFailure` `{layer runtime, code events_stuck,
+count, lastSeq}` while the membership has stuck events (absent otherwise, so the P2c-4 Appendix key set is unchanged);
+the same failure is logged. Recovery verbs stay available as forensics.
+`tests/test_stuck_events.py` covers it, with the trace seqs 2654/2662 (epoch_closed) and 2933, 2987, 3223 (age).
+
 ## 1.0.116 — Retained terminal delivery intents no longer block credential renewal, paired with OpenClaw 0.2.91
 
 `renewal.quiescent` no longer counts retained terminal delivery intents (posted with lifecycle `complete` or

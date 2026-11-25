@@ -7,7 +7,7 @@ invocations. No process environment, active profile, model or sibling changes.
 from pathlib import Path
 
 from .protocol import RoomProtocol
-from .recovery import is_terminal_intent
+from .recovery import TERMINAL_EVENT_STATES, is_terminal_intent
 from .state import RoomBinding, load, state_path_scope
 
 
@@ -24,7 +24,8 @@ def quiescent(binding: RoomBinding) -> bool:
     # byte-for-byte; renewal must neither replay it nor acknowledge its gap.
     # Unfinished outbound/lifecycle work still has to drain under the adapter's
     # receive/dispatch fence before exchanging credentials. Retained terminal
-    # intents (contract P3-2) are finished history, not unfinished work.
+    # intents (contract P3-2) are finished history, not unfinished work. The
+    # inbox uses the one terminal-state set (contract P2c-3h), stuck included.
     return not (
         any(not is_terminal_intent(intent)
             and not (intent.get("state") == "quarantined"
@@ -33,7 +34,7 @@ def quiescent(binding: RoomBinding) -> bool:
             for intent in binding.delivery_intents.values())
         or binding.delivery_lifecycle
         or any(binding.inbox.get(key) != "quarantined" for key in binding.pending_since)
-        or any(value not in {"posted", "skipped", "failed", "cancelled", "superseded", "ignored", "quarantined"}
+        or any(value not in TERMINAL_EVENT_STATES and value != "quarantined"
                for value in binding.inbox.values())
     )
 

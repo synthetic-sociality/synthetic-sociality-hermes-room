@@ -29,6 +29,8 @@ WEB_READ_VALUES = frozenset({"available", "unavailable", "unknown"})
 WEB_READ_TOOL_NAMES = ("browser", "browser_navigate", "web_extract", "web_fetch", "web_search")
 # Contract P2c-4 (ISSUE-023): why a dispatch waited on the host.
 GATE_WAIT_REASONS = frozenset({"", "host_run_busy", "host_session_unobservable", "held_by_moderator"})
+# Contract P2c-3h: per-membership stuck fields, written only while there are stuck events.
+STUCK_FIELDS = ("stuckSeqs", "stuckReasons", "stuckCount", "stuckCounts", "executionFailure")
 _CODE_LIMIT = 64
 # Contract P8-5: a change of `lastConnectedAt` alone is written at most this
 # often per installation; every other change is written at once.
@@ -223,7 +225,8 @@ class LocalStatus:
     def room(self, room_id: str, membership_id: str = "", *, connection: str | None = None,
              error_code: str | None = None, connected: bool = False, registered: bool = False,
              inactive: bool | None = None, gate_wait_seconds: float | None = None,
-             gate_wait_reason: str | None = None, ledger: dict[str, Any] | None = None) -> None:
+             gate_wait_reason: str | None = None, ledger: dict[str, Any] | None = None,
+             stuck: dict[str, Any] | None = None) -> None:
         """Update one membership's entry and its Room summary; write only when something changed."""
         if not room_id:
             return
@@ -302,6 +305,23 @@ class LocalStatus:
                 entry["holeSeqs"] = [int(seq) for seq in ledger.get("holeSeqs") or []][:32]
                 entry["quarantinedSeqs"] = [int(seq) for seq in ledger.get("quarantinedSeqs") or []][:32]
                 entry["ledgerCode"] = _code(ledger.get("ledgerCode") or "")
+            if stuck is not None:
+                # Contract P2c-3h: stuck seqs with reasons and counts, and the
+                # execution failure events_stuck (count, last stuck seq). Present
+                # only while the membership has stuck events (additive, P2c-4).
+                count = int(stuck.get("stuckCount") or 0)
+                for name in STUCK_FIELDS:
+                    entry.pop(name, None)
+                if count:
+                    seqs = [int(seq) for seq in stuck.get("stuckSeqs") or []][:32]
+                    entry["stuckSeqs"] = seqs
+                    entry["stuckReasons"] = {str(seq): str(reason) for seq, reason in (stuck.get("stuckReasons") or {}).items()
+                                             if str(seq).isdigit() and int(seq) in seqs}
+                    entry["stuckCount"] = count
+                    entry["stuckCounts"] = {str(trigger): int(value)
+                                            for trigger, value in (stuck.get("stuckCounts") or {}).items()}
+                    entry["executionFailure"] = {"layer": "runtime", "code": "events_stuck", "count": count,
+                                                 "lastSeq": int(stuck.get("lastStuckSeq") or 0)}
             if gate_wait_seconds is not None:
                 entry["lastGateWaitSeconds"] = round(max(0.0, float(gate_wait_seconds)), 1)
                 entry["lastGateWaitAt"] = _now()

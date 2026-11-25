@@ -260,7 +260,7 @@ class RequestDisciplineConformanceTests(unittest.TestCase):
         block = PARAGRAPH.split("\n")[:-1]
         self.assertEqual(lines[end + 1:end + 1 + len(block)], block)
         self.assertEqual(lines[end + 1 + len(block)], "")
-        self.assertTrue(lines[end + 2 + len(block)].startswith("P2c-4 Local status. "))
+        self.assertEqual(lines[end + 2 + len(block)], "<<<P2c-3h")
         self.assertEqual(CONTRACT.count("P2c-3f Request discipline"), 1)
 
     def test_the_case_names_are_the_shared_ones_and_each_has_a_test(self):

@@ -161,7 +161,9 @@ def berlin():
 
 
 class Harness:
-    def __init__(self, binding, api, directory):
+    def __init__(self, binding, api, directory=None):
+        self.scratch = tempfile.TemporaryDirectory()  # removed with the harness
+        directory = directory or self.scratch.name
         self.binding, self.api = binding, api
         self.state_file = Path(directory) / "state.json"
         instance = object.__new__(adapter.SyntheticSocialityAdapter)
@@ -192,9 +194,8 @@ class Harness:
 
 
 def run_case(factory, scans=(NOW,)):
-    directory = tempfile.mkdtemp()
     binding, api = factory()
-    harness = Harness(binding, api, directory)
+    harness = Harness(binding, api)
     before = copy.deepcopy(binding.delivery_intents)
     for now in scans:
         harness.scan(now)
@@ -262,6 +263,9 @@ class StuckTriggerTests(unittest.TestCase):
         binding = harness.binding
         # Wrong-seq guard: 2705 (open epoch 22, quarantined 1 h) still holds the frontier.
         self.assertEqual(binding.inbox.get("2705"), "quarantined")
+        # The kept intent of 2662 (now below the acknowledgement) never trips the orphaned-intent stop.
+        self.assertIn("ev2662", binding.delivery_intents)
+        self.assertEqual(adapter.SyntheticSocialityAdapter._overtaken_delivery_intents(binding), [])
         record = next(item for item in harness.stuck_records() if item["seq"] == 2654)
         self.assertEqual((record["eventId"], record["eventType"], record["eventEpochId"], record["evidenceRef"]),
                          ("ev2654", "discussion.cycle_attempt_ready", "epoch-21", "epoch:epoch-21"))
@@ -321,7 +325,7 @@ class StuckTriggerTests(unittest.TestCase):
 
     def test_stk_06_inflight_attempt_is_never_stuck(self):
         harness_binding, api = zurie()
-        harness = Harness(harness_binding, api, tempfile.mkdtemp())
+        harness = Harness(harness_binding, api)
         harness.instance._inflight_events.add("ev2654")
         harness.instance._event_seq = {"room-1": {"ev2654": 2654}}
         harness.instance._active_dispatch_rooms = {"room-1": "gen-1"}
@@ -372,6 +376,12 @@ class StuckTriggerTests(unittest.TestCase):
         self.assertEqual((harness.binding.acknowledged_cursor, harness.binding.recovery_closures,
                           harness.api.acks), (2932, {}, []))
         self.assertEqual(harness.stuck_records(), [])
+        # Nothing stuck: the status entry carries no stuck fields (P2c-4 Appendix key set unchanged).
+        status = json.loads((harness.state_file.parent / "status.json").read_text()) \
+            if (harness.state_file.parent / "status.json").exists() else {"memberships": {}}
+        entry = status["memberships"].get(MEMBER, {})
+        for name in local_status.STUCK_FIELDS:
+            self.assertNotIn(name, entry)
 
     def test_stk_11_reason_grammar_is_closed(self):
         self.assertEqual(recovery.stuck_reason("epoch_closed", ""), "stuck:epoch_closed:none")
