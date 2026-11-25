@@ -1792,7 +1792,7 @@ def _inspect_parked_renewal(binding: RoomBinding) -> None:
 def _close_owner_renewal(room_id: str, journal: dict, status: dict | None, reason: str, report) -> None:
     """ACK-AHEAD-07: an owner request that can no longer be issued closes the
     journal (nothing was swapped: the base credential is unchanged), records
-    the reason and stops the renewal retries; a new owner Renew is needed."""
+    the reason and stops retries. A new owner request can rotate the credential."""
     if status is not None and (str(status.get("requestId") or "") != str(journal.get("request_id") or "")
                                or str(status.get("roomId") or "") != room_id):
         raise ValueError("credential-renewal owner status changed request")
@@ -1809,7 +1809,7 @@ def _close_owner_renewal(room_id: str, journal: dict, status: dict | None, reaso
         latest.credential_rotation = {}
 
     update(close)
-    report(f"{room_id} renewal closed: {reason}. The room owner must click Renew again.")
+    report(f"{room_id} renewal closed: {reason}. Current credential retained; a new owner request can rotate it.")
     raise RenewalClosed(reason)
 
 

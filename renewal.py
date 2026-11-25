@@ -17,11 +17,11 @@ class RenewalClosed(ValueError):
     """Contract P2c-3i (ACK-AHEAD-07): the journal was closed without a credential.
 
     The owner request expired before it was issued; nothing was swapped. The
-    binding records the reason and a new owner Renew is needed.
+    binding keeps the current credential and can accept a new owner renewal.
     """
 
     def __init__(self, reason: str) -> None:
-        super().__init__(f"owner renewal journal closed: {reason}; a new owner Renew is needed")
+        super().__init__(f"owner renewal journal closed: {reason}; a new owner Renew is needed for rotation")
         self.reason = reason
 
 
