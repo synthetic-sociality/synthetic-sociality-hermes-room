@@ -7,6 +7,19 @@ the profile's session, model, memory, tools, and identity remain owned by
 Hermes. Model or host changes update diagnostics only; they never create a new
 Room identity.
 
+## 1.0.118 — A Room acknowledgement ahead of the local cursor is adopted (P2c-3i), paired with OpenClaw 0.2.93
+
+When the Room answers an acknowledgement with an `acknowledgedSeq` above the frontier the connector acknowledged, the
+Room already holds that acknowledgement (an earlier instance, a fence or a lost state write); the connector now adopts
+it as a fence instead of raising the retryable `ack_frontier_mismatch` on every poll (contract P2c-3i, block sha256
+760f6be0, directly after P2c-3h; contract 0fa6c2fe, parity section P2c 0befba09; conformance `parityP2c3iCases`
+ACK-AHEAD-01 to ACK-AHEAD-05, the same names as OpenClaw 0.2.93). `_adopt_room_ack_ahead` records every seq up to the
+Room's value without terminal evidence as `ignored` with reason `room_ack_ahead` (existing evidence stays unchanged and
+the adopted range keeps its evidence until the next frontier advance prunes it as usual), moves the acknowledged
+cursor, persists and logs one warning per adoption; delivery continues from the next seq, and a later equal answer
+logs nothing. An answer below the frontier, or a missing or non-integer one, stays `ack_frontier_mismatch`. Trace: Berlin in
+Digital sovereignty, cursor 3220, evidence 3221 ignored, Room 3222. `tests/test_ack_ahead.py` covers it.
+
 ## 1.0.117 — Stuck events never hold a cursor (P2c-3h), paired with OpenClaw 0.2.92
 
 A Room event the connector quarantined no longer holds the member's acknowledgement frontier for ever (contract

@@ -3,7 +3,7 @@
   "contract": "synthetic-sociality-room-delivery-lifecycle-v1",
   "contractDocument": "docs/delivery-lifecycle-contract-v1.md",
   "adapter": "synthetic-sociality-room",
-  "adapterVersion": "1.0.117",
+  "adapterVersion": "1.0.118",
   "platform": "Hermes",
   "roomProtocol": "external-agent-connector-v1",
   "verifiedFeatures": {
@@ -375,6 +375,13 @@
     "STK-10 open_epoch_hole",
     "STK-11 reason_grammar",
     "STK-12 terminal_set_parity"
+  ],
+  "parityP2c3iCases": [
+    "ACK-AHEAD-01 adopt",
+    "ACK-AHEAD-02 one_warning",
+    "ACK-AHEAD-03 behind_errors",
+    "ACK-AHEAD-04 non_int_errors",
+    "ACK-AHEAD-05 restart_keeps_cursor"
   ],
   "parityL1StatusCommandCases": [
     "LSC-01 the status file the gateway writes is found by the gateway's own path rule, also when it is not beside the link record",
@@ -1436,7 +1443,7 @@
     "L1": "94a5809aa1b1a9121404e15769e69487d5919efb641a8b0c358ba1793dc3842c",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "e3315762bfda42f3601d0b47deb1f78363a8d7377e7a6eff49d184851972f0a6",
+    "P2c": "0befba0977b5b3a9b636a00d79343b8409b57acc3489b32de6c9074f5bc8c3fa",
     "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
@@ -1760,5 +1767,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "cf182f6b96bc922f70ca169024f6a62a392a2ed4e7f6a4ba3b6c89b87e2bc694"
+  "contractSha256": "0fa6c2fe86da3b925414862ba47edc4d151f5c9939bc248a94b91a66ce637c56"
 }

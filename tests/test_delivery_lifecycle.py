@@ -2015,14 +2015,18 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
             if line.startswith("version:")
         )
         conformance_version = json.loads((ROOT / "conformance.json").read_text())["adapterVersion"]
-        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.117")
+        self.assertEqual(adapter.CONNECTOR_VERSION, "1.0.118")
         self.assertEqual(plugin_version, adapter.CONNECTOR_VERSION)
         self.assertEqual(conformance_version, adapter.CONNECTOR_VERSION)
         self.assertIn(
-            f"## {adapter.CONNECTOR_VERSION} — Stuck events never hold a cursor (P2c-3h), paired with OpenClaw 0.2.92",
+            f"## {adapter.CONNECTOR_VERSION} — A Room acknowledgement ahead of the local cursor is adopted (P2c-3i), paired with OpenClaw 0.2.93",
             (ROOT / "README.md").read_text(),
         )
         readme = (ROOT / "README.md").read_text()
+        self.assertLess(
+            readme.index("## 1.0.118 — A Room acknowledgement ahead of the local cursor is adopted (P2c-3i), paired with OpenClaw 0.2.93"),
+            readme.index("## 1.0.117 — Stuck events never hold a cursor (P2c-3h), paired with OpenClaw 0.2.92"),
+        )
         self.assertLess(
             readme.index("## 1.0.117 — Stuck events never hold a cursor (P2c-3h), paired with OpenClaw 0.2.92"),
             readme.index("## 1.0.116 — Retained terminal delivery intents no longer block credential renewal, paired with OpenClaw 0.2.91"),
@@ -2156,7 +2160,7 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn('profile="berlin"', context)
         self.assertIn('model="deepseek/deepseek-v4-flash"', context)
         self.assertIn('provider="openrouter"', context)
-        self.assertIn('connector="synthetic-sociality-room/1.0.117"', context)
+        self.assertIn('connector="synthetic-sociality-room/1.0.118"', context)
         self.assertIn('transport="long_poll_fallback"', context)
         self.assertIn('epoch="epoch-9"', context)
         self.assertNotIn("credential", context.lower())
@@ -4833,6 +4837,9 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
         self.assertIn("event-120", binding.delivery_lifecycle)
 
     def test_posted_receipt_gap_rejects_ack_beyond_locally_proven_frontier(self):
+        # The request never goes beyond the locally proven frontier (5, not 7).
+        # Since 1.0.118 (contract P2c-3i) a Room answer above it is adopted as a
+        # fence instead of raised: missing seqs become ignored/room_ack_ahead.
         async def exercise():
             binding = adapter.RoomBinding(
                 "https://room.example/api", "room-1", "member-1", "credential",
@@ -4861,19 +4868,18 @@ class DeliveryLifecycleContractTests(unittest.TestCase):
 
             api = API()
             instance._call = lambda _binding, operation, **_request_options: asyncio.sleep(0, result=operation(api))
-            with self.assertRaisesRegex(adapter.ProtocolError, "locally proven contiguous frontier"):
-                await instance._complete_event(
-                    binding, 5, terminal_status="posted", source_id="event-5",
-                    canonical_event_id="posted-6",
-                )
+            await instance._complete_event(
+                binding, 5, terminal_status="posted", source_id="event-5",
+                canonical_event_id="posted-6",
+            )
             return binding, api.requested
 
         binding, requested = asyncio.run(exercise())
         self.assertEqual(requested, 5)
-        self.assertEqual(binding.acknowledged_cursor, 4)
-        self.assertIn("5", binding.terminal_evidence)
-        self.assertIn("7", binding.terminal_evidence)
-        self.assertNotIn("6", binding.terminal_evidence)
+        self.assertEqual(binding.acknowledged_cursor, 99)
+        self.assertEqual(binding.terminal_evidence["5"]["status"], "posted")
+        self.assertEqual(binding.terminal_evidence["7"]["reason"], "self_event")
+        self.assertEqual(binding.terminal_evidence["6"]["reason"], "room_ack_ahead")
 
     def test_legacy_complete_receipt_promotes_without_repost_and_runs_lifecycle_only(self):
         async def exercise():

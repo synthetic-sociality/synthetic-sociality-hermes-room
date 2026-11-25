@@ -210,7 +210,7 @@ class StuckConformanceTests(unittest.TestCase):
         before = CONTRACT[:start]
         self.assertTrue(before.endswith("re-admission rules permit it.\n\n"), before[-80:])
         self.assertGreater(start, CONTRACT.index("P2c-3f Request discipline "))
-        self.assertTrue(CONTRACT[end:].startswith("\nP2c-4 Local status. "))
+        self.assertTrue(CONTRACT[end:].startswith("\n<<<P2c-3i\n"))
         self.assertEqual(CONTRACT.count("<<<P2c-3h"), 1)
 
     def test_the_case_names_are_the_shared_ones_and_each_has_a_test(self):

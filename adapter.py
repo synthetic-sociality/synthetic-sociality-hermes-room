@@ -111,7 +111,7 @@ def _session_thread_for_epoch(binding: RoomBinding, epoch_id: str) -> str | None
 
 
 NAME = "synthetic_sociality"
-CONNECTOR_VERSION = "1.0.117"
+CONNECTOR_VERSION = "1.0.118"
 logger = logging.getLogger(__name__)
 # The fastest heartbeat cadence, whatever the server advertises.
 HEARTBEAT_MIN_INTERVAL_SECONDS = 2
@@ -7654,7 +7654,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         try:
             response = await self._call(binding, lambda api: api.acknowledge(binding.room_id, cursor), background=True)
             authoritative = (response or {}).get("acknowledgedSeq")
-            if type(authoritative) is not int or authoritative != cursor:
+            # Contract P2c-3i: the Room already holds a higher acknowledgement
+            # (earlier instance, fence, lost state write); it is adopted below.
+            ahead = type(authoritative) is int and authoritative > cursor
+            if not ahead and (type(authoritative) is not int or authoritative != cursor):
                 raise ProtocolError(
                     "Room acknowledgement did not confirm the locally proven contiguous frontier",
                     code="ack_frontier_mismatch", retryable=True,
@@ -7671,6 +7674,9 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             )
             if _uncoded_contact_failure(error):
                 self._retry_acknowledgement(binding, error)
+            return
+        if ahead:
+            self._adopt_room_ack_ahead(binding, cursor, authoritative)
             return
         binding.acknowledged_cursor = cursor
         binding.cursor = max(binding.cursor, cursor)
@@ -7698,6 +7704,57 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             binding.turn_sequences.pop(source_id, None)
             binding.turn_observed.pop(source_id, None)
         # Contract P3-2: terminal intents beyond the newest 32 are pruned.
+        pruned = recovery.prune_terminal_intents(binding)
+        if pruned:
+            logger.info("Room %s pruned %d terminal delivery intents", binding.room_id, len(pruned))
+        self._persist_binding(binding)
+
+    def _adopt_room_ack_ahead(self, binding: RoomBinding, frontier: int, authoritative: int) -> None:
+        """Contract P2c-3i: adopt a Room acknowledgement ahead of the frontier.
+
+        Every seq up to ``authoritative`` without terminal evidence becomes
+        ``ignored`` with reason room_ack_ahead; existing evidence is kept. The
+        adopted range keeps its evidence until the next frontier advance prunes
+        it as usual. One warning per adoption; delivery continues after it.
+        """
+        previous = binding.acknowledged_cursor
+        for seq in range(previous + 1, authoritative + 1):
+            key = str(seq)
+            if self._terminal_evidence_valid(
+                    str(binding.inbox.get(key) or ""), dict(binding.terminal_evidence.get(key) or {})):
+                continue
+            source_id = next(
+                (source for source, source_seq in binding.turn_sequences.items() if source_seq == seq), "")
+            binding.inbox[key] = "ignored"
+            binding.terminal_evidence[key] = {
+                "status": "ignored",
+                "sourceEventId": source_id,
+                "canonicalEventId": "",
+                "canonicalSeq": 0,
+                "canonicalTs": "",
+                "reason": "room_ack_ahead",
+            }
+        binding.acknowledged_cursor = authoritative
+        binding.cursor = max(binding.cursor, authoritative)
+        binding.inbox = {key: status for key, status in binding.inbox.items() if int(key) > previous}
+        binding.terminal_evidence = {
+            key: evidence for key, evidence in binding.terminal_evidence.items() if int(key) > previous
+        }
+        binding.pending_since = {
+            key: started for key, started in binding.pending_since.items()
+            if int(key) > authoritative and binding.inbox.get(key) in {"pending", "quarantined"}
+        }
+        binding.pending_retries = {
+            key: retries for key, retries in binding.pending_retries.items() if int(key) > authoritative
+        }
+        for source_id in [source for source, source_seq in binding.turn_sequences.items() if source_seq <= authoritative]:
+            binding.turn_sequences.pop(source_id, None)
+            binding.turn_observed.pop(source_id, None)
+        logger.warning(
+            "Room %s acknowledgement ahead of the local cursor adopted: frontier %s, Room %s, seqs %s-%s ignored "
+            "with reason room_ack_ahead where no terminal evidence existed",
+            binding.room_id, frontier, authoritative, frontier + 1, authoritative,
+        )
         pruned = recovery.prune_terminal_intents(binding)
         if pruned:
             logger.info("Room %s pruned %d terminal delivery intents", binding.room_id, len(pruned))
