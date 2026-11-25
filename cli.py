@@ -1309,7 +1309,8 @@ def _renew_locked(room_id: str, *, request_owner: bool = False, owner_intent: di
             # captured after this connector has drained the target binding.
             if any(type(status.get(field)) is not int or status[field] < 0
                    for field in ("deliveredSeq", "acknowledgedSeq")):
-                raise ValueError("renewal claim omitted canonical delivery counters")
+                # OP-12 r3 F1: the one conflict code (contract P2c-3i), not a bare ValueError.
+                raise recovery.AckFrontierConflict("renewal claim omitted canonical delivery counters")
             journal = _record_renewal_delivery_snapshot(room_id, journal, {
                 "roomId": status.get("roomId"), "roster": [status],
             })
@@ -1602,10 +1603,10 @@ def _record_renewal_delivery_snapshot(room_id: str, journal: dict, response: dic
             expected_version = int(expected.get("identity_version") or 0)
             if expected_version and int(member.get("identityVersion") or 0) != expected_version:
                 raise ValueError("credential-renewal state preflight changed identity version")
-        delivered = int(member.get("deliveredSeq") or 0)
-        acknowledged = int(member.get("acknowledgedSeq") or 0)
-        # Contract P2c-3i: the Room's acknowledgement is reconciled first; a
-        # Room ahead is adopted as a fence, only a Room behind is a conflict.
+        # Contract P2c-3i: the Room's raw values are reconciled first (OP-12 r3 F1:
+        # never coerced before the helper); a Room ahead is adopted as a fence,
+        # a Room behind or a non-integer or missing value is the conflict.
+        acknowledged, delivered = member.get("acknowledgedSeq"), _room_delivered(member)
         _apply_room_ack(latest, acknowledged, delivered,
                         "credential-renewal state preflight conflicts with local replay cursors", "renewal preflight")
         frozen = {"delivered_seq": delivered, "acknowledged_seq": acknowledged}
@@ -1693,7 +1694,16 @@ def _roster_member(response: dict, binding: RoomBinding, where: str) -> dict:
     return member
 
 
-def _apply_room_ack(latest: RoomBinding, acknowledged: int, delivered: int, conflict: str, where: str) -> bool:
+_MISSING_DELIVERED = object()
+
+
+def _room_delivered(member: dict):
+    """The Room's raw deliveredSeq; a missing or null one is a non-integer the helper refuses."""
+    value = member.get("deliveredSeq")
+    return _MISSING_DELIVERED if value is None else value
+
+
+def _apply_room_ack(latest: RoomBinding, acknowledged, delivered, conflict: str, where: str) -> bool:
     """Contract P2c-3i inside a renewal transaction: reconcile, and on adoption
     re-take the protected snapshot and the expected cursors (the adoption is the
     only change, made under the renewal lock)."""
@@ -1718,8 +1728,7 @@ def _reconcile_renewal_ack(room_id: str, journal: dict, member: dict, conflict: 
     local cursor only here, before any identity or cursor comparison."""
     def persist(latest_state):
         latest = _same_rotation(latest_state, room_id, journal)
-        if not _apply_room_ack(latest, int(member.get("acknowledgedSeq") or 0),
-                               int(member.get("deliveredSeq") or 0), conflict, "renewal"):
+        if not _apply_room_ack(latest, member.get("acknowledgedSeq"), _room_delivered(member), conflict, "renewal"):
             raise StateUnchanged(None)
 
     try:

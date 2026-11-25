@@ -20,7 +20,7 @@ renewal finishes. With a valid base, and for the owner-control fence (`renewal.q
 rule is unchanged. Live finding: Aura (OpenClaw, Networks and Kabeltracker). `tests/test_renew_inflight.py` covers it.
 
 The Room is the authority for the acknowledged frontier (contract P2c-3i, block sha256 917c297d, directly after
-P2c-3h; contract 823b536d, parity section P2c e986cc6d; conformance `parityP2c3iCases` ACK-AHEAD-01 to ACK-AHEAD-07,
+P2c-3h; with P2c-3j the contract is 2cf69145 and the parity section P2c d2f23ede; conformance `parityP2c3iCases` ACK-AHEAD-01 to ACK-AHEAD-07,
 the same names as OpenClaw 0.2.93). A connector may only be behind the Room and catches up by adopting; only ahead of
 the Room is an error. One helper, `recovery.reconcile_room_ack`, is the only place a Room acknowledgement meets a local
 cursor: equal changes nothing; a Room ahead is adopted as a fence (every seq up to it without terminal evidence becomes
