@@ -20,17 +20,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from test_delivery_lifecycle import ROOT, adapter, state_store
+from test_delivery_lifecycle import ROOT, adapter, cli, state_store
 
 CONFORMANCE = json.loads((ROOT / "conformance.json").read_text())
 CONTRACT = (ROOT / "docs" / "delivery-lifecycle-contract-v1.md").read_text(encoding="utf-8")
 local_status = adapter.local_status
+renewal = adapter.renewal
+recovery = adapter.recovery
 
 ACK_AHEAD_CASES = [
     "ACK-AHEAD-01 adopt", "ACK-AHEAD-02 one_warning", "ACK-AHEAD-03 behind_errors",
     "ACK-AHEAD-04 non_int_errors", "ACK-AHEAD-05 restart_keeps_cursor",
+    "ACK-AHEAD-06 renewal_resumes", "ACK-AHEAD-07 expired_intent_ends_cleanly",
 ]
-BLOCK_SHA256 = "760f6be0bc71319c4e906545c00df4314c354e35f8927498407cd82da626d361"
+BLOCK_SHA256 = "917c297d29da2b2282106a459f6ae223561f00024c42f02b2ff5aea9c8fc6b2e"
 MEMBER = "member-1"
 ROOM = "duev8o1h936bl9f"
 
@@ -116,7 +119,7 @@ class AckAheadConformanceTests(unittest.TestCase):
 
     def test_the_case_names_are_the_shared_ones_and_each_has_a_test(self):
         self.assertEqual(CONFORMANCE["parityP2c3iCases"], ACK_AHEAD_CASES)
-        names = set(dir(AckAheadCaseTests))
+        names = set(dir(AckAheadCaseTests)) | set(dir(AckAheadRenewalTests))
         for case in ACK_AHEAD_CASES:
             number = case.split(" ", 1)[0].lower().replace("-", "_")
             self.assertTrue(any(name.startswith(f"test_{number}_") for name in names), case)
@@ -229,6 +232,274 @@ class AckAheadCaseTests(unittest.TestCase):
         self.assertEqual(state.binding("room-other").acknowledged_cursor, 3220)
         self.assertNotIn("3222", state.binding("room-other").inbox)
 
+
+
+# --- r1: renewal (ACK-AHEAD-06/07) and the site matrix -------------------------
+
+REQUEST_ID = cli._new_renewal_secret()
+INTENT = {"requestId": REQUEST_ID, "roomId": ROOM, "membershipId": MEMBER, "state": "owner_requested",
+          "displayName": "Berlin", "identityVersion": 3, "baseCredentialGeneration": 1}
+
+
+def berlin_expired() -> adapter.RoomBinding:
+    """Berlin as the Room left it: credential expired, disabled, local ack 3220, evidence 3221."""
+    binding = berlin()
+    binding.display_name, binding.identity_version = "Berlin", 3
+    binding.credential_expires_at = "2020-01-01T00:00:00Z"
+    binding.enabled, binding.disabled_reason = False, "credential_expired"
+    return binding
+
+
+def renewal_api(shared):
+    """The renewal routes of one fake Room; ``shared`` holds the answers and the calls."""
+
+    class API:
+        def __init__(self, _url, credential=""):
+            self.credential = credential
+
+        def identity(self):
+            ack = shared["ack_after_confirm"] if shared.get("confirmed") and "ack_after_confirm" in shared else shared["ack"]
+            return {"roomId": ROOM, "membershipId": MEMBER, "displayName": "Berlin", "identityVersion": 3,
+                    "deliveredSeq": shared.get("delivered", 3222), "acknowledgedSeq": ack,
+                    "credentialExpiresAt": "2099-01-01T00:00:00Z", "confirmBy": "2099-01-01T00:00:00Z"}
+
+        def request_credential_renewal(self, room_id, request_id, digest, *, client_instance_id=""):
+            shared["calls"].append("request")
+            if shared.get("lose_request"):
+                shared["lose_request"] = False
+                raise OSError("lost reply")
+            return self.credential_renewal_request(room_id, request_id)
+
+        def credential_renewal_request(self, room_id, request_id):
+            state = shared.get("state", "issued")
+            answer = {"roomId": ROOM, "membershipId": MEMBER, "requestId": request_id, "state": state}
+            if state != "expired":
+                answer.update(self.identity(), grantId="grant-1", baseCredentialGeneration=1)
+            return answer
+
+        def redeem_credential_renewal(self, room_id, grant_id, grant_secret, replacement):
+            shared["calls"].append("redeem")
+            shared["replacement"] = replacement
+            return self.identity()
+
+        def verify_credential_renewal(self, room_id, grant_id, replacement):
+            shared["calls"].append("verify")
+            return self.identity()
+
+        def confirm_credential_renewal(self, room_id, grant_id, replacement):
+            shared["calls"].append("confirm")
+            shared["confirmed"] = True
+            return {"id": "event-1", "type": "credential.renewed", "payload": self.identity()}
+
+        def room_state(self, room_id):
+            if not shared.get("confirmed"):
+                raise AssertionError("an expired base never reads ordinary /state")
+            shared["calls"].append("state")
+            return {"roomId": room_id, "roster": [self.identity()]}
+
+    return API
+
+
+class RenewalFixture:
+    """Berlin's state file with an owner renewal journal in phase requesting_owner (expected/protected 3220)."""
+
+    def __init__(self, binding=None, other=None):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.path = Path(self.scratch.name) / "private" / "state.json"
+        self.path.parent.mkdir(mode=0o700)
+        bindings = [binding or berlin_expired()] + ([other] if other else [])
+        state_store.save(state_store.PluginState(bindings=bindings), self.path)
+        shared = {"ack": 3222, "calls": [], "lose_request": True}
+        with self.assertRaises(OSError):
+            self.resume(shared, INTENT)
+        journal = self.binding().credential_rotation
+        assert journal["phase"] == "requesting_owner", journal
+        assert journal["expected"]["acknowledged_cursor"] == 3220
+        assert journal["protected_snapshot"]["acknowledged_cursor"] == 3220
+
+    @staticmethod
+    def assertRaises(kind):
+        return _Raises(kind)
+
+    def resume(self, shared, intent=None):
+        with mock.patch.object(cli, "RoomProtocol", renewal_api(shared)):
+            renewal.resume(self.path, ROOM, intent)
+
+    def binding(self):
+        return state_store.load(self.path).binding(ROOM)
+
+
+class _Raises:
+    def __init__(self, kind):
+        self.kind = kind
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, _traceback):
+        if kind is None or not issubclass(kind, self.kind):
+            raise AssertionError(f"expected {self.kind.__name__}, got {kind}")
+        self.exception = value
+        return True
+
+
+def maintenance_instance(path):
+    with mock.patch.object(adapter, "load", lambda *_: state_store.load(path)):
+        instance = adapter.SyntheticSocialityAdapter(adapter.PlatformConfig())
+    instance._state_file = path
+    instance._membership_active = mock.AsyncMock(return_value=True)
+    instance._watch = mock.AsyncMock()
+    return instance
+
+
+class AckAheadRenewalTests(unittest.IsolatedAsyncioTestCase):
+    def test_ack_ahead_06_an_owner_renewal_resumes_and_completes_with_the_room_ahead(self):
+        fixture = RenewalFixture()
+        shared = {"ack": 3222, "calls": []}
+        with self.assertLogs(cli.logger, level=logging.WARNING) as logs:
+            fixture.resume(shared)
+        saved = fixture.binding()
+        self.assertEqual(saved.credential_rotation, {})
+        self.assertEqual(saved.credential, shared["replacement"])
+        self.assertTrue(saved.enabled)
+        self.assertEqual(saved.acknowledged_cursor, 3222)
+        self.assertEqual(saved.terminal_evidence["3222"]["reason"], "room_ack_ahead")
+        self.assertEqual(saved.terminal_evidence["3221"], ignored(3221))
+        self.assertEqual(shared["calls"], ["request", "redeem", "verify", "confirm", "state"])
+        self.assertEqual(len([line for line in logs.output if "room_ack_ahead" in line]), 1)
+
+    def test_ack_ahead_06_a_room_behind_the_journal_is_still_a_conflict(self):
+        fixture = RenewalFixture()
+        with self.assertRaises(recovery.AckFrontierConflict) as raised:
+            fixture.resume({"ack": 3219, "calls": []})
+        self.assertEqual(raised.exception.code, "ack_frontier_mismatch")
+        self.assertRegex(str(raised.exception), "conflicts with local replay cursors")
+        self.assertEqual(fixture.binding().acknowledged_cursor, 3220)
+        self.assertEqual(fixture.binding().credential_rotation["phase"], "requesting_owner")
+
+    async def test_ack_ahead_06_maintenance_does_not_cancel_the_room_again(self):
+        fixture = RenewalFixture()
+        instance = maintenance_instance(fixture.path)
+        shared = {"ack": 3222, "calls": []}
+        target = fixture.binding()
+        with mock.patch.object(cli, "RoomProtocol", renewal_api(shared)), \
+                mock.patch.object(renewal, "discover", return_value=None) as discover:
+            await instance._maintain_renewal(target)
+            self.assertEqual(fixture.binding().credential_rotation, {})
+            self.assertNotIn(ROOM, instance._renewal_retry_after)
+            self.assertIn(ROOM, instance._tasks)  # the watch restarted on the renewed credential
+            await asyncio.gather(instance._tasks[ROOM], return_exceptions=True)
+            watcher = asyncio.create_task(asyncio.Event().wait())
+            instance._tasks[ROOM] = watcher
+            await instance._maintain_renewal(fixture.binding())
+            discover.assert_called_once()
+            self.assertFalse(watcher.done())  # no second drain: nothing left to resume
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+    def test_ack_ahead_07_an_expired_owner_intent_closes_the_journal_with_its_reason(self):
+        fixture = RenewalFixture()
+        shared = {"ack": 3222, "calls": [], "state": "expired"}
+        with self.assertRaises(renewal.RenewalClosed) as raised:
+            fixture.resume(shared)
+        self.assertEqual(raised.exception.reason, "owner_request_expired")
+        self.assertIn("new owner Renew", str(raised.exception))
+        saved = fixture.binding()
+        self.assertEqual(saved.credential_rotation, {})
+        self.assertEqual(saved.renewal_closed["reason"], "owner_request_expired")
+        self.assertEqual(saved.renewal_closed["requestId"], REQUEST_ID)
+        self.assertEqual(saved.credential, "credential")  # nothing was swapped
+        self.assertEqual(shared["calls"], ["request"])
+        # A new owner Renew starts a fresh journal and clears the closure.
+        intent = {**INTENT, "requestId": cli._new_renewal_secret()}
+        fresh = {"ack": 3222, "calls": []}
+        fixture.resume(fresh, intent)
+        self.assertEqual(fixture.binding().renewal_closed, {})
+        self.assertEqual(fixture.binding().acknowledged_cursor, 3222)
+
+    async def test_ack_ahead_07_maintenance_ends_cleanly_and_stops_draining(self):
+        fixture = RenewalFixture()
+        instance = maintenance_instance(fixture.path)
+        shared = {"ack": 3222, "calls": [], "state": "expired"}
+        with mock.patch.object(cli, "RoomProtocol", renewal_api(shared)), \
+                mock.patch.object(renewal, "discover", return_value=None):
+            with self.assertLogs(adapter.logger, level=logging.WARNING) as logs:
+                await instance._maintain_renewal(fixture.binding())
+            self.assertTrue(any("new owner Renew is needed" in line for line in logs.output))
+            self.assertEqual(fixture.binding().credential_rotation, {})
+            watcher = asyncio.create_task(asyncio.Event().wait())
+            instance._tasks[ROOM] = watcher
+            instance._renewal_retry_after.clear()
+            for _ in range(3):
+                await instance._maintain_renewal(fixture.binding())
+            self.assertFalse(watcher.done())
+            self.assertEqual(shared["calls"], ["request"])
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+
+class AckAheadSiteMatrixTests(unittest.TestCase):
+    """ROOT-CAUSE RULE (r1): every site where a Room acknowledgement meets a local cursor.
+
+    Local 3220, evidence 3221 (ignored), Room 3222: the same outcome everywhere
+    (ack 3222, 3222 ignored/room_ack_ahead, 3221 unchanged, one warning). Room
+    3219: the same conflict code everywhere, nothing changes.
+    """
+
+    def outcome(self, binding):
+        self.assertEqual(binding.acknowledged_cursor, 3222)
+        self.assertEqual(binding.terminal_evidence["3222"]["reason"], "room_ack_ahead")
+        self.assertEqual(binding.terminal_evidence["3221"], ignored(3221))
+
+    def live_ack(self, room_ack):
+        harness = Harness(berlin(), AheadRoom(lambda _seq: {"acknowledgedSeq": room_ack}))
+        harness.complete(3221)
+        return harness.binding
+
+    def reconnect(self, room_ack):
+        harness = Harness(berlin(), AheadRoom(lambda _seq: {"acknowledgedSeq": room_ack}))
+        with state_store.state_path_scope(harness.state_file):
+            asyncio.run(harness.instance._consume_locked(harness.binding, {"id": "ev3221", "seq": 3221}))
+        return harness.binding
+
+    def stuck_scan(self, room_ack):
+        harness = Harness(berlin(), AheadRoom(lambda _seq: {"acknowledgedSeq": room_ack}))
+        asyncio.run(harness.instance._apply_stuck_events(harness.binding))
+        if harness.binding.acknowledged_cursor == 3220:
+            raise recovery.AckFrontierConflict("stuck scan logged the conflict")
+        return harness.binding
+
+    def restart_load(self, room_ack):
+        harness = Harness(berlin(), AheadRoom(lambda _seq: {"acknowledgedSeq": room_ack}), persist=True)
+        harness.save()
+        loaded = Harness(harness.reload(), harness.api, harness.scratch.name, persist=True)
+        loaded.complete(3221)
+        return loaded.reload()
+
+    def renewal_preflight(self, room_ack):
+        fixture = RenewalFixture()
+        fixture.resume({"ack": room_ack, "calls": [], "state": "requested"})
+        return fixture.binding()
+
+    def renewal_active_state(self, room_ack):
+        fixture = RenewalFixture()
+        # The Room moves only after the confirm: only the active-state verify sees it.
+        fixture.resume({"ack": 3220, "ack_after_confirm": room_ack, "delivered": 3222, "calls": []})
+        return fixture.binding()
+
+    SITES = ("live_ack", "reconnect", "renewal_preflight", "renewal_active_state", "stuck_scan", "restart_load")
+
+    def test_every_site_adopts_a_room_ahead_the_same_way(self):
+        for site in self.SITES:
+            with self.subTest(site=site):
+                self.outcome(getattr(self, site)(3222))
+
+    def test_every_site_reports_a_room_behind_as_the_one_conflict(self):
+        for site in self.SITES:
+            with self.subTest(site=site):
+                with self.assertRaises(Exception) as raised:
+                    getattr(self, site)(3219)
+                self.assertEqual(getattr(raised.exception, "code", ""), "ack_frontier_mismatch", site)
 
 if __name__ == "__main__":
     unittest.main()
