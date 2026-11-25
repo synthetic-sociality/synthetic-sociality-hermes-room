@@ -52,6 +52,13 @@ def base_expired(binding: RoomBinding, now: float | None = None) -> bool:
             or (bool(rotation) and _passed(rotation.get("base_credential_expires_at"), now)))
 
 
+def can_inspect_parked(binding: RoomBinding) -> bool:
+    journal = binding.credential_rotation or {}
+    return bool(eligible(binding) and journal.get("owner_initiated")
+                and journal.get("phase") in {"requesting_owner", "prepared"}
+                and journal.get("request_id") and journal.get("protected_snapshot"))
+
+
 def can_start(binding: RoomBinding) -> bool:
     """Start a watcher only after rotation settles and the retained base is usable."""
     return (binding.enabled and not binding.revoked and not binding.credential_rotation
@@ -100,3 +107,16 @@ def resume(path: Path, room_id: str, intent: dict | None) -> None:
         if intent is None and not binding.credential_rotation.get("owner_initiated"):
             raise ValueError("no owner-initiated renewal to resume")
         _renew(room_id, request_owner=bool(intent), owner_intent=intent, report=lambda _text: None)
+
+def inspect_parked(path: Path, expected: RoomBinding) -> None:
+    """Inspect an owner request when frozen work cannot drain under a parked watcher."""
+    from .cli import _inspect_parked_renewal
+    from .state import binding_renewal_lock
+
+    with state_path_scope(path), binding_renewal_lock(expected.room_id):
+        binding = load().binding(expected.room_id)
+        if (binding is None or not can_inspect_parked(binding)
+                or binding.credential_rotation != expected.credential_rotation
+                or binding.credential != expected.credential):
+            return
+        _inspect_parked_renewal(binding)

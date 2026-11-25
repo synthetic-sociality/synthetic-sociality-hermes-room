@@ -218,16 +218,20 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
                                            connector_session_id="networks-online")
         original_networks = asdict(networks)
         fake_events, posted_requests = {}, []
-        class DeliveryRoom:
+        unavailable = True
+        class DeliveryRoom(live("protocol").RoomProtocol):
             def room_state(api, room_id):
                 return {"headSeq": 3224, "activeEpoch": {"id": "epoch-1"}}
 
-            def post_message(api, *args, **kwargs):
-                self.assertEqual(args[0], ROOM)
-                frozen = (args, kwargs)
+            def room_policy(api, room_id):
+                return {"coordinationMode": "open"}
+
+            def request(api, method, path, payload=None):
+                self.assertEqual((method, path), ("POST", f"/rooms/{ROOM}/messages"))
+                frozen = copy.deepcopy(payload)
                 posted_requests.append(frozen)
-                key = kwargs["idempotency_key"]
-                if len(posted_requests) == 1:
+                key = payload["idempotencyKey"]
+                if unavailable:
                     if already_committed:
                         fake_events[key] = frozen
                     raise adapter.ProtocolError("lost reply", retryable=True)
@@ -236,7 +240,7 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
                 fake_events[key] = frozen
                 return {"id":"canonical-ds-3225", "seq":3225, "ts":"2026-11-25T09:00:00Z"}
 
-        room = DeliveryRoom()
+        room = DeliveryRoom(ds.base_url)
         def sender(binding):
             runtime = configured_instance(binding, None, [])
             runtime._event_seq[ROOM]["evt-5"] = 3224
@@ -250,6 +254,12 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first.success)
         self.assertEqual(ds.delivery_intents["evt-5"]["delivery_state"], "delivery_pending")
         self.assertFalse(adapter.renewal.quiescent(ds, for_renewal=True))
+        # An older selected intent in the protection snapshot may already
+        # carry newer receipt/retry evidence by the time the journal closes.
+        if already_committed:
+            earlier = copy.deepcopy(ds.delivery_intents["evt-5"])
+            earlier["state"] = earlier["delivery_state"] = "selected"
+            ds.credential_rotation["protected_snapshot"]["delivery_intents"]["evt-5"] = earlier
         state_store.save(state_store.PluginState(bindings=[ds, networks]), self.path)
         before = asdict(self.binding())
 
@@ -277,13 +287,44 @@ class RenewStaleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(asdict(state_store.load(self.path).binding(networks.room_id)), original_networks)
         # Retry from disk uses the already selected payload and key, even if a
         # new caller supplies different content. A canonical receipt ends replay.
+        unavailable = False
         runtime = sender(recovered)
-        second = await runtime._send_final(ROOM, source, "Different regenerated text")
-        self.assertTrue(second.success, second.error)
+        runtime._persist_binding = adapter.SyntheticSocialityAdapter._persist_binding.__get__(runtime)
+        with state_store.state_path_scope(self.path):
+            second = await runtime._send_final(ROOM, source, "Different regenerated text")
+        self.assertTrue(second.success, getattr(second, "error", None))
         self.assertEqual(second.message_id, "canonical-ds-3225")
-        self.assertEqual(posted_requests[0], posted_requests[1])
+        self.assertGreaterEqual(len(posted_requests), 2)
+        self.assertTrue(all(request == posted_requests[0] for request in posted_requests))
         self.assertEqual(len(fake_events), 1)
-        self.assertEqual(recovered.delivery_intents["evt-5"]["canonical_event"]["id"], second.message_id)
+        self.assertEqual(self.binding().delivery_intents["evt-5"]["canonical_event"]["id"], second.message_id)
+        before_replay = len(posted_requests)
+        with state_store.state_path_scope(self.path), self.assertNoLogs(adapter.logger, "ERROR"):
+            after_restart = await sender(self.binding())._send_final(ROOM, source, "Another caller")
+        self.assertTrue(after_restart.success)
+        self.assertEqual(len(posted_requests), before_replay)
+        self.assertEqual(asdict(state_store.load(self.path).binding(networks.room_id)), original_networks)
+
+    async def test_parked_nonterminal_request_or_changed_membership_cannot_exchange(self):
+        ds = self.binding()
+        ds.inbox["3224"] = "pending"
+        state_store.save(state_store.PluginState(bindings=[ds]), self.path)
+        original = asdict(ds)
+        request = {"roomId": ROOM, "membershipId": ds.membership_id,
+                   "requestId": ds.credential_rotation["request_id"], "state": "issued"}
+        with mock.patch.object(self.api, "credential_renewal_request", return_value=request) as get, \
+                mock.patch.object(self.api, "request_credential_renewal") as claim, \
+                mock.patch.object(self.api, "redeem_credential_renewal") as redeem:
+            await self.maintain()
+            self.assertEqual(asdict(self.binding()), original)
+            self.instance._renewal_retry_after.clear()
+            get.return_value = {**request, "membershipId": "different-membership", "state": "expired"}
+            await self.maintain()
+            self.assertEqual(asdict(self.binding()), original)
+            self.assertEqual(get.call_count, 2)
+            claim.assert_not_called()
+            redeem.assert_not_called()
+        self.instance._watch.assert_not_awaited()
 
     @staticmethod
     async def _cancel_task(task):

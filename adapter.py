@@ -3325,10 +3325,13 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
                 completion: dict[str, Any] | None = None
                 if existing_receipt:
                     journal = binding.delivery_lifecycle.get(source_id) or {}
-                    persisted_completion = journal.get("completion")
-                    if journal.get("delivery_state") != "posted" or not isinstance(persisted_completion, dict):
-                        raise ValueError("canonical delivery is missing its persisted lifecycle request")
-                    completion = copy.deepcopy(persisted_completion) or None
+                    # A completed receipt survives longer than its settled
+                    # lifecycle journal. It is already safe to return on replay.
+                    if journal or intent.get("lifecycle_state") != "complete":
+                        persisted_completion = journal.get("completion")
+                        if journal.get("delivery_state") != "posted" or not isinstance(persisted_completion, dict):
+                            raise ValueError("canonical delivery is missing its persisted lifecycle request")
+                        completion = copy.deepcopy(persisted_completion) or None
                 elif cycle_payload.get("cycle_id") and cycle_payload.get("attempt_id"):
                     completion = {
                         "kind": "cycle",
@@ -4802,7 +4805,10 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
         try:
             if not await self._membership_active(binding):
                 return
-            if room_id in self._active_dispatch_rooms or not renewal.quiescent(binding, for_renewal=True):
+            if room_id in self._active_dispatch_rooms:
+                return
+            inspect_only = not renewal.quiescent(binding, for_renewal=True)
+            if inspect_only and (room_id in self._tasks or not renewal.can_inspect_parked(binding)):
                 return
             intent = None
             if not binding.credential_rotation:
@@ -4825,11 +4831,17 @@ class SyntheticSocialityAdapter(BasePlatformAdapter):
             receive_lock = self._receive_locks.setdefault(room_id, asyncio.Lock())
             async with receive_lock:
                 latest = load(self._state_file).binding(room_id)
-                if (latest is None or not renewal.eligible(latest) or not renewal.quiescent(latest, for_renewal=True)
+                if (latest is None or not renewal.eligible(latest)
                         or room_id in self._active_dispatch_rooms
                         or not self._same_generation(latest, binding)):
                     return
-                worker = asyncio.create_task(asyncio.to_thread(renewal.resume, self._state_file, room_id, intent))
+                if inspect_only:
+                    work = asyncio.to_thread(renewal.inspect_parked, self._state_file, latest)
+                elif renewal.quiescent(latest, for_renewal=True):
+                    work = asyncio.to_thread(renewal.resume, self._state_file, room_id, intent)
+                else:
+                    return
+                worker = asyncio.create_task(work)
                 try:
                     await asyncio.shield(worker)
                 except asyncio.CancelledError:
