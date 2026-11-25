@@ -385,6 +385,12 @@
     "ACK-AHEAD-06 renewal_resumes",
     "ACK-AHEAD-07 expired_intent_ends_cleanly"
   ],
+  "parityP2c3kCases": [
+    "RENEW-STALE-01 grant_expired",
+    "RENEW-STALE-02 fresh_intent",
+    "RENEW-STALE-03 rejected_or_not_found",
+    "RENEW-STALE-04 retryable_failure"
+  ],
   "parityP2c3jCases": [
     "RENEW-INFLIGHT-01 delivery_pending",
     "RENEW-INFLIGHT-02 lifecycle_blocked",
@@ -1450,7 +1456,7 @@
     "L1": "94a5809aa1b1a9121404e15769e69487d5919efb641a8b0c358ba1793dc3842c",
     "P5": "4e7272530192d00478b842d4d1c8559530f39b76e0e0c026e738f740422e5a87",
     "P6": "3b79968d551d2613256a90c52c87ca6a18d93ff5337fc73f128b1654715d9e3a",
-    "P2c": "d2f23edeac1ed6f41298845e72470f4c973bf9fe52b84b228bc2bb09ee1cb14f",
+    "P2c": "f5f9a91f0ba86644363808f18ba4cd8a9c646a47b2086402790e03b4d9102479",
     "Appendix": "3184213bcf7df5a6c9d01602e1ff48d36584f447ad2a09bcf3307b2bf89d2315",
     "P7c": "4919916e3f97e48c9f1e39f6e990eeba4ea80ee11e40e894396664a8445441cc",
     "P7d": "a6f2bfb6f38ab2e01cb0879bc8d7f576cf83c87b31cbe14dbb7468237d9b3c44",
@@ -1774,5 +1780,5 @@
   "statusReadinessCases": [
     "STATUS-01 status.json carries every updater readiness field with the shared names and types"
   ],
-  "contractSha256": "2cf69145329266892655ef17bf57c2d5602b0ef865f6a4a54380528f4b358ed6"
+  "contractSha256": "72b82abd7ce49b5d55b1a68ffafdd3c8c8d3bbb66f55e3fc1e150f7d4329a7fe"
 }
